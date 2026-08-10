@@ -4904,8 +4904,10 @@ func (c *Client) GetAPIV1UsageSummaryStreamStreamWithResponse(ctx context.Contex
 	queryEncoding := map[string]runtime.QueryEncoding{
 		"active_since":        {Style: "form", Explode: &[]bool{false}[0]},
 		"agent":               {Style: "form", Explode: &[]bool{false}[0]},
+		"branch_breakdowns":   {Style: "form", Explode: &[]bool{false}[0]},
 		"breakdowns":          {Style: "form", Explode: &[]bool{false}[0]},
 		"exclude_agent":       {Style: "form", Explode: &[]bool{false}[0]},
+		"exclude_git_branch":  {Style: "form", Explode: &[]bool{false}[0]},
 		"exclude_model":       {Style: "form", Explode: &[]bool{false}[0]},
 		"exclude_project":     {Style: "form", Explode: &[]bool{false}[0]},
 		"exclude_project_key": {Style: "form", Explode: &[]bool{false}[0]},
@@ -18774,7 +18776,7 @@ type GetAPIV1ActivityReportQuery struct {
 	// Project Filter by project
 	Project *string `json:"project,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
 
 	// Agent Filter by agent
@@ -18901,7 +18903,7 @@ type GetAPIV1AnalyticsSignalSessionsQuery struct {
 	// Project Filter by project
 	Project *string `json:"project,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
 
 	// Agent Filter by agent
@@ -19014,7 +19016,7 @@ type GetAPIV1AnalyticsSignalsQuery struct {
 	// Project Filter by project
 	Project *string `json:"project,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
 
 	// Agent Filter by agent
@@ -19108,7 +19110,7 @@ type GetAPIV1AnalyticsToolsQuery struct {
 	// Project Filter by project
 	Project *string `json:"project,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
 
 	// Agent Filter by agent
@@ -19379,7 +19381,7 @@ type GetAPIV1SearchContentQuery struct {
 	// Machine Exact machine ID or alias, comma-separated IDs or aliases, or a unique whole display label (case-sensitive). Blank means all machines; unknown or ambiguous values return HTTP 400.
 	Machine *string `json:"machine,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
 
 	// SessionID Filter by exact full stored session ID
@@ -19644,7 +19646,7 @@ type GetAPIV1SessionsQuery struct {
 	// Machine Exact machine ID or alias, comma-separated IDs or aliases, or a unique whole display label (case-sensitive). Blank means all machines; unknown or ambiguous values return HTTP 400.
 	Machine *string `json:"machine,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
 
 	// Agent Filter by agent
@@ -19893,8 +19895,11 @@ type GetAPIV1UsagePairwiseComparisonQuery struct {
 	// Machine Exact machine ID or alias, comma-separated IDs or aliases, or a unique whole display label (case-sensitive). Blank means all machines; unknown or ambiguous values return HTTP 400.
 	Machine *string `json:"machine,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
+
+	// ExcludeGitBranch Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
+	ExcludeGitBranch *string `json:"exclude_git_branch,omitempty"`
 
 	// ExcludeProject Exclude a project
 	ExcludeProject *string `json:"exclude_project,omitempty"`
@@ -19931,6 +19936,9 @@ type GetAPIV1UsagePairwiseComparisonQuery struct {
 
 	// Breakdowns Include per-model, per-project, and per-agent breakdowns
 	Breakdowns *bool `json:"breakdowns,omitempty"`
+
+	// BranchBreakdowns Include per-project branch breakdowns
+	BranchBreakdowns *bool `json:"branch_breakdowns,omitempty"`
 
 	// SessionCounts Include distinct session counts
 	SessionCounts *bool `json:"session_counts,omitempty"`
@@ -20003,8 +20011,11 @@ type GetAPIV1UsageSummaryQuery struct {
 	// Machine Exact machine ID or alias, comma-separated IDs or aliases, or a unique whole display label (case-sensitive). Blank means all machines; unknown or ambiguous values return HTTP 400.
 	Machine *string `json:"machine,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
+
+	// ExcludeGitBranch Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
+	ExcludeGitBranch *string `json:"exclude_git_branch,omitempty"`
 
 	// ExcludeProject Exclude a project
 	ExcludeProject *string `json:"exclude_project,omitempty"`
@@ -20041,6 +20052,9 @@ type GetAPIV1UsageSummaryQuery struct {
 
 	// Breakdowns Include per-model, per-project, and per-agent breakdowns
 	Breakdowns *bool `json:"breakdowns,omitempty"`
+
+	// BranchBreakdowns Include per-project branch breakdowns
+	BranchBreakdowns *bool `json:"branch_breakdowns,omitempty"`
 
 	// SessionCounts Include distinct session counts
 	SessionCounts *bool `json:"session_counts,omitempty"`
@@ -20098,8 +20112,11 @@ type GetAPIV1UsageSummaryStreamQuery struct {
 	// Machine Exact machine ID or alias, comma-separated IDs or aliases, or a unique whole display label (case-sensitive). Blank means all machines; unknown or ambiguous values return HTTP 400.
 	Machine *string `json:"machine,omitempty"`
 
-	// GitBranch Filter by git branch; opaque (project, branch) tokens from the /branches endpoint
+	// GitBranch Filter by branch name; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	GitBranch *string `json:"git_branch,omitempty"`
+
+	// ExcludeGitBranch Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
+	ExcludeGitBranch *string `json:"exclude_git_branch,omitempty"`
 
 	// ExcludeProject Exclude a project
 	ExcludeProject *string `json:"exclude_project,omitempty"`
@@ -20136,6 +20153,9 @@ type GetAPIV1UsageSummaryStreamQuery struct {
 
 	// Breakdowns Include per-model, per-project, and per-agent breakdowns
 	Breakdowns *bool `json:"breakdowns,omitempty"`
+
+	// BranchBreakdowns Include per-project branch breakdowns
+	BranchBreakdowns *bool `json:"branch_breakdowns,omitempty"`
 
 	// SessionCounts Include distinct session counts
 	SessionCounts *bool `json:"session_counts,omitempty"`
@@ -22741,6 +22761,57 @@ type GetAPIV1VersionResp struct {
 	JSON504      *GetAPIV1VersionErrorResponseJSON504
 }
 
+type ActivityBranchKeyMinutes struct {
+	AgentMinutes            float64    `json:"agent_minutes"`
+	AutomatedAgentMinutes   float64    `json:"automated_agent_minutes"`
+	AutomatedCost           MoneyMoney `json:"automated_cost"`
+	Branch                  string     `json:"branch" validate:"required"`
+	Cost                    MoneyMoney `json:"cost"`
+	InteractiveAgentMinutes float64    `json:"interactive_agent_minutes"`
+	InteractiveCost         MoneyMoney `json:"interactive_cost"`
+	Project                 string     `json:"project" validate:"required"`
+	ProjectKey              string     `json:"project_key" validate:"required"`
+	SubagentAgentMinutes    float64    `json:"subagent_agent_minutes"`
+	SubagentCost            MoneyMoney `json:"subagent_cost"`
+}
+
+func (a ActivityBranchKeyMinutes) Validate() error {
+	var errors runtime.ValidationErrors
+	if v, ok := any(a.AutomatedCost).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("AutomatedCost", err)
+		}
+	}
+	if err := typesValidator.Var(a.Branch, "required"); err != nil {
+		errors = errors.Append("Branch", err)
+	}
+	if v, ok := any(a.Cost).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Cost", err)
+		}
+	}
+	if v, ok := any(a.InteractiveCost).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("InteractiveCost", err)
+		}
+	}
+	if err := typesValidator.Var(a.Project, "required"); err != nil {
+		errors = errors.Append("Project", err)
+	}
+	if err := typesValidator.Var(a.ProjectKey, "required"); err != nil {
+		errors = errors.Append("ProjectKey", err)
+	}
+	if v, ok := any(a.SubagentCost).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("SubagentCost", err)
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
 type ActivityBucket struct {
 	AgentMinutes         float64    `json:"agent_minutes"`
 	AssistantMessages    int64      `json:"assistant_messages"`
@@ -22964,6 +23035,39 @@ func (a ArtifactSyncResult) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(a))
 }
 
+type BranchTotal struct {
+	Branch              string     `json:"branch" validate:"required"`
+	CacheCreationTokens int64      `json:"cacheCreationTokens"`
+	CacheReadTokens     int64      `json:"cacheReadTokens"`
+	Cost                MoneyMoney `json:"cost"`
+	InputTokens         int64      `json:"inputTokens"`
+	OutputTokens        int64      `json:"outputTokens"`
+	Project             string     `json:"project" validate:"required"`
+	ProjectKey          string     `json:"project_key" validate:"required"`
+}
+
+func (b BranchTotal) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(b.Branch, "required"); err != nil {
+		errors = errors.Append("Branch", err)
+	}
+	if v, ok := any(b.Cost).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Cost", err)
+		}
+	}
+	if err := typesValidator.Var(b.Project, "required"); err != nil {
+		errors = errors.Append("Project", err)
+	}
+	if err := typesValidator.Var(b.ProjectKey, "required"); err != nil {
+		errors = errors.Append("ProjectKey", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
 type CacheStats = service.CacheStats
 
 type CodexcloudHomeStatus struct {
@@ -23139,6 +23243,39 @@ func (d DBAgentBreakdown) Validate() error {
 		if err := v.Validate(); err != nil {
 			errors = errors.Append("Cost", err)
 		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type DBBranchBreakdown struct {
+	Branch              string     `json:"branch" validate:"required"`
+	CacheCreationTokens int64      `json:"cacheCreationTokens"`
+	CacheReadTokens     int64      `json:"cacheReadTokens"`
+	Cost                MoneyMoney `json:"cost"`
+	InputTokens         int64      `json:"inputTokens"`
+	OutputTokens        int64      `json:"outputTokens"`
+	Project             string     `json:"project" validate:"required"`
+	ProjectKey          string     `json:"project_key" validate:"required"`
+}
+
+func (d DBBranchBreakdown) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(d.Branch, "required"); err != nil {
+		errors = errors.Append("Branch", err)
+	}
+	if v, ok := any(d.Cost).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Cost", err)
+		}
+	}
+	if err := typesValidator.Var(d.Project, "required"); err != nil {
+		errors = errors.Append("Project", err)
+	}
+	if err := typesValidator.Var(d.ProjectKey, "required"); err != nil {
+		errors = errors.Append("ProjectKey", err)
 	}
 	if len(errors) == 0 {
 		return nil
@@ -25630,6 +25767,7 @@ type UpdateSessionLabelsInputBody struct {
 
 type UsageSummaryResponse struct {
 	AgentTotals            []AgentTotal                     `json:"agentTotals" validate:"required"`
+	BranchTotals           []BranchTotal                    `json:"branchTotals" validate:"required"`
 	CacheStats             CacheStats                       `json:"cacheStats"`
 	Comparison             *Comparison                      `json:"comparison,omitempty"`
 	Daily                  []DBDailyUsageEntry              `json:"daily" validate:"required"`
@@ -25654,6 +25792,13 @@ func (u UsageSummaryResponse) Validate() error {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
 				errors = errors.Append(fmt.Sprintf("AgentTotals[%d]", i), err)
+			}
+		}
+	}
+	for i, item := range u.BranchTotals {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("BranchTotals[%d]", i), err)
 			}
 		}
 	}

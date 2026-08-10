@@ -14,6 +14,14 @@ import { sessions } from "./sessions.svelte.js";
 import { perf, type PerfEntryStatus } from "./perf.svelte.js";
 import { rollingRange, today } from "../utils/dates.js";
 import { ALL_TOKEN_TYPES, canonicalTokenTypes, type UsageTokenType } from "./usageTokenTypes.js";
+import {
+  BRANCH_LIST_SEP,
+  NO_BRANCH_MATCH_TOKEN,
+  branchFilterValuesEqual,
+  intersectBranchFilterValues,
+  portableBranchFilterValues,
+  scopeBranchFilterValues,
+} from "../branchFilters.js";
 
 type UsageParams = NonNullable<Parameters<typeof UsageService.getApiV1UsageSummary>[0]>;
 type UsagePairwiseParams = Parameters<typeof UsageService.getApiV1UsagePairwiseComparison>[0];
@@ -59,7 +67,7 @@ export interface UsageProjectFilterItem {
   count?: number;
 }
 
-export type GroupBy = "project" | "model" | "agent";
+export type GroupBy = "project" | "model" | "agent" | "branch";
 export type TimeSeriesView = "smooth" | "lines" | "bars";
 export type AttributionView = "treemap" | "list" | "bars";
 
@@ -78,7 +86,7 @@ function defaultToggles(): Toggles {
 }
 
 function isGroupBy(value: unknown): value is GroupBy {
-  return value === "project" || value === "model" || value === "agent";
+  return value === "project" || value === "model" || value === "agent" || value === "branch";
 }
 
 function isTimeSeriesView(value: unknown): value is TimeSeriesView {
@@ -143,6 +151,7 @@ export interface UsageFilterState {
   excludedProjects: string;
   excludedProjectKeys?: string;
   excludedAgents: string;
+  selectedGitBranch: string;
   excludedModels: string;
 }
 
@@ -150,11 +159,16 @@ function loadUsageFilters(): UsageFilterState {
   try {
     const raw = localStorage.getItem(USAGE_FILTERS_KEY);
     if (raw) {
+      // Saved excludedGitBranch exclusion lists from the retired
+      // exclude-mode branch filter are dropped: an exclusion set cannot
+      // be mapped onto an include selection, so those views reset to
+      // "all branches".
       const saved = JSON.parse(raw) as Partial<UsageFilterState>;
       return {
         excludedProjects: saved.excludedProjects ?? "",
         excludedProjectKeys: "",
         excludedAgents: saved.excludedAgents ?? "",
+        selectedGitBranch: saved.selectedGitBranch ?? "",
         excludedModels: saved.excludedModels ?? "",
       };
     }
@@ -165,6 +179,7 @@ function loadUsageFilters(): UsageFilterState {
     excludedProjects: "",
     excludedProjectKeys: "",
     excludedAgents: "",
+    selectedGitBranch: "",
     excludedModels: "",
   };
 }
@@ -174,6 +189,7 @@ function saveUsageFilters(f: UsageFilterState): void {
     const data: UsageFilterState = {
       excludedProjects: f.excludedProjects,
       excludedAgents: f.excludedAgents,
+      selectedGitBranch: f.selectedGitBranch,
       excludedModels: f.excludedModels,
     };
     localStorage.setItem(USAGE_FILTERS_KEY, JSON.stringify(data));
@@ -359,10 +375,14 @@ class UsageStore {
   selectedTokenTypes: UsageTokenType[] = $state([...ALL_TOKEN_TYPES]);
   selectedTimeRange: { from: string; to: string } | null = $state(null);
 
-  // Picker exclusions persist across tab switches.
+  // Picker exclusions and the included branch list persist across tab
+  // switches. Branch selection is include-based: an exclusion complement
+  // would grow with the branch catalog (deselect-all over thousands of
+  // (project, branch) pairs) instead of with the user's selection.
   excludedProjects: string = $state("");
   excludedProjectKeys: string = $state("");
   excludedAgents: string = $state("");
+  selectedGitBranch: string = $state("");
   excludedModels: string = $state("");
   knownProjects: UsageProjectFilterItem[] = $state([]);
 
@@ -371,6 +391,7 @@ class UsageStore {
     this.excludedProjects = saved.excludedProjects;
     this.excludedProjectKeys = saved.excludedProjectKeys ?? "";
     this.excludedAgents = saved.excludedAgents;
+    this.selectedGitBranch = saved.selectedGitBranch;
     this.excludedModels = saved.excludedModels;
   }
 
@@ -387,6 +408,9 @@ class UsageStore {
   private fullWindowPending = false;
   isTimeRangeSummaryProvisional = $state(false);
   pairwiseComparison = $state<ServiceUsagePairwiseComparisonResponse | null>(null);
+  private summaryHasBranchBreakdowns = $state(false);
+  private branchBreakdownSummaryVersion = 0;
+  private branchBreakdownRequestVersion = 0;
   pairwiseSelection = $state<UsagePairwiseSelection>(emptyPairwiseSelection());
   private zoomed = $state(false);
 
@@ -477,6 +501,7 @@ class UsageStore {
       timezone: this.timezone,
       project: sessionFilters.project || undefined,
       machine: sessionFilters.machine || undefined,
+      git_branch: this.effectiveGitBranch(sessionFilters.branch),
       agent: sessionFilters.agent || undefined,
       termination: sessionFilters.termination || undefined,
       min_user_messages:
@@ -486,6 +511,7 @@ class UsageStore {
       active_since: sessionFilters.recentlyActive
         ? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
         : undefined,
+      branch_breakdowns: this.toggles.attribution.groupBy === "branch" ? true : undefined,
     };
     if (sessionFilters.hideUnknownProject && sessionFilters.project !== "unknown") {
       p.exclude_project = joinCsvParts(this.excludedProjects, "unknown");
@@ -512,6 +538,9 @@ class UsageStore {
     const params = this.baseParams();
     if (by === "project") delete params.project_key;
     else if (by === "model") delete params.model;
+    // The sidebar branch filter still scopes the panel; only the usage
+    // page's own branch selection is lifted.
+    else if (by === "branch") params.git_branch = sessions.filters.branch || undefined;
     else delete params.agent;
     return params;
   }
@@ -525,6 +554,31 @@ class UsageStore {
   // selection, or failing to refresh after clearing, keeps them still too.
   get colorSummary(): UsageSummaryResponse | null {
     return this.referenceSummary ?? this.timeSeriesSummary;
+  }
+
+  // Plain branch names apply within the separately supplied project scope.
+  // Legacy project-pair tokens remain valid for stored URLs; only conflicting
+  // legacy pairs are dropped when a project is pinned.
+  private projectScopedLocalBranch(): string {
+    const local = this.selectedGitBranch;
+    if (!local) return local;
+    return scopeBranchFilterValues(local.split(BRANCH_LIST_SEP), sessions.filters.project).join(
+      BRANCH_LIST_SEP,
+    );
+  }
+
+  // The sidebar branch filter and the usage page's own selection are both
+  // include lists but share one git_branch API param, so AND them by branch
+  // name. This lets new plain names interoperate with legacy project-pair URLs.
+  private effectiveGitBranch(sidebarBranch: string): string | undefined {
+    const local = this.projectScopedLocalBranch();
+    if (!sidebarBranch) return local || undefined;
+    if (!local) return sidebarBranch;
+    const both = intersectBranchFilterValues(
+      local.split(BRANCH_LIST_SEP),
+      sidebarBranch.split(BRANCH_LIST_SEP),
+    );
+    return both.length > 0 ? both.join(BRANCH_LIST_SEP) : NO_BRANCH_MATCH_TOKEN;
   }
 
   get pairwiseModelOptions(): string[] {
@@ -700,6 +754,7 @@ class UsageStore {
   }
 
   isSelected(by: GroupBy, id: string): boolean {
+    if (by === "branch") return this.isBranchSelected(id);
     return by === "agent"
       ? sessions.isAgentSelected(id)
       : (by === "project"
@@ -708,6 +763,7 @@ class UsageStore {
   }
 
   hasSelection(by: GroupBy): boolean {
+    if (by === "branch") return this.selectedGitBranch !== "";
     return (
       (by === "agent"
         ? sessions.filters.agent
@@ -722,7 +778,8 @@ class UsageStore {
       sessions.filters.agent = "";
       return;
     }
-    if (by === "project") {
+    if (by === "branch") this.selectedGitBranch = "";
+    else if (by === "project") {
       this.selectedProjectKey = "";
       this.backToProjects();
     } else this.selectedModel = "";
@@ -730,6 +787,10 @@ class UsageStore {
   }
 
   toggleSelection(by: GroupBy, id: string): void {
+    if (by === "branch") {
+      this.toggleBranch(id, { preserveTimeRange: true });
+      return;
+    }
     const clear = this.isSelected(by, id);
     if (by === "agent") {
       sessions.filters.agent = clear
@@ -820,6 +881,27 @@ class UsageStore {
     });
   }
 
+  toggleBranch(value: string, options: { preserveTimeRange?: boolean } = {}): void {
+    const previous = this.selectedGitBranch;
+    const hadSelectedTimeRange = options.preserveTimeRange && this.selectedTimeRange !== null;
+    const current = this.selectedGitBranch ? this.selectedGitBranch.split(BRANCH_LIST_SEP) : [];
+    this.selectedGitBranch = current.some((selected) => branchFilterValuesEqual(selected, value))
+      ? current
+          .filter((selected) => !branchFilterValuesEqual(selected, value))
+          .join(BRANCH_LIST_SEP)
+      : [...current, value].join(BRANCH_LIST_SEP);
+    if (!options.preserveTimeRange) {
+      void this.fetchAll();
+      return;
+    }
+    const changed = this.selectedGitBranch;
+    void this.fetchAllWithResult(options).then((result) => {
+      if (result !== "error" || !hadSelectedTimeRange || this.selectedGitBranch !== changed) return;
+      this.selectedGitBranch = previous;
+      void this.fetchAll({ preserveTimeRange: true });
+    });
+  }
+
   private toggleCsv(csv: string, name: string): string {
     const current = csv ? csv.split(",") : [];
     const idx = current.indexOf(name);
@@ -853,6 +935,13 @@ class UsageStore {
     return this.excludedModels.split(",").includes(name);
   }
 
+  isBranchSelected(value: string): boolean {
+    if (!this.selectedGitBranch) return false;
+    return this.selectedGitBranch
+      .split(BRANCH_LIST_SEP)
+      .some((selected) => branchFilterValuesEqual(selected, value));
+  }
+
   selectAllProjects(): void {
     this.excludedProjects = "";
     this.excludedProjectKeys = "";
@@ -878,6 +967,11 @@ class UsageStore {
     void this.fetchAll();
   }
 
+  selectAllBranches(): void {
+    this.selectedGitBranch = "";
+    void this.fetchAll();
+  }
+
   selectAllModels(): void {
     this.excludedModels = "";
     void this.fetchAll();
@@ -895,6 +989,7 @@ class UsageStore {
     this.excludedProjects = "";
     this.excludedProjectKeys = "";
     this.excludedAgents = "";
+    this.selectedGitBranch = "";
     this.excludedModels = "";
     if (refresh) void this.fetchAll();
   }
@@ -906,6 +1001,7 @@ class UsageStore {
       this.excludedProjects !== "" ||
       this.excludedProjectKeys !== "" ||
       this.excludedAgents !== "" ||
+      this.selectedGitBranch !== "" ||
       this.excludedModels !== ""
     );
   }
@@ -965,6 +1061,7 @@ class UsageStore {
     this.backToProjects();
     if (this.hasSelection(previous) || this.hasSelection(g))
       void this.fetchAll({ preserveTimeRange: true });
+    else if (g === "branch") void this.ensureBranchBreakdowns();
   }
 
   setAttributionView(v: AttributionView) {
@@ -1177,7 +1274,19 @@ class UsageStore {
         ]);
       }
       if (this.versions.summary === v) {
-        this.summary = data;
+        const responseHasBranchBreakdowns = params.branch_breakdowns === true;
+        const preserveRichSummary =
+          !responseHasBranchBreakdowns &&
+          this.toggles.attribution.groupBy === "branch" &&
+          this.summaryHasBranchBreakdowns &&
+          this.branchBreakdownSummaryVersion === v &&
+          this.summary !== null;
+        const currentSummary = preserveRichSummary ? this.summary! : data;
+        if (!preserveRichSummary) {
+          this.summary = data;
+          this.summaryHasBranchBreakdowns = responseHasBranchBreakdowns;
+          this.branchBreakdownSummaryVersion = responseHasBranchBreakdowns ? v : 0;
+        }
         this.summarySelection = selectionKey(params);
         if (contextData !== null || this.selectedTimeRange === null) this.fullWindowPending = false;
         this.attributionSummary = attributionData;
@@ -1220,12 +1329,15 @@ class UsageStore {
         this.errors.summary = null;
         const loaded = {
           version: v,
-          summary: data,
+          summary: currentSummary,
           params,
           projectScopeRecovered: false,
         };
+        if (!responseHasBranchBreakdowns && this.toggles.attribution.groupBy === "branch") {
+          void this.ensureBranchBreakdowns();
+        }
         if (loadComparison) {
-          void this.fetchComparison(v, data, params);
+          void this.fetchComparison(v, currentSummary, params);
           void this.fetchPairwise(params, this.pairwiseSelectionUnavailable());
         }
         return loaded;
@@ -1237,18 +1349,31 @@ class UsageStore {
         return null;
       }
       status = "error";
+      const portableGitBranch = portableBranchFilterValues(
+        this.selectedGitBranch ? this.selectedGitBranch.split(BRANCH_LIST_SEP) : [],
+      ).join(BRANCH_LIST_SEP);
+      const hasExcludedProjectKeys =
+        this.excludedProjectKeys !== "" || this.selectedProjectKey !== "";
+      const hasOpaqueBranchKeys = portableGitBranch !== this.selectedGitBranch;
       if (
         recoverProjectScope &&
         this.versions.summary === v &&
-        (this.excludedProjectKeys !== "" || this.selectedProjectKey !== "") &&
+        (hasExcludedProjectKeys || hasOpaqueBranchKeys) &&
         isUnknownProjectKeyError(e)
       ) {
+        // The API intentionally does not reveal which opaque key failed.
+        // Preserve branch precision by clearing excluded project keys first;
+        // downgrade branch keys only if a retry proves they are stale too.
         this.excludedProjectKeys = "";
         if (this.selectedProjectKey) {
           this.selectedProjectKey = "";
           this.backToProjects();
         }
         this.invalidatePanel("pairwise");
+        if (!hasExcludedProjectKeys) {
+          this.selectedGitBranch = portableGitBranch;
+        }
+        saveUsageFilters(this);
         this.abortPanel("topSessions");
         const recoveredParams = this.baseParams();
         const loaded = await this.fetchSummary({
@@ -1261,7 +1386,7 @@ class UsageStore {
                 to: options.contextParams.to,
               }
             : undefined,
-          recoverProjectScope: false,
+          recoverProjectScope: hasExcludedProjectKeys && hasOpaqueBranchKeys,
         });
         return loaded === null ? null : { ...loaded, projectScopeRecovered: true };
       }
@@ -1325,6 +1450,39 @@ class UsageStore {
     return null;
   }
 
+  private async ensureBranchBreakdowns(): Promise<void> {
+    const summaryVersion = this.versions.summary;
+    if (
+      this.summary === null ||
+      this.summaryHasBranchBreakdowns ||
+      this.branchBreakdownRequestVersion === summaryVersion
+    )
+      return;
+    this.branchBreakdownRequestVersion = summaryVersion;
+    try {
+      const data = await UsageService.getApiV1UsageSummary({
+        ...this.baseParams(),
+        branch_breakdowns: true,
+      });
+      if (this.versions.summary === summaryVersion && this.summary !== null) {
+        this.summary = {
+          ...data,
+          comparison: this.summary.comparison,
+        };
+        this.summaryHasBranchBreakdowns = true;
+        this.branchBreakdownSummaryVersion = summaryVersion;
+      }
+    } catch (e) {
+      if (this.versions.summary === summaryVersion) {
+        console.warn("usage.ensureBranchBreakdowns failed:", e);
+      }
+    } finally {
+      if (this.branchBreakdownRequestVersion === summaryVersion) {
+        this.branchBreakdownRequestVersion = 0;
+      }
+    }
+  }
+
   private async fetchComparison(
     summaryVersion: number,
     summary: UsageSummaryResponse,
@@ -1344,7 +1502,7 @@ class UsageStore {
         { signal },
       );
       if (this.versions.summary === summaryVersion) {
-        this.summary = { ...summary, comparison };
+        this.summary = { ...(this.summary ?? summary), comparison };
         this.noteStep("comparison", liveStep, started, comparison);
         return "ok";
       }
@@ -1663,6 +1821,7 @@ export interface UsageUrlState {
   excludedProjects: string;
   excludedProjectKeys: string;
   excludedAgents: string;
+  selectedGitBranch: string;
   excludedModels: string;
 }
 
@@ -1695,6 +1854,11 @@ export function buildUsageUrlParams(state: UsageUrlState): Record<string, string
   // set. Keep them in live request state only; URLs outlive that scope.
   if (state.excludedAgents) {
     params["exclude_agent"] = state.excludedAgents;
+  }
+  // "branch" (not "git_branch") because session filters already own the
+  // git_branch key when usage and session params merge into one URL.
+  if (state.selectedGitBranch) {
+    params["branch"] = state.selectedGitBranch;
   }
   return params;
 }

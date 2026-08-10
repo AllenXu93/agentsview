@@ -2927,5 +2927,20 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud: ライブトークンの確認が必要です",
   "status_bar_codex_cloud_oldest_failure": "最も古い失敗: {time}",
   "status_bar_codex_cloud_last_success": "最後に成功した同期: {time}",
-  "status_bar_codex_cloud_homes": "Codex ホーム: {homes}"
+  "status_bar_codex_cloud_homes": "Codex ホーム: {homes}",
+  "sidebar_filters_branch": "ブランチ",
+  "sidebar_filters_search_branches": "ブランチを検索...",
+  "sidebar_filters_no_branches": "ブランチはありません",
+  "shared_active_filters_remove_branch": "{branch} フィルターを削除します",
+  "usage_branch": "ブランチ",
+  "usage_unattributed": "未分類",
+  "activity_filter_by_branch": "ブランチで絞り込み",
+  "activity_all_branches": "すべてのブランチ",
+  "activity_branch": "ブランチ",
+  "activity_filter_branches_placeholder": "ブランチで絞り込み",
+  "activity_no_matching_branches": "一致するブランチがありません",
+  "shared_branch_clear_search": "ブランチの検索をクリア",
+  "shared_branch_loading": "ブランチを読み込んでいます…",
+  "shared_branch_no_match": "一致するブランチがありません",
+  "shared_branch_refine": "ほかにもブランチがあります。検索を絞り込んでください。"
 }
