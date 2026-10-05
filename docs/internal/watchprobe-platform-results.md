@@ -141,4 +141,139 @@ Logs report scan duration, files examined, changed paths, retained signatures,
 name bytes, saturation, and cumulative failures. `Watcher.SourceScanStats`
 exposes the last completed pass. These diagnostics contain counts only.
 Production Mac and Windows runs, sustained bursts, and multi-hour retention
-remain qualification work. No end-to-end performance advantage is claimed yet.
+remain qualification work. Metadata timings alone do not establish an archive
+ingestion advantage; the following experiment measures those code paths.
+
+## Production parser and archive experiment
+
+Do not ship the current saturation policy. Central metadata coverage saves
+substantial archive work below its signature limit. Above that limit, repeated
+whole-root reconciliation makes the configured schedule more expensive than
+prior polling. Keep the draft open to change that policy.
+
+### Linux measured results
+
+Both runs used Linux/amd64, Go 1.27.0, and an AMD Ryzen AI Max+ 395. The
+50,000-file run tested `cb674e4f` with the experiment added. The worktree was then
+updated to the already-rebased PR head, `9dd584e8`, for the 70,000-file run.
+Every old/new comparison within a run uses the same binary and source files.
+Results below are medians of five passes, except the single 512-source burst.
+CPU seconds include all threads in the tester process.
+
+| Files | Scenario | Prior wall s | Scan wall s | Prior CPU s | Scan CPU s |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 50,000 | Unchanged | 8.233 | 0.104 | 10.201 | 0.120 |
+| 50,000 | 20 appends | 8.653 | 0.371 | 10.579 | 0.405 |
+| 50,000 | 512 appends | 13.933 | 6.127 | 16.175 | 6.518 |
+| 70,000 | Unchanged | 13.978 | 8.160 | 16.677 | 9.901 |
+| 70,000 | 20 appends | 14.380 | 8.565 | 17.140 | 10.244 |
+| 70,000 | 512 appends | 21.748 | 16.090 | 24.945 | 18.105 |
+
+For unchanged work, `4 * scan CPU / prior CPU` is 0.047 at 50,000 files and
+2.375 at 70,000. Including pass duration in both completion-based intervals,
+the ratios are 0.050 and 2.084. The smaller collection uses about 95% less
+routine CPU; the saturated collection uses about twice as much. At 70,000,
+each unchanged scanner pass allocates a median 633 MiB temporarily.
+
+Both qualification runs passed their archive assertions and the real Linux
+watcher append. Scanner startup added 13.044 seconds and 8.98 MiB of forced-GC
+retained heap at 50,000 files, and 21.531 seconds and 11.67 MiB at 70,000.
+Those heap deltas include warmed engine state. After twenty change rounds,
+additional forced-GC heap was 0.186 MiB and 0.020 MiB respectively. Native
+mutation-to-archive latency was 0.720 and 0.511 seconds. These short runs do not
+establish multi-hour retention or native-burst fairness.
+
+The original 70,000-file run reported that its final-source probe was cached.
+Filesystem directory order did not put that source beyond the limit. The
+tester now selects a probe from observed cache absence when saturated, and the
+separate capacity control exercises that corrected selection.
+
+The 70,000-file capacity control used the same `9dd584e8` production code, one
+archive, and unchanged sources. Five passes per scanner alternated order.
+The production limit took a median 8.164 seconds and 9.833 CPU-seconds per
+pass. Expanding only the tester's signature capacity to 70,000 reduced that to
+0.144 seconds and 0.167 CPU-seconds, about 59 times less CPU. Its complete cache
+held 70,000 signatures and did not saturate. This isolates saturation from file
+count or archive contents as the cause of the cost jump.
+
+The control then selected a source absent from the production-capacity cache.
+Its append reached SQLite, and deleting it set the archived source-missing
+timestamp. Both assertions passed. The fallback preserves these tested
+results, but pays repeated full-root archive work to do so. The capacity
+override is a diagnostic control, not a proposed production fix.
+
+This is enough to reject the current cutover. Further Mac data cannot turn a
+reproduced Linux cost regression into a passing release decision. A revised
+policy must pass the same archive checks and cadence-adjusted CPU comparison
+on both sides of the capacity limit. Increasing a fixed limit alone moves the
+failure to a larger collection.
+
+### Repeat the experiment
+
+`TestSourceScanQualification` compares the shared scanner with the prior grouped
+provider-root polling path. Both use the real Claude and Codex parsers and
+separate disposable SQLite archives over the same synthetic sources. It never
+reads local transcripts or a live archive. The test skips by default.
+
+Build once, then run the two sizes sequentially without concurrent builds or
+benchmarks:
+
+```bash
+CGO_ENABLED=1 go test -c -tags fts5 \
+  -o /tmp/source-scan-qualification ./internal/sync
+umask 077
+for count in 50000 70000; do
+  AGENTSVIEW_SOURCE_SCAN_QUALIFY=1 \
+  AGENTSVIEW_SOURCE_SCAN_FILES="$count" \
+  AGENTSVIEW_SOURCE_SCAN_REVISION="$(git rev-parse HEAD)" \
+  AGENTSVIEW_SOURCE_SCAN_REPORT="/tmp/source-scan-$count.json" \
+    /tmp/source-scan-qualification \
+      -test.run '^TestSourceScanQualification$' -test.timeout 30m -test.v \
+      > "/tmp/source-scan-$count.log" 2>&1 || break
+done
+```
+
+The separate capacity control holds 70,000 sources and one archive constant.
+It alternates five unchanged passes with production capacity and five with
+capacity expanded to retain all 70,000 signatures. Only the tester changes the
+entry limit; the production defaults stay unchanged.
+
+After timing, it selects a source absent from the production-capacity cache and
+checks its append and deletion through SQLite. Heap deltas and native latency
+are measured by the qualification run only, not by this CPU control.
+
+```bash
+AGENTSVIEW_SOURCE_SCAN_CAPACITY_CONTROL=1 \
+AGENTSVIEW_SOURCE_SCAN_FILES=70000 \
+AGENTSVIEW_SOURCE_SCAN_REVISION="$(git rev-parse HEAD)" \
+AGENTSVIEW_SOURCE_SCAN_REPORT=/tmp/source-scan-capacity-control.json \
+  /tmp/source-scan-qualification \
+    -test.run '^TestSourceScanCapacityControl$' -test.timeout 30m -test.v \
+    > /tmp/source-scan-capacity-control.log 2>&1
+```
+
+This Linux-only tester reports process CPU, elapsed time, allocated bytes,
+forced-GC heap changes, cache saturation, and native mutation-to-archive
+latency. Sample times use milliseconds; byte counters use bytes;
+`ScannerStats.LastDuration` uses nanoseconds. Five unchanged passes alternate
+method order. Five rounds change 20 sources; a separate burst changes 512.
+Archive assertions cover every
+changed source, an atomic replacement with unchanged size and mtime, a Codex
+title update, reported event-loss recovery for an in-place equal-stat edit,
+and source disappearance. A selected source gets an additional edit and
+deletion check, with its initial cache membership in the report. When saturated,
+selection requires observed cache absence. Twenty change rounds measure
+short-run heap retention. A real Linux watcher must then commit
+an append to SQLite.
+
+The decision requires correct archive results and cheaper routine coverage at
+both sizes. Compare median CPU per pass after accounting for the 30-second
+scanner interval and prior 120-second polling interval. A faster individual
+pass can still fail if it runs four times as often. Saturation must not create
+a sustained cost regression. The retained-heap delta includes engine state
+warmed by scanner startup, rather than measuring only scanner objects.
+
+The files contain short synthetic conversations, split equally between Claude
+and Codex, in grouped directories. This experiment tests production code paths
+and collection cardinality. It does not measure a busy desktop, long
+transcripts, continuous native bursts, or multi-hour retention.
