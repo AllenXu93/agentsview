@@ -69,44 +69,49 @@ func (v *vectorSearcher) resolveExtSchema(ctx context.Context) (string, error) {
 	return v.extSchema, nil
 }
 
-// SemanticSearch embeds query, runs chunk-level KNN over the generation's
-// chunk table, rolls chunks up to one hit per document (best chunk wins,
-// score order preserved), truncates to limit documents, and hydrates each
-// against vector_documents. It mirrors vector.Index.Search + searcherAdapter:
-// an encoder failure is wrapped in db.ErrSemanticTransient; a document that
-// vanished (or was parked at a negative-ordinal tombstone) between KNN and
-// hydration is dropped rather than erroring.
-func (v *vectorSearcher) SemanticSearch(
-	ctx context.Context, query string, limit int,
-) ([]db.VectorHit, error) {
+// PrepareSemanticSearch implements db.VectorSearcher. It embeds query once.
+// Each page call runs chunk-level KNN over the generation's chunk table,
+// rolls chunks up to one hit per document (best chunk wins, score order
+// preserved), truncates to limit documents, and hydrates each against
+// vector_documents. It mirrors the SQLite searcherAdapter: an encoder failure
+// is wrapped in db.ErrSemanticTransient; a document that vanished (or was
+// parked at a negative-ordinal tombstone) between KNN and hydration is
+// dropped rather than erroring.
+func (v *vectorSearcher) PrepareSemanticSearch(
+	ctx context.Context, query string,
+) (db.VectorSearchPage, int, error) {
 	vec, err := v.encode(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", db.ErrSemanticTransient, err)
+		return nil, 0, fmt.Errorf("%w: %w", db.ErrSemanticTransient, err)
 	}
 	if len(vec) != v.dimension {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"query embedding has %d dimensions, generation expects %d",
 			len(vec), v.dimension)
 	}
 	extSchema, err := v.resolveExtSchema(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	chunks, err := v.knnChunks(ctx, vec, extSchema, limit)
-	if err != nil {
-		return nil, err
-	}
-	docs, err := kitvec.RollupByDocument(chunks)
-	if err != nil {
-		return nil, fmt.Errorf("rolling up vector hits: %w", err)
-	}
-	if limit >= 0 && len(docs) > limit {
-		docs = docs[:limit]
-	}
-	if len(docs) == 0 {
-		return nil, nil
-	}
-	return v.hydrateHits(ctx, docs)
+	return func(ctx context.Context, limit int) ([]db.VectorHit, bool, error) {
+		chunks, err := v.knnChunks(ctx, vec, extSchema, limit)
+		if err != nil {
+			return nil, false, err
+		}
+		exhausted := len(chunks) < limit
+		docs, err := kitvec.RollupByDocument(chunks)
+		if err != nil {
+			return nil, false, fmt.Errorf("rolling up vector hits: %w", err)
+		}
+		if limit >= 0 && len(docs) > limit {
+			docs = docs[:limit]
+		}
+		if len(docs) == 0 {
+			return nil, exhausted, nil
+		}
+		hits, err := v.hydrateHits(ctx, docs)
+		return hits, exhausted, err
+	}, 0, nil
 }
 
 // chunkHit is one chunk-level KNN neighbor: the document it belongs to, which

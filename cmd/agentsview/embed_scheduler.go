@@ -529,55 +529,61 @@ func (a searcherAdapter) SemanticReadiness(
 	}, nil
 }
 
-// SemanticSearch implements db.VectorSearcher. A stale active generation
-// (the configured model/dimension no longer matches what was last built)
-// is a hard error checked before querying at all, rather than silently
-// searching the mismatched old generation.
-func (a searcherAdapter) SemanticSearch(
-	ctx context.Context, query string, limit int,
-) ([]db.VectorHit, error) {
+// PrepareSemanticSearch implements db.VectorSearcher and embeds query once
+// per request. A stale active generation (the configured model/dimension no
+// longer matches what was last built) is a hard error checked before
+// querying at all, rather than silently searching the mismatched old
+// generation.
+func (a searcherAdapter) PrepareSemanticSearch(
+	ctx context.Context, query string,
+) (db.VectorSearchPage, int, error) {
 	stale, err := a.ix.StaleActive(ctx, a.space, "")
 	if err != nil {
 		// StaleActive shares Search's error taxonomy (notably
 		// vector.ErrMirrorVersionMismatch from a version-mismatched
 		// read-only vectors.db), so it is translated the same way;
 		// errors outside the taxonomy pass through with this context.
-		return nil, translateSearchError(
+		return nil, 0, translateSearchError(
 			fmt.Errorf("checking embedding index staleness: %w", err))
 	}
 	if stale {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"%w: index is stale (embedding config changed): run "+
 				"'agentsview embeddings build --full-rebuild'",
 			db.ErrSemanticUnavailable)
 	}
 
-	hits, err := a.ix.Search(ctx, a.enc, query, limit)
+	search, err := a.ix.PrepareSearch(ctx, a.enc, query)
 	if err != nil {
-		return nil, translateSearchError(err)
+		return nil, 0, translateSearchError(err)
 	}
-
-	out := make([]db.VectorHit, len(hits))
-	for i, h := range hits {
-		out[i] = db.VectorHit{
-			SessionID:    h.SessionID,
-			Ordinal:      h.Ordinal,
-			OrdinalStart: h.OrdinalStart,
-			OrdinalEnd:   h.OrdinalEnd,
-			Subordinate:  h.Subordinate,
-			Score:        h.Score,
-			Snippet:      h.Snippet,
+	return func(ctx context.Context, limit int) ([]db.VectorHit, bool, error) {
+		hits, exhausted, err := search(ctx, limit)
+		if err != nil {
+			return nil, false, translateSearchError(err)
 		}
-	}
-	return out, nil
+		out := make([]db.VectorHit, len(hits))
+		for i, h := range hits {
+			out[i] = db.VectorHit{
+				SessionID:    h.SessionID,
+				Ordinal:      h.Ordinal,
+				OrdinalStart: h.OrdinalStart,
+				OrdinalEnd:   h.OrdinalEnd,
+				Subordinate:  h.Subordinate,
+				Score:        h.Score,
+				Snippet:      h.Snippet,
+			}
+		}
+		return out, exhausted, nil
+	}, a.ix.MaxSearchCandidates(), nil
 }
 
 // ResolveMessageUnits implements db.VectorSearcher by delegating to the
 // index's resolver, translating its error taxonomy (notably
 // vector.ErrMirrorVersionMismatch from a version-mismatched read-only
-// vectors.db) the same way SemanticSearch does. It needs no staleness gate
-// of its own: the hybrid path always calls SemanticSearch — which enforces
-// the gate — before resolving FTS hits.
+// vectors.db) the same way PrepareSemanticSearch does. It needs no staleness
+// gate of its own: the hybrid path always calls PrepareSemanticSearch, which
+// enforces the gate, before resolving FTS hits.
 func (a searcherAdapter) ResolveMessageUnits(
 	ctx context.Context, refs []db.MessageRef,
 ) ([]db.UnitRef, error) {

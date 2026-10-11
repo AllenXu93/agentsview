@@ -832,12 +832,48 @@ func TestSearcherAdapterVersionMismatchedIndexReturnsSemanticUnavailable(t *test
 		cfg.Vector.Embeddings, vectorGeneration(cfg.Vector.Embeddings),
 	))
 
-	_, err = adapter.SemanticSearch(t.Context(), "any query", 5)
+	_, err = dbtest.SemanticSearch(t.Context(), adapter, "any query", 5)
 	require.Error(t, err)
 	require.ErrorIs(t, err, db.ErrSemanticUnavailable,
 		"a version-mismatched index must surface the semantic-unavailable taxonomy")
 	assert.Contains(t, err.Error(), "embeddings build",
 		"the error must tell the user to rebuild the index")
+}
+
+func TestSearcherAdapterActivityCandidateExpansion(t *testing.T) {
+	cfg := enabledVectorConfig(t)
+	ix, err := vector.Open(t.Context(), cfg.Vector.ResolvedDBPath(cfg.DataDir), false, cfg.Vector.Embeddings.MaxInputChars)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ix.Close()) })
+	gen := kitvec.Generation{Model: "fake-model", Dimensions: 4}
+	_, err = ix.Build(t.Context(), testPushUnitSource(), fakePushEncoder(), gen, vector.BuildOptions{})
+	require.NoError(t, err)
+	encodes := 0
+	adapter := newSearcherAdapter(ix, func(ctx context.Context, texts []string) ([][]float32, error) {
+		encodes++
+		assert.Equal(t, []string{"query"}, texts)
+		return fakePushEncoder()(ctx, texts)
+	}, generationSpace(gen))
+	search, _, err := adapter.PrepareSemanticSearch(t.Context(), "query")
+	require.NoError(t, err)
+	_, exhausted, err := search(t.Context(), 200)
+	require.NoError(t, err)
+	assert.True(t, exhausted)
+	t.Run("engine ceiling", func(t *testing.T) {
+		encodes = 0
+		hits, err := db.SelectSurvivingVectorHits(t.Context(), db.ContentSearchFilter{
+			Pattern: "query", Limit: 4, ExcludeActiveSince: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		}, adapter, 5000, func(_ context.Context, _ db.ContentSearchFilter, ids []string) (map[string]bool, error) {
+			allowed := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				allowed[id] = false
+			}
+			return allowed, nil
+		})
+		require.NoError(t, err)
+		assert.Empty(t, hits)
+		assert.Equal(t, 1, encodes)
+	})
 }
 
 func TestSearcherAdapterSemanticReadinessCoverageAndCompatibility(t *testing.T) {

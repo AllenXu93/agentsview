@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -36,6 +37,9 @@ type ContentSearchFilter struct {
 	SessionID, GitBranchExact                         string
 	Date, DateFrom, DateTo, Timezone, ActiveSince     string
 	IncludeChildren, IncludeAutomated, IncludeOneShot bool
+	// ExcludeActiveSince drops sessions whose last activity is after this
+	// instant before LIMIT. The zero time disables the filter.
+	ExcludeActiveSince time.Time
 	// ExcludeSessionIDs drops matches from these session IDs before LIMIT,
 	// so a live conversation cannot fill the result page. Empty entries are
 	// ignored; unknown IDs are a no-op.
@@ -138,11 +142,12 @@ func ContentSessionFilter(f ContentSearchFilter) SessionFilter {
 		Machine: f.Machine, GitBranch: f.GitBranch, Agent: f.Agent,
 		SessionID: f.SessionID, GitBranchExact: f.GitBranchExact,
 		Date: f.Date, DateFrom: f.DateFrom, DateTo: f.DateTo,
-		Timezone:         f.Timezone,
-		ActiveSince:      f.ActiveSince,
-		ExcludeOneShot:   !f.IncludeOneShot,
-		ExcludeAutomated: !f.IncludeAutomated,
-		IncludeChildren:  f.IncludeChildren,
+		Timezone:           f.Timezone,
+		ActiveSince:        f.ActiveSince,
+		ExcludeActiveSince: f.ExcludeActiveSince,
+		ExcludeOneShot:     !f.IncludeOneShot,
+		ExcludeAutomated:   !f.IncludeAutomated,
+		IncludeChildren:    f.IncludeChildren,
 	}
 }
 
@@ -161,7 +166,14 @@ func BuildContentScopeSQL(
 	if f.SessionID != "" {
 		return BuildSessionBaseFilterSQL(sf, dialect)
 	}
-	return BuildSessionFilterSQL(sf, dialect)
+	// Activity belongs to each candidate, while metadata filters select the parent tree.
+	sf.ExcludeActiveSince = time.Time{}
+	b := NewQueryBuilder(dialect, 0)
+	where := buildSessionFilterWithBuilder(sf, b, "")
+	if !f.ExcludeActiveSince.IsZero() {
+		where += " AND " + b.ExcludeActiveSincePredicate(f.ExcludeActiveSince)
+	}
+	return where, b.Args()
 }
 
 // sessionScopeSubquery returns "session_id IN (SELECT id FROM sessions
@@ -890,6 +902,76 @@ func classifyFTSError(err error) error {
 // than will ultimately be returned.
 const SemanticOverfetchMin = 200
 
+// maxActivityExpansionCandidates caps the candidate count when an activity
+// cutoff makes SelectSurvivingVectorHits double its fetch. Starting from
+// SemanticOverfetchMin, the cap allows at most six fetches. It equals
+// sqlite-vec's KNN ceiling, and it also bounds the KNN and hydration work
+// that PostgreSQL and ClickHouse would otherwise do for large limits.
+const maxActivityExpansionCandidates = 4096
+
+// SelectSurvivingVectorHits returns the ranked vector hits that pass the
+// filter's session scope. When an activity cutoff rejects hits and leaves
+// fewer than f.Limit units, it fetches again with twice the candidates, until
+// the engine is exhausted or the candidate cap is reached. allowedSessions
+// returns an entry for each otherwise eligible session; false marks a
+// session that the activity cutoff rejects.
+func SelectSurvivingVectorHits(
+	ctx context.Context, f ContentSearchFilter, searcher VectorSearcher, k int,
+	allowedSessions func(context.Context, ContentSearchFilter, []string) (map[string]bool, error),
+) ([]VectorHit, error) {
+	search, ceiling, err := searcher.PrepareSemanticSearch(ctx, f.Pattern)
+	if err != nil {
+		return nil, err
+	}
+	if ceiling <= 0 || ceiling > maxActivityExpansionCandidates {
+		ceiling = maxActivityExpansionCandidates
+	}
+	k = clampRecallVectorCandidates(k, ceiling)
+	for {
+		hits, exhausted, err := search(ctx, k)
+		if err != nil {
+			return nil, err
+		}
+		allowed, err := allowedSessions(ctx, f, UniqueSessionIDs(hits))
+		if err != nil {
+			return nil, err
+		}
+		surviving, units, activityRejected := filterVectorHits(hits, allowed, f.Scope)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		next := clampRecallVectorCandidates(k*2, ceiling)
+		if !activityRejected || units >= f.Limit || exhausted || next <= k {
+			return surviving, nil
+		}
+		k = next
+	}
+}
+
+// filterVectorHits keeps hits from allowed sessions inside scope. It reports
+// the number of distinct surviving units and whether the activity cutoff
+// rejected any otherwise eligible hit.
+func filterVectorHits(
+	hits []VectorHit, allowed map[string]bool, scope string,
+) ([]VectorHit, int, bool) {
+	surviving := make([]VectorHit, 0, len(hits))
+	units := make(map[string]struct{})
+	activityRejected := false
+	for _, h := range hits {
+		activityAllowed, eligible := allowed[h.SessionID]
+		if !eligible || ScopeExcludes(scope, h.Subordinate) {
+			continue
+		}
+		if !activityAllowed {
+			activityRejected = true
+			continue
+		}
+		surviving = append(surviving, h)
+		units[UnitFusionKey(h.SessionID, h.OrdinalStart)] = struct{}{}
+	}
+	return surviving, len(units), activityRejected
+}
+
 // validateSemanticSources returns a SearchInputError unless f.Sources is
 // empty or exactly {"messages"}: semantic (and hybrid) search only indexes
 // message content, mirroring the --fts messages-only restriction enforced
@@ -970,23 +1052,9 @@ func (db *DB) searchContentSemantic(
 	}
 
 	k := max(f.Limit*4, SemanticOverfetchMin)
-	hits, err := searcher.SemanticSearch(ctx, f.Pattern, k)
+	surviving, err := SelectSurvivingVectorHits(ctx, f, searcher, k, db.semanticAllowedSessionIDs)
 	if err != nil {
 		return ContentSearchPage{}, err
-	}
-	if len(hits) == 0 {
-		return ContentSearchPage{}, nil
-	}
-
-	allowed, err := db.semanticAllowedSessionIDs(ctx, f, UniqueSessionIDs(hits))
-	if err != nil {
-		return ContentSearchPage{}, err
-	}
-	surviving := make([]VectorHit, 0, len(hits))
-	for _, h := range hits {
-		if allowed[h.SessionID] && !ScopeExcludes(f.Scope, h.Subordinate) {
-			surviving = append(surviving, h)
-		}
 	}
 	if len(surviving) == 0 {
 		return ContentSearchPage{}, nil
@@ -1203,21 +1271,11 @@ func (db *DB) hybridVectorLeg(
 	ctx context.Context, f ContentSearchFilter, searcher VectorSearcher, k int,
 ) (hybridLeg, error) {
 	leg := hybridLeg{display: make(map[string]hybridDisplay)}
-	hits, err := searcher.SemanticSearch(ctx, f.Pattern, k)
-	if err != nil {
-		return hybridLeg{}, err
-	}
-	if len(hits) == 0 {
-		return leg, nil
-	}
-	allowed, err := db.semanticAllowedSessionIDs(ctx, f, UniqueSessionIDs(hits))
+	hits, err := SelectSurvivingVectorHits(ctx, f, searcher, k, db.semanticAllowedSessionIDs)
 	if err != nil {
 		return hybridLeg{}, err
 	}
 	for _, h := range hits {
-		if !allowed[h.SessionID] || ScopeExcludes(f.Scope, h.Subordinate) {
-			continue
-		}
 		key := UnitFusionKey(h.SessionID, h.OrdinalStart)
 		if _, seen := leg.display[key]; seen {
 			continue
@@ -1459,7 +1517,7 @@ func UniqueSessionIDs(hits []VectorHit) []string {
 }
 
 // semanticAllowedSessionIDs runs one query per maxSQLVars-sized chunk of ids
-// returning the subset that pass the ContentSearchFilter's metadata scope
+// returning activity eligibility for ids passing the other metadata filters
 // (project, agent, date range, one-shot/automated, ...), reusing the same
 // SessionFilter mapping sessionScopeSubquery uses so the two paths cannot
 // drift apart. Like semanticSessionScopeSubquery it deliberately omits the
@@ -1475,9 +1533,17 @@ func (db *DB) semanticAllowedSessionIDs(
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	where, filterArgs := buildSessionBaseFilter(SemanticContentSessionFilter(f))
+	sessionFilter := SemanticContentSessionFilter(f)
+	sessionFilter.ExcludeActiveSince = time.Time{}
+	b := NewQueryBuilder(SQLiteQueryDialect(), 0)
+	activity := "1"
+	if !f.ExcludeActiveSince.IsZero() {
+		activity = b.ExcludeActiveSincePredicate(f.ExcludeActiveSince)
+	}
+	where, filterArgs := buildSessionBaseFilter(sessionFilter)
 	where, filterArgs = AppendExcludeSessionIDs(where, filterArgs, "id", f.ExcludeSessionIDs)
-	query := "SELECT id FROM sessions WHERE " + where + " AND id IN "
+	filterArgs = append(b.Args(), filterArgs...)
+	query := "SELECT id, " + activity + " FROM sessions WHERE " + where + " AND id IN "
 
 	allowed := make(map[string]bool, len(ids))
 	err := queryChunked(ids, func(chunk []string) error {
@@ -1493,11 +1559,12 @@ func (db *DB) semanticAllowedSessionIDs(
 		defer rows.Close()
 		for rows.Next() {
 			var id string
-			if err := rows.Scan(&id); err != nil {
+			var activityAllowed bool
+			if err := rows.Scan(&id, &activityAllowed); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan semantic session id: %w", err)
 			}
-			allowed[id] = true
+			allowed[id] = activityAllowed
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()

@@ -5,6 +5,7 @@ package clickhouse
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -240,6 +241,38 @@ func TestStoreSessionsMessagesAndSearch(t *testing.T) {
 	})
 }
 
+func TestSearchContentExcludeActiveSince(t *testing.T) {
+	store, _, _ := newPushedStore(t)
+	for _, mode := range []string{"substring", "regex", "fts"} {
+		t.Run(mode, func(t *testing.T) {
+			page, err := store.SearchContent(t.Context(), db.ContentSearchFilter{
+				Pattern: "first", Mode: mode, Limit: 1, IncludeOneShot: true,
+				ExcludeActiveSince: time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC),
+			})
+			require.NoError(t, err)
+			require.Len(t, page.Matches, 1)
+			assert.Equal(t, fixtureAlphaID, page.Matches[0].SessionID)
+		})
+	}
+	store.SetVectorSearcher(&activityVectorSearcher{hits: []db.VectorHit{
+		{SessionID: fixtureBetaID},
+		{SessionID: fixtureAlphaID},
+	}})
+	for _, mode := range []string{"semantic", "hybrid"} {
+		t.Run(mode, func(t *testing.T) {
+			filter := db.ContentSearchFilter{Pattern: "absent keyword", Mode: mode, Limit: 1, IncludeOneShot: true, ExcludeActiveSince: time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)}
+			page, err := store.SearchContent(t.Context(), filter)
+			require.NoError(t, err)
+			require.Len(t, page.Matches, 1)
+			assert.Equal(t, fixtureAlphaID, page.Matches[0].SessionID)
+			filter.ExcludeActiveSince = time.Unix(0, 0)
+			page, err = store.SearchContent(t.Context(), filter)
+			require.NoError(t, err)
+			assert.Empty(t, page.Matches)
+		})
+	}
+}
+
 func TestSearchTreatsUnderscoreAsLiteral(t *testing.T) {
 	store, syncer, local := newPushedStore(t)
 	ctx := context.Background()
@@ -347,4 +380,18 @@ func TestStoreMessageWindowReportsRevisionWithRows(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, msgs)
 	assert.Empty(t, revision, "no rows means no revision to describe them")
+}
+
+type activityVectorSearcher struct {
+	hits []db.VectorHit
+}
+
+func (s *activityVectorSearcher) PrepareSemanticSearch(context.Context, string) (db.VectorSearchPage, int, error) {
+	return func(_ context.Context, k int) ([]db.VectorHit, bool, error) {
+		return s.hits[:min(k, len(s.hits))], len(s.hits) < k, nil
+	}, 0, nil
+}
+
+func (s *activityVectorSearcher) ResolveMessageUnits(_ context.Context, refs []db.MessageRef) ([]db.UnitRef, error) {
+	return make([]db.UnitRef, len(refs)), nil
 }

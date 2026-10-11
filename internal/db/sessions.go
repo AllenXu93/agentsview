@@ -558,6 +558,9 @@ type SessionFilter struct {
 	MaxMessages     int    // message_count <= N (0 = no filter)
 	MinUserMessages int    // user_message_count >= N (0 = no filter)
 	ExcludeOneShot  bool   // exclude sessions with user_message_count <= 1
+	// ExcludeActiveSince keeps sessions whose last activity is at or before
+	// this instant, or unknown. The zero time disables the filter.
+	ExcludeActiveSince time.Time
 	// ChildExemptOneShot carves child sessions (a sidebar-child
 	// relationship_type or a non-empty parent_session_id) out of the
 	// ExcludeOneShot gate. Set only by the semantic/hybrid content-search

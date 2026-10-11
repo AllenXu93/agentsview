@@ -90,38 +90,43 @@ func NewVectorSearcher(
 	}
 }
 
-// SemanticSearch embeds query, ranks the generation's chunks by cosine
-// distance, rolls chunks up to one hit per document (best chunk wins, order
-// preserved), truncates to limit documents, and hydrates each against
-// vector_documents. An encoder failure is wrapped in db.ErrSemanticTransient;
-// a document that vanished between ranking and hydration is dropped.
-func (v *vectorSearcher) SemanticSearch(
-	ctx context.Context, query string, limit int,
-) ([]db.VectorHit, error) {
+// PrepareSemanticSearch implements db.VectorSearcher. It embeds query once.
+// Each page call ranks the generation's chunks by cosine distance, rolls
+// chunks up to one hit per document (best chunk wins, order preserved),
+// truncates to limit documents, and hydrates each against vector_documents.
+// An encoder failure is wrapped in db.ErrSemanticTransient; a document that
+// vanished between ranking and hydration is dropped.
+func (v *vectorSearcher) PrepareSemanticSearch(
+	ctx context.Context, query string,
+) (db.VectorSearchPage, int, error) {
 	vec, err := v.encode(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", db.ErrSemanticTransient, err)
+		return nil, 0, fmt.Errorf("%w: %w", db.ErrSemanticTransient, err)
 	}
 	if len(vec) != v.dimension {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"query embedding has %d dimensions, generation expects %d",
 			len(vec), v.dimension)
 	}
-	chunks, err := v.nearestChunks(ctx, vec, limit)
-	if err != nil {
-		return nil, err
-	}
-	docs, err := kitvec.RollupByDocument(chunks)
-	if err != nil {
-		return nil, fmt.Errorf("rolling up vector hits: %w", err)
-	}
-	if limit >= 0 && len(docs) > limit {
-		docs = docs[:limit]
-	}
-	if len(docs) == 0 {
-		return nil, nil
-	}
-	return v.hydrateHits(ctx, docs)
+	return func(ctx context.Context, limit int) ([]db.VectorHit, bool, error) {
+		chunks, err := v.nearestChunks(ctx, vec, limit)
+		if err != nil {
+			return nil, false, err
+		}
+		exhausted := len(chunks) < limit
+		docs, err := kitvec.RollupByDocument(chunks)
+		if err != nil {
+			return nil, false, fmt.Errorf("rolling up vector hits: %w", err)
+		}
+		if limit >= 0 && len(docs) > limit {
+			docs = docs[:limit]
+		}
+		if len(docs) == 0 {
+			return nil, exhausted, nil
+		}
+		hits, err := v.hydrateHits(ctx, docs)
+		return hits, exhausted, err
+	}, 0, nil
 }
 
 // chunkHit is one ranked chunk: its document, which chunk matched, and its
