@@ -133,6 +133,10 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 		physicalPaths = append(physicalPaths, file.Path)
 	}
 	preContainerStates := e.captureSQLiteContainerStates(physicalPaths)
+	if err := e.prepareSQLiteContainerVerification(ctx, preContainerStates); err != nil {
+		result.Stats = SyncStats{Aborted: true}
+		return result, err
+	}
 	e.beginSQLiteContainerPass(files, preContainerStates)
 	processingCtx := context.WithValue(ctx, deferGlobalLinkContextKey{}, true)
 	processingCtx = parser.WithProjectRootMemo(processingCtx)
@@ -176,7 +180,7 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 	if ctx.Err() != nil || processErr != nil || !stats.ProcessingComplete() {
 		e.poisonSQLiteContainerPass()
 	}
-	e.finishSQLiteContainerPass(true, false)
+	e.finishSQLiteContainerPass(ctx, true, false)
 	if !e.ephemeral {
 		e.persistSkipCache(ctx)
 	}

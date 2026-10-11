@@ -1618,15 +1618,28 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
   directory, worktree rename) whose stamp lands below that child maximum. A
   session or project row that advances past its own stored metadata watermark
   is always a candidate, wherever other sessions' watermarks or its own child
-  timestamps sit. Periodic full passes and streamed reconciliation passes over
-  a container whose last complete digest verification is less than five
-  minutes old may list the watermark form
-  (`SQLiteContainerListsWatermarkOnly`): every member gate-skips before
-  fingerprinting, so the child identity scan would be archive-sized work
-  nothing reads. A changed container may continue using this form during that
-  bounded interval; after the interval, the next pass carries the complete
-  digest again. Watermark-only skips additionally require the pass's container
-  capture to still be valid (`sqliteContainerPassCaptureValid`) — a container
+  timestamps sit.
+
+  Workers restore prior SQLite state and the original verification time from
+  durable sync metadata. Native identity and counter rollback checks reject
+  replacements and restores; Windows reads identity and the database header
+  from the same handle. Verification permits timestamp-first discovery for
+  five minutes, including after ordinary writes and restarts. Child-only edits
+  wait for a complete pass after that original deadline. Each pass atomically
+  consumes durable authority before processing, opening a write transaction
+  only when a record still holds authority. Preparation errors abort the pass,
+  cheap successes restore the original deadline, and failures leave authority
+  revoked. A container write during a pass blocks promotion and advancement
+  but restores the prior authority, so active use keeps timestamp-first
+  discovery until the original deadline. Expired and failed verification
+  history survives restarts so deferred edits remain eligible despite advancing
+  quick-sync cutoffs until complete recovery succeeds. Due quick syncs compare full fingerprints with
+  paged archive freshness: unchanged members finish before workers, while
+  changed or unresolved members retry. Ephemeral engines leave durable records
+  untouched. Every member of an unchanged container
+  gate-skips before fingerprinting, so a child identity scan would do
+  archive-sized work nothing reads. Watermark-only skips require the pass's
+  container capture to still be valid (`sqliteContainerPassCaptureValid`) — a container
   that changes between listing and the recapture check resolves full per-session
   digests instead, so a concurrent child-only write cannot hide beneath an
   unchanged metadata watermark. The trade is explicit: any child-only write that

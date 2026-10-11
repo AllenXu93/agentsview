@@ -1307,6 +1307,15 @@ func SourceUsesOpenCodeCompositeMTime(source SourceRef) bool {
 	}
 }
 
+// OpenCodeCompositeFingerprint returns the complete fingerprint carried by discovery.
+func OpenCodeCompositeFingerprint(source SourceRef) (SourceFingerprint, bool) {
+	digest := sourceCarriedChildDigest(source)
+	if !SourceUsesOpenCodeCompositeMTime(source) || digest == "" {
+		return SourceFingerprint{}, false
+	}
+	return SourceFingerprint{MTimeNS: sourceCarriedMTimeNS(source), Hash: digest}, true
+}
+
 // changedWatermarkSources answers a shared-container change event with only
 // the members whose carried session-row watermark is not already covered by
 // the caller's stored freshness. The watermark listing streams in ascending
@@ -1323,7 +1332,7 @@ func (s openCodeFormatSourceSet) changedWatermarkSources(
 	storageIDs map[string]struct{},
 	freshness StoredMemberFreshnessPager,
 ) ([]SourceRef, error) {
-	cursor := storedMemberFreshnessCursor{pager: freshness}
+	cursor := StoredMemberFreshnessCursor{pager: freshness}
 	var sources []SourceRef
 	err := s.spec.streamSQLiteWatermark(ctx, dbPath, func(meta OpenCodeSessionMeta) error {
 		if _, exists := storageIDs[meta.SessionID]; exists {
@@ -1355,10 +1364,10 @@ func (s openCodeFormatSourceSet) changedWatermarkSources(
 
 const storedMemberFreshnessPageSize = 512
 
-// storedMemberFreshnessCursor advances through the caller's paged stored
+// StoredMemberFreshnessCursor advances through the caller's paged stored
 // freshness in step with an ascending virtual-path stream, retaining one page
 // at a time.
-type storedMemberFreshnessCursor struct {
+type StoredMemberFreshnessCursor struct {
 	pager  StoredMemberFreshnessPager
 	rows   []StoredMemberFreshness
 	index  int
@@ -1367,9 +1376,14 @@ type storedMemberFreshnessCursor struct {
 	failed bool
 }
 
-// lookup returns the stored row for path, if the stored side has one. Paths
+// NewStoredMemberFreshnessCursor joins ascending virtual paths with stored freshness pages.
+func NewStoredMemberFreshnessCursor(pager StoredMemberFreshnessPager) *StoredMemberFreshnessCursor {
+	return &StoredMemberFreshnessCursor{pager: pager}
+}
+
+// Lookup returns the stored row for path, if the stored side has one. Paths
 // must arrive in ascending order across calls.
-func (c *storedMemberFreshnessCursor) lookup(
+func (c *StoredMemberFreshnessCursor) Lookup(
 	ctx context.Context, path string,
 ) (StoredMemberFreshness, bool, error) {
 	for {
@@ -1403,10 +1417,10 @@ func (c *storedMemberFreshnessCursor) lookup(
 }
 
 // covers reports whether the stored side vouches for path at watermarkNS.
-func (c *storedMemberFreshnessCursor) covers(
+func (c *StoredMemberFreshnessCursor) covers(
 	ctx context.Context, path string, watermarkNS int64,
 ) (bool, error) {
-	row, ok, err := c.lookup(ctx, path)
+	row, ok, err := c.Lookup(ctx, path)
 	if err != nil || !ok {
 		return false, err
 	}

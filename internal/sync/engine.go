@@ -752,8 +752,8 @@ type Engine struct {
 	// maps a container DB path to its state at the end of the last
 	// completed pass; digestVerifiedAt records when that container last
 	// completed a full composite listing. containerPass is the bookkeeping
-	// for the pass currently running (nil outside passes). All are in-memory
-	// only: a restart re-verifies once.
+	// for the pass currently running (nil outside passes). Persisted sync state
+	// restores recent verification after a restart without renewing its age.
 	containerMu             gosync.Mutex
 	trustedSQLiteContainers map[string]trustedSQLiteContainer
 	digestVerifiedAt        map[string]time.Time
@@ -1821,13 +1821,21 @@ func (e *Engine) applyChangedPathSyncLocked(
 	ctx context.Context, prepared preparedChangedPathSync,
 ) (SyncStats, int, error) {
 	if prepared.empty() {
-		return SyncStats{}, 0, prepared.classificationErr
+		if prepared.classificationErr == nil {
+			return SyncStats{}, 0, nil
+		}
+		// Unclassified changes may hide member edits, so withdraw authority.
+		revokeErr := e.revokeSQLiteContainerVerification(ctx, prepared.preContainerStates)
+		return SyncStats{}, 0, errors.Join(prepared.classificationErr, revokeErr)
 	}
 	e.resetS3CodexIndexCache()
 	e.resetSourceClaims()
 	e.anomalies.reset()
 	// Begin a container pass so an already-trusted, unchanged container
 	// still gates its fan-out, but never promote from a changed-path subset.
+	if err := e.prepareSQLiteContainerVerification(ctx, prepared.preContainerStates); err != nil {
+		return SyncStats{Aborted: true}, 0, err
+	}
 	e.beginSQLiteContainerPass(prepared.files, prepared.preContainerStates)
 	e.reportProgress(nil, Progress{
 		Phase:         PhaseSyncing,
@@ -1869,7 +1877,7 @@ func (e *Engine) applyChangedPathSyncLocked(
 	if !complete || tombstoneErr != nil {
 		e.poisonSQLiteContainerPass()
 	}
-	e.finishSQLiteContainerPass(true, false)
+	e.finishSQLiteContainerPass(ctx, true, false)
 	if tombstoneErr != nil {
 		return stats, tombstoned, fmt.Errorf(
 			"watcher source reconciliation: %w", tombstoneErr,
@@ -2154,7 +2162,7 @@ func (e *Engine) classifyProviderChangedPath(
 			}
 			if watermarkContainer != "" && watermarkPreStateOK &&
 				!e.forceParse && e.pathRewriter == nil {
-				request.StoredMemberFreshnessPage = e.storedMemberFreshnessPager(watermarkContainer, def.IDPrefix)
+				request.StoredMemberFreshnessPage = e.storedMemberFreshnessPager(watermarkContainer, def.IDPrefix, nil)
 			}
 			if provider.Capabilities().Source.StoredSourceHints == parser.CapabilitySupported {
 				if resolver, ok := provider.(parser.StoredSourceHintScopeProvider); ok {
@@ -5440,6 +5448,10 @@ func (e *Engine) reconcileWatchRootsStreamedLocked(
 	}()
 
 	preContainerStates := e.capturePlannedSQLiteContainerStates(plans, fullCoverage)
+	if err := e.prepareSQLiteContainerVerification(ctx, preContainerStates); err != nil {
+		stats.Aborted = true
+		return stats, metrics, 0, eligibility, err
+	}
 	e.beginStreamingSQLiteContainerPass(preContainerStates)
 	defer func() {
 		// Failures here cannot be attributed to one container, so they
@@ -5449,7 +5461,7 @@ func (e *Engine) reconcileWatchRootsStreamedLocked(
 			stats.providerFailures > 0 {
 			e.poisonSQLiteContainerPass()
 		}
-		e.finishSQLiteContainerPass(false, fullCoverage)
+		e.finishSQLiteContainerPass(ctx, false, fullCoverage)
 	}()
 	providers, completedScopes, failedRoots,
 		failures, discoveryErr, err := e.streamReconciliationCandidates(
@@ -7959,6 +7971,9 @@ func (e *Engine) syncAllLocked(
 	// rows, so a promoted state can never be newer than the discovered
 	// session set (see captureSQLiteContainerStates).
 	preContainerStates := e.captureSQLiteContainerStates(nil)
+	if err := e.prepareSQLiteContainerVerification(ctx, preContainerStates); err != nil {
+		return SyncStats{Aborted: true, Warnings: []string{err.Error()}}
+	}
 
 	var all []parser.DiscoveredFile
 	counts := make(map[parser.AgentType]int)
@@ -8071,7 +8086,7 @@ func (e *Engine) syncAllLocked(
 	if stats.Aborted || ctx.Err() != nil || providerFailures > 0 {
 		e.poisonSQLiteContainerPass()
 	}
-	e.finishSQLiteContainerPass(false, scope == nil)
+	e.finishSQLiteContainerPass(ctx, false, scope == nil)
 	if verifiedPass != 0 {
 		e.finishVerifiedSourcePass(
 			verifiedPass,
@@ -15084,43 +15099,39 @@ func (e *Engine) providerSourceUnchangedInDB(
 	if !ok {
 		return false
 	}
-	if storedSize != fingerprint.Size || storedMtime != fingerprint.MTimeNS {
-		if !e.providerSourceHashFreshDespiteStat(ctx,
-			source.Provider, lookupPath, fingerprint,
-		) {
-			return false
-		}
-	} else if !e.providerFingerprintHashMatchesDB(ctx,
-		agent, lookupPath,
-		fingerprint,
-		semantics.FingerprintHashRequiredForFreshness,
-	) {
+	statsMatch := storedSize == fingerprint.Size && storedMtime == fingerprint.MTimeNS
+	if !statsMatch && (fingerprint.Hash == "" || !providerFingerprintHashEstablishesFreshness(agent)) {
 		return false
 	}
-	// A stale stored project (e.g. a generated roborev CI worktree name)
-	// must defeat the unchanged-source skip so the corrected project is
-	// reparsed, mirroring shouldSkipCodexFingerprint and the in-memory
-	// skip-cache bypass in processProviderFile.
-	if project, ok := e.db.GetProjectByAgentPath(ctx,
-		lookupPath, string(agent),
-	); ok &&
-		parser.NeedsProjectReparse(project) {
+	var storedHash string
+	if fingerprint.Hash != "" && (!statsMatch || semantics.FingerprintHashRequiredForFreshness) {
+		storedHash, _ = e.db.GetFileHashByAgentPath(ctx, lookupPath, string(agent))
+	}
+	if !providerFingerprintMatchesStored(agent, fingerprint, storedSize, storedMtime, storedHash, semantics.FingerprintHashRequiredForFreshness) {
 		return false
 	}
-	// Only a source confirmed unchanged against an existing current session
-	// row may earn a provider_freshness side-table stamp. This is the
-	// DB-confirmed skip site the cold-start branch of
-	// providerSourceFreshBeforeFingerprint closes its loop through: a
-	// content-unchanged source with no stored digest flows fingerprint →
-	// this skip → stamp, without ever persisting a digest before an outcome
-	// the engine can trust.
-	fresh := e.db.GetDataVersionByAgentPath(ctx,
-		lookupPath, string(agent),
-	) >= db.CurrentDataVersion()
+	project, _ := e.db.GetProjectByAgentPath(ctx, lookupPath, string(agent))
+	stored := db.VirtualContainerMemberFreshness{
+		Project:     project,
+		DataVersion: e.db.GetDataVersionByAgentPath(ctx, lookupPath, string(agent)),
+	}
+	fresh := providerSourceMetadataFresh(stored)
 	if fresh {
 		e.stampProviderStatHashForConfirmedSource(ctx, preParseStatHash)
 	}
 	return fresh
+}
+
+func providerSourceMetadataFresh(stored db.VirtualContainerMemberFreshness) bool {
+	return stored.DataVersion >= db.CurrentDataVersion() &&
+		!parser.NeedsProjectReparse(stored.Project)
+}
+
+func providerFingerprintMatchesStored(agent parser.AgentType, fingerprint parser.SourceFingerprint, size, mtime int64, hash string, required bool) bool {
+	if size != fingerprint.Size || mtime != fingerprint.MTimeNS {
+		return fingerprint.Hash != "" && providerFingerprintHashEstablishesFreshness(agent) && hash == fingerprint.Hash
+	}
+	return fingerprint.Hash == "" || !required || hash == fingerprint.Hash
 }
 
 // stampProviderStatHashForConfirmedSource persists the pre-parse
@@ -15169,7 +15180,7 @@ func (e *Engine) providerFingerprintHashMatchesDB(ctx context.Context,
 	storedHash, ok := e.db.GetFileHashByAgentPath(ctx,
 		lookupPath, string(agent),
 	)
-	return ok && storedHash == fingerprint.Hash
+	return ok && providerFingerprintMatchesStored(agent, fingerprint, fingerprint.Size, fingerprint.MTimeNS, storedHash, required)
 }
 
 // providerFingerprintHashEstablishesFreshness reports whether a matching
@@ -15183,25 +15194,6 @@ func (e *Engine) providerFingerprintHashMatchesDB(ctx context.Context,
 // per-source stay stat-gated: a stat mismatch there means real change.
 func providerFingerprintHashEstablishesFreshness(agent parser.AgentType) bool {
 	return agent == parser.AgentHermes || agent == parser.AgentAugureDesktop
-}
-
-// providerSourceHashFreshDespiteStat is the stat-mismatch arm of
-// providerSourceUnchangedInDB. Unlike providerFingerprintHashMatchesDB, an
-// absent hash can never establish freshness here: the stat already disagrees,
-// so only a positive content match may skip. GetFileHashByAgentPath excludes
-// source-missing rows, so a returning member still passes through a full parse.
-func (e *Engine) providerSourceHashFreshDespiteStat(ctx context.Context,
-	agent parser.AgentType,
-	lookupPath string,
-	fingerprint parser.SourceFingerprint,
-) bool {
-	if fingerprint.Hash == "" || !providerFingerprintHashEstablishesFreshness(agent) {
-		return false
-	}
-	storedHash, ok := e.db.GetFileHashByAgentPath(ctx,
-		lookupPath, string(agent),
-	)
-	return ok && storedHash == fingerprint.Hash
 }
 
 // shouldSkipByPath checks file size and mtime against what is
@@ -20860,6 +20852,17 @@ func (e *Engine) SyncSingleSessionContext(
 		// Other providers determine their project during parsing.
 	}
 
+	if _, _, ok := sqliteContainerSourceForFile(file); ok {
+		states := e.captureSQLiteContainerStates([]string{file.Path})
+		if err := e.prepareSQLiteContainerVerification(ctx, states); err != nil {
+			return err
+		}
+		e.beginSQLiteContainerPass([]parser.DiscoveredFile{file}, states)
+		defer func() {
+			e.noteSQLiteContainerResult(file.Path, err == nil && ctx.Err() == nil)
+			e.finishSQLiteContainerPass(ctx, true, false)
+		}()
+	}
 	preserved, sessionsChanged, err = e.processAndWriteSessionFile(
 		ctx, file, sessionID,
 	)

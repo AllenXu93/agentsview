@@ -4,6 +4,10 @@ package sync
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json/v2"
+	"fmt"
+	"log"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -14,18 +18,7 @@ import (
 	"go.kenn.io/agentsview/internal/parser"
 )
 
-// The OpenCode-family providers fan one shared SQLite database into one
-// virtual source per session row. Per-session freshness cannot be decided
-// before parsing (a message or part row can change without bumping the
-// session's time_updated, which is why dropUnchangedSharedSQLiteResults
-// compares content fingerprints after the parse), so a periodic sync of an
-// untouched archive used to re-open and re-parse every session on every
-// pass. The gate restores an O(1) answer for the common idle case: when the
-// container file provably has not changed since a pass that verified every
-// one of its sessions — as decided by parser.SQLiteContainerState, which
-// rests on SQLite's own write markers rather than timestamp precision —
-// none of its sessions can have changed either, and they all skip before
-// fingerprinting.
+const sqliteContainerSyncStatePrefix = "sqlite-container:"
 
 // openCodeFamilySQLiteAgents lists the agents whose sessions live in a
 // shared OpenCode-format SQLite container.
@@ -108,8 +101,7 @@ type sqliteContainerPass struct {
 // rows: promotion may only trust a state that is at least as old as the
 // discovered session set, otherwise a session written between the listing
 // and a later capture would be promoted away and gate-skipped without ever
-// being parsed. Containers whose state cannot be read are simply absent
-// from the map and never promoted.
+// being parsed. Failed captures retain their path with zero state to revoke authority.
 func (e *Engine) captureSQLiteContainerStates(
 	changedPaths []string,
 ) map[string]parser.SQLiteContainerState {
@@ -125,6 +117,9 @@ func (e *Engine) captureSQLiteContainerStates(
 	}
 	for _, rawPath := range changedPaths {
 		path := filepath.Clean(rawPath)
+		if container := sqliteContainerPathForResultPath(path); container != "" {
+			path = container
+		}
 		for _, agent := range openCodeFamilySQLiteAgents {
 			for _, dir := range e.sources().agentDirs[agent] {
 				if dir == "" || strings.HasPrefix(dir, "s3://") {
@@ -224,7 +219,7 @@ func addSQLiteContainerState(
 	}
 	state, ok := statSQLiteContainerState(dbPath)
 	if !ok {
-		return
+		state = parser.SQLiteContainerState{}
 	}
 	states[dbPath] = state
 }
@@ -273,16 +268,21 @@ func openCodeContainerPathForChangedPathEvent(
 // invisible to the session-row watermark wherever its timestamps land —
 // above or below the stored composite alike. Detecting it per event would
 // require reading child rows, which is exactly the archive-sized work this
-// path exists to avoid. Such writes reconcile on the next full-discovery
-// pass, whose digest still catches them (the write itself broke container
-// trust, so that pass carries the full digest); actively watched sessions
+// path exists to avoid. Such writes reconcile at the next complete digest
+// verification once the original deadline is due; actively watched sessions
 // bypass this path entirely via the per-session composite poll. The
 // contract is documented in docs/internal/session-format-sources.md and
 // pinned by TestOpenCodeWatcherPassDefersChildOnlyEditToFullDiscovery.
 func (e *Engine) storedMemberFreshnessPager(
 	container, idPrefix string,
+	coverage func(db.VirtualContainerMemberFreshness) (int64, bool),
 ) parser.StoredMemberFreshnessPager {
-	current := db.CurrentDataVersion()
+	if coverage == nil {
+		current := db.CurrentDataVersion()
+		coverage = func(row db.VirtualContainerMemberFreshness) (int64, bool) {
+			return storedSessionRowWatermarkNS(row), row.DataVersion >= current
+		}
+	}
 	return func(
 		ctx context.Context, afterPath string, limit int,
 	) ([]parser.StoredMemberFreshness, bool, error) {
@@ -308,15 +308,14 @@ func (e *Engine) storedMemberFreshnessPager(
 					})
 					continue
 				}
-				if row.DataVersion < current {
+				coveredThrough, eligible := coverage(row.VirtualContainerMemberFreshness)
+				if !eligible {
 					continue
 				}
 				rows = append(rows, parser.StoredMemberFreshness{
-					Path: row.Path,
-					CoveredThroughNS: storedSessionRowWatermarkNS(
-						row.VirtualContainerMemberFreshness,
-					),
-					FingerprintHash: row.Hash,
+					Path:             row.Path,
+					CoveredThroughNS: coveredThrough,
+					FingerprintHash:  row.Hash,
 				})
 			}
 			if done || len(rows) > 0 {
@@ -353,8 +352,8 @@ func storedSessionRowWatermarkNS(
 }
 
 // sqliteContainerListsWatermarkOnly returns discovery's bounded listing policy.
-// A recently digest-verified container may use its complete-membership
-// watermark listing after a write; due verification, missing state, and
+// A recently verified container reuses its deadline across workers; a recent
+// verification permits timestamp-only checks after writes. Missing state and
 // replacement containers fall back to the full composite listing.
 func (e *Engine) sqliteContainerListsWatermarkOnly(
 	preStates map[string]parser.SQLiteContainerState,
@@ -375,9 +374,133 @@ func (e *Engine) sqliteContainerListsWatermarkOnly(
 		if !ok || sqliteContainerStateReplaced(trusted.state, state) {
 			return false
 		}
-		return verified && openCodeContainerDigestVerificationCurrent(
-			verifiedAt, openCodeContainerDigestVerifyNow(),
-		)
+		return verified && openCodeContainerDigestVerificationCurrent(verifiedAt, openCodeContainerDigestVerifyNow())
+	}
+}
+
+type sqliteContainerVerification struct {
+	Version               int                         `json:"version"`
+	State                 parser.SQLiteContainerState `json:"state"`
+	ObservedChangeCounter uint32                      `json:"observed_change_counter,omitzero"`
+	VerifiedAt            time.Time                   `json:"verified_at"`
+}
+
+// prepareSQLiteContainerVerification consumes each captured container's
+// durable authority before the pass processes it, so an interrupted or failed
+// pass leaves the record revoked. Reads use the reader; a write transaction
+// opens only when some record still holds authority to consume.
+func (e *Engine) prepareSQLiteContainerVerification(ctx context.Context, states map[string]parser.SQLiteContainerState) error {
+	if len(states) == 0 || e.db == nil || e.ephemeral || e.db.ReadOnly() || e.pathRewriter != nil {
+		return nil
+	}
+	records, consumable, err := loadSQLiteContainerVerifications(states, func(key string) (string, error) {
+		return e.db.GetSyncState(ctx, key)
+	})
+	if err == nil && consumable {
+		err = e.db.Update(ctx, func(tx *sql.Tx) error {
+			var loadErr error
+			records, _, loadErr = loadSQLiteContainerVerifications(states, func(key string) (string, error) {
+				return db.GetSyncStateTx(ctx, tx, key)
+			})
+			if loadErr != nil {
+				return loadErr
+			}
+			for path, record := range records {
+				if record.State == (parser.SQLiteContainerState{}) {
+					continue
+				}
+				revoked, err := json.Marshal(sqliteContainerVerification{Version: 1, VerifiedAt: record.VerifiedAt})
+				if err != nil {
+					return err
+				}
+				if err := db.SetSyncStateTx(ctx, tx, sqliteContainerSyncStatePrefix+path, string(revoked)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("preparing SQLite container verification: %w", err)
+	}
+	e.applySQLiteContainerVerifications(states, records)
+	return nil
+}
+
+// revokeSQLiteContainerVerification withdraws skip authority for the captured
+// containers without running a pass, keeping their verification history.
+func (e *Engine) revokeSQLiteContainerVerification(ctx context.Context, states map[string]parser.SQLiteContainerState) error {
+	err := e.prepareSQLiteContainerVerification(ctx, states)
+	e.containerMu.Lock()
+	defer e.containerMu.Unlock()
+	for path := range states {
+		delete(e.trustedSQLiteContainers, path)
+	}
+	return err
+}
+
+// loadSQLiteContainerVerifications returns a record for every captured
+// container with stored verification. Unusable records load as the zero
+// record, which grants nothing. consumable reports whether any record still
+// holds skip authority.
+func loadSQLiteContainerVerifications(
+	states map[string]parser.SQLiteContainerState,
+	get func(key string) (string, error),
+) (map[string]sqliteContainerVerification, bool, error) {
+	records := make(map[string]sqliteContainerVerification, len(states))
+	consumable := false
+	for path := range states {
+		raw, err := get(sqliteContainerSyncStatePrefix + path)
+		if err != nil {
+			return nil, false, err
+		}
+		if raw == "" {
+			continue
+		}
+		records[path] = sqliteContainerVerification{}
+		var record sqliteContainerVerification
+		if err := json.Unmarshal([]byte(raw), &record); err != nil {
+			log.Printf("decoding SQLite container verification for %s: %v", path, err)
+			continue
+		}
+		if record.Version != 1 || record.VerifiedAt.IsZero() || record.VerifiedAt.After(openCodeContainerDigestVerifyNow()) {
+			continue
+		}
+		records[path] = record
+		if record.State != (parser.SQLiteContainerState{}) {
+			consumable = true
+		}
+	}
+	return records, consumable, nil
+}
+
+// applySQLiteContainerVerifications replaces in-memory trust for the captured
+// containers with what their durable records allow.
+func (e *Engine) applySQLiteContainerVerifications(
+	states map[string]parser.SQLiteContainerState,
+	records map[string]sqliteContainerVerification,
+) {
+	e.containerMu.Lock()
+	defer e.containerMu.Unlock()
+	for path, state := range states {
+		// Untimed legacy trust has no durable digest authority to consume.
+		if _, recorded := records[path]; !recorded && e.digestVerifiedAt[path].IsZero() && state != (parser.SQLiteContainerState{}) {
+			continue
+		}
+		delete(e.trustedSQLiteContainers, path)
+		delete(e.digestVerifiedAt, path)
+		if record, valid := records[path]; valid && !record.VerifiedAt.IsZero() {
+			if e.digestVerifiedAt == nil {
+				e.digestVerifiedAt = make(map[string]time.Time)
+			}
+			e.digestVerifiedAt[path] = record.VerifiedAt
+			if !sqliteContainerStateReplaced(record.State, state) && state.DBChangeCounter >= record.ObservedChangeCounter {
+				if e.trustedSQLiteContainers == nil {
+					e.trustedSQLiteContainers = make(map[string]trustedSQLiteContainer)
+				}
+				e.trustedSQLiteContainers[path] = trustedSQLiteContainer{state: record.State}
+			}
+		}
 	}
 }
 
@@ -387,12 +510,12 @@ func openCodeContainerDigestVerificationCurrent(verifiedAt, now time.Time) bool 
 }
 
 // filterQuickSyncFiles applies the quick-sync mtime cutoff, exempting the
-// sessions of containers whose digest verification has lapsed. A lapsed
+// sessions of containers whose verification is due or authority was revoked. A lapsed
 // container's due pass already paid the full digest listing, and the stamp
 // can only refresh when every discovered session completes; filtering its
 // old-composite sessions would discard the listing's findings and leave the
-// container due again on every subsequent quick sync. The exemption costs at
-// most one full-gated pass over the container per verification interval.
+// container due again on every subsequent quick sync. Unchanged complete
+// fingerprints count as finished before workers run; unresolved members retry.
 func (e *Engine) filterQuickSyncFiles(
 	ctx context.Context,
 	files []parser.DiscoveredFile,
@@ -402,28 +525,77 @@ func (e *Engine) filterQuickSyncFiles(
 	if len(due) == 0 {
 		return e.filterFilesByMtime(ctx, files, cutoff)
 	}
+
 	kept := make([]parser.DiscoveredFile, 0, len(files))
 	filterable := make([]parser.DiscoveredFile, 0, len(files))
-	for _, f := range files {
-		if dbPath, _, ok := sqliteContainerSourceForFile(f); ok && due[dbPath] {
-			kept = append(kept, f)
-			continue
-		}
-		filterable = append(filterable, f)
+	type dueMember struct {
+		file      parser.DiscoveredFile
+		container string
 	}
+	var candidates []dueMember
+	for _, f := range files {
+		path, _, ok := sqliteContainerSourceForFile(f)
+		if ok && due[path] {
+			candidates = append(candidates, dueMember{file: f, container: path})
+		} else {
+			filterable = append(filterable, f)
+		}
+	}
+	slices.SortFunc(candidates, func(a, b dueMember) int {
+		if c := strings.Compare(a.container, b.container); c != 0 {
+			return c
+		}
+		if c := strings.Compare(string(a.file.Agent), string(b.file.Agent)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.file.Path, b.file.Path)
+	})
+	var container string
+	var agent parser.AgentType
+	var cursor *parser.StoredMemberFreshnessCursor
+	var pageFailed bool
+	for _, candidate := range candidates {
+		f, dbPath := candidate.file, candidate.container
+		if cursor == nil || container != dbPath || agent != f.Agent {
+			agent, container, pageFailed = f.Agent, dbPath, false
+			cursor = parser.NewStoredMemberFreshnessCursor(e.storedMemberFreshnessPager(dbPath, e.idPrefix+string(f.Agent)+":", func(row db.VirtualContainerMemberFreshness) (int64, bool) {
+				return row.MTimeNS, row.Agent == string(f.Agent) && providerSourceMetadataFresh(row)
+			}))
+		}
+		var row parser.StoredMemberFreshness
+		var found bool
+		if !pageFailed {
+			var err error
+			row, found, err = cursor.Lookup(ctx, f.Path)
+			if err != nil {
+				pageFailed = true
+				log.Printf("quick sync: reading stored %s freshness for %s: %v; workers check its remaining members", agent, dbPath, err)
+			}
+		}
+		if found && !pageFailed && f.ProviderSource != nil &&
+			!e.forceParseRequested(f) && e.pathRewriter == nil && e.sqliteContainerPassCaptureValid(dbPath) {
+			fingerprint, complete := parser.OpenCodeCompositeFingerprint(*f.ProviderSource)
+			if row.Suppressed || (complete && fingerprint.MTimeNS != 0 && providerFingerprintMatchesStored(f.Agent, fingerprint, 0, row.CoveredThroughNS, row.FingerprintHash, true)) {
+				e.noteSQLiteContainerResult(f.Path, true)
+				continue
+			}
+		}
+		kept = append(kept, f)
+	}
+
 	return append(kept, e.filterFilesByMtime(ctx, filterable, cutoff)...)
 }
 
 // lapsedDigestVerificationContainers returns the containers among the
-// discovered files whose verification stamp exists but has aged past the
-// interval, and whose current pass carried the full digest listing. The
+// discovered files whose verification history requires a complete check after
+// authority was revoked or the deadline expired, and whose pass listed full digests. The
 // listing requirement keeps the exemption consistent with what discovery
 // produced: a pass that crossed the interval boundary after listing
 // watermark-only has no digest findings to process and could not refresh
 // the stamp, so its sessions stay behind the cutoff until the next pass
 // lists the digest form. A container with no stamp stays subject to the
-// cutoff: a fresh engine has no verification window to restore, and
-// exempting it would turn every quick sync into container-sized work.
+// cutoff: without a valid persisted stamp there is no verification deadline,
+// and exempting it would turn every quick sync into container-sized work.
 func (e *Engine) lapsedDigestVerificationContainers(
 	files []parser.DiscoveredFile,
 ) map[string]bool {
@@ -444,8 +616,8 @@ func (e *Engine) lapsedDigestVerificationContainers(
 			continue
 		}
 		verifiedAt, stamped := e.digestVerifiedAt[dbPath]
-		if !stamped ||
-			openCodeContainerDigestVerificationCurrent(verifiedAt, now) {
+		_, authority := e.trustedSQLiteContainers[dbPath]
+		if !stamped || (authority && openCodeContainerDigestVerificationCurrent(verifiedAt, now)) {
 			continue
 		}
 		if due == nil {
@@ -540,7 +712,12 @@ func (e *Engine) beginStreamingSQLiteContainerPass(
 		failed:           make(map[string]bool),
 		fullDigestListed: make(map[string]bool),
 	}
-	maps.Copy(pass.captured, preStates)
+	for path, state := range preStates {
+		pass.captured[path] = state
+		if state == (parser.SQLiteContainerState{}) {
+			pass.failed[path] = true
+		}
+	}
 	e.containerMu.Lock()
 	e.containerPass = pass
 	e.containerMu.Unlock()
@@ -616,7 +793,7 @@ func (e *Engine) finishStreamingSQLiteContainerDiscovery() {
 }
 
 // sqliteContainerSourceFresh reports whether a discovered file belongs to a
-// container whose current state matches the last fully verified state AND
+// container whose current state matches the last trusted state AND
 // whose session ID was part of that verified pass, in which case the
 // session is unchanged and skips before fingerprinting. The membership
 // check covers hybrid roots, where the discoverable row set can grow (a
@@ -653,6 +830,10 @@ func (e *Engine) sqliteContainerSourceFresh(ctx context.Context, file parser.Dis
 	// watermark pass promoted the same container state to trusted; otherwise
 	// child-only edits remain hidden behind the container-level skip.
 	if pass.fullDigestListed[dbPath] {
+		e.containerMu.Unlock()
+		return false
+	}
+	if verifiedAt, timed := e.digestVerifiedAt[dbPath]; timed && !openCodeContainerDigestVerificationCurrent(verifiedAt, openCodeContainerDigestVerifyNow()) {
 		e.containerMu.Unlock()
 		return false
 	}
@@ -798,9 +979,6 @@ func (e *Engine) noteSQLiteContainerResult(path string, ok bool) {
 // poisonSQLiteContainerPass blocks every promotion for the current pass.
 // Used when a batched DB write fails, because batch failures cannot be
 // attributed to individual sessions.
-// poisonSQLiteContainerPass marks the active pass invalidated by a failure
-// that cannot be attributed to one container; finalization then clears
-// every captured verification instead of promoting.
 func (e *Engine) poisonSQLiteContainerPass() {
 	e.containerMu.Lock()
 	defer e.containerMu.Unlock()
@@ -820,15 +998,8 @@ func (e *Engine) poisonSQLiteContainerPass() {
 // must never promote (changed-path subsets, whose discovery covers only
 // the changed sessions).
 //
-// digestVerifiedAt clears only on evidence against a container: an entry
-// in pass.failed (a failed session, or a capture that changed under the
-// pass), or a poisoned pass, whose failure cannot be attributed to a
-// container and so invalidates every captured verification. A clean pass
-// that merely did not cover a container keeps its verification age: the
-// timestamp is written only by the full-digest promotion below, so a
-// preserved timestamp can never extend child-only-edit staleness past the
-// bounded verification window, while clearing it forces a full composite
-// child scan the next discovery would otherwise skip.
+// Failures revoke authority while preserving the original age for quick-sync
+// recovery; only a complete successful digest pass renews verification.
 //
 // fullDiscovery marks passes whose discovery covered every configured
 // root (full syncs, as opposed to changed-path or scoped-root passes).
@@ -837,26 +1008,90 @@ func (e *Engine) poisonSQLiteContainerPass() {
 // storage JSONs, or gone — loses its trusted entry. Per-session archive-path
 // checks protect newly re-exposed rows; removing the unused container trust
 // here also keeps the compact state map aligned with current discovery.
-func (e *Engine) finishSQLiteContainerPass(incomplete, fullDiscovery bool) {
-	e.containerMu.Lock()
-	pass := e.containerPass
-	if incomplete || pass == nil || pass.poisoned {
-		e.containerPass = nil
-		if pass != nil {
-			if pass.poisoned {
-				e.clearDigestVerificationForPass(pass)
-			} else {
-				for dbPath := range pass.failed {
-					delete(e.digestVerifiedAt, dbPath)
+func (e *Engine) finishSQLiteContainerPass(ctx context.Context, incomplete, fullDiscovery bool) {
+	records := make(map[string]sqliteContainerVerification)
+	verifiedAt := openCodeContainerDigestVerifyNow()
+	var discovered map[string]int
+	defer func() {
+		if (len(records) == 0 && discovered == nil) || e.db == nil || e.ephemeral || e.db.ReadOnly() || e.pathRewriter != nil {
+			return
+		}
+		err := e.db.Update(ctx, func(tx *sql.Tx) error {
+			mayWrite := func(key string) (bool, error) {
+				raw, err := db.GetSyncStateTx(ctx, tx, key)
+				if err != nil {
+					return false, err
+				}
+				var header struct {
+					Version int `json:"version"`
+				}
+				if json.Unmarshal([]byte(raw), &header) == nil && header.Version > 1 {
+					return false, nil
+				}
+				return true, nil
+			}
+			if discovered != nil {
+				keys, err := db.ListSyncStateKeysByPrefixTx(ctx, tx, sqliteContainerSyncStatePrefix)
+				if err != nil {
+					return err
+				}
+				for _, key := range keys {
+					if discovered[strings.TrimPrefix(key, sqliteContainerSyncStatePrefix)] == 0 {
+						writable, err := mayWrite(key)
+						if err != nil {
+							return err
+						}
+						if !writable {
+							continue
+						}
+						if err := db.DeleteSyncStateTx(ctx, tx, key); err != nil {
+							return err
+						}
+					}
 				}
 			}
+			for path, record := range records {
+				writable, err := mayWrite(sqliteContainerSyncStatePrefix + path)
+				if err != nil {
+					return err
+				}
+				if !writable {
+					continue
+				}
+				raw, err := json.Marshal(record)
+				if err != nil {
+					return err
+				}
+				if err := db.SetSyncStateTx(ctx, tx, sqliteContainerSyncStatePrefix+path, string(raw)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("writing SQLite container verification: %v", err)
+		}
+	}()
+	e.containerMu.Lock()
+	pass := e.containerPass
+	if pass == nil || pass.poisoned {
+		e.containerPass = nil
+		if pass != nil {
+			e.clearDigestVerificationForPass(pass)
 		}
 		e.containerMu.Unlock()
 		return
 	}
 	e.containerMu.Unlock()
 
-	digestFailures := e.sqliteContainerDigestRevalidationFailures(pass)
+	// A write after capture only blocks promotion or advancement. Prior
+	// trust stays valid: its state no longer matches the container, so it
+	// cannot gate-skip, and the next preparation still checks identity and
+	// counter rollback. Incomplete passes never promote, so skip the re-stat.
+	var changedDuringPass map[string]struct{}
+	if !incomplete {
+		changedDuringPass = e.sqliteContainerChangedDuringPass(pass)
+	}
 
 	e.containerMu.Lock()
 	defer e.containerMu.Unlock()
@@ -868,22 +1103,40 @@ func (e *Engine) finishSQLiteContainerPass(incomplete, fullDiscovery bool) {
 		e.clearDigestVerificationForPass(pass)
 		return
 	}
-	if fullDiscovery {
+	if fullDiscovery && !incomplete {
+		discovered = maps.Clone(pass.discovered)
 		for dbPath := range e.trustedSQLiteContainers {
 			if pass.discovered[dbPath] == 0 {
 				delete(e.trustedSQLiteContainers, dbPath)
+			}
+		}
+		for dbPath := range e.digestVerifiedAt {
+			if pass.discovered[dbPath] == 0 {
 				delete(e.digestVerifiedAt, dbPath)
 			}
 		}
 	}
-	for dbPath := range digestFailures {
-		pass.failed[dbPath] = true
-	}
 	for dbPath := range pass.failed {
-		delete(e.digestVerifiedAt, dbPath)
+		delete(e.trustedSQLiteContainers, dbPath)
 	}
 	for dbPath, state := range pass.captured {
 		if pass.failed[dbPath] {
+			continue
+		}
+		_, changed := changedDuringPass[dbPath]
+		settled := !incomplete && !changed
+		if trusted, ok := e.trustedSQLiteContainers[dbPath]; ok && (!settled || !pass.fullDigestListed[dbPath]) {
+			if settled && pass.discovered[dbPath] > 0 && pass.completed[dbPath] == pass.discovered[dbPath] {
+				trusted.state = state
+				e.trustedSQLiteContainers[dbPath] = trusted
+			}
+			if at := e.digestVerifiedAt[dbPath]; !at.IsZero() && trusted.state.DBInode != 0 && trusted.state.DBDevice != 0 {
+				// Partial passes record writes without granting whole-container skip authority.
+				records[dbPath] = sqliteContainerVerification{Version: 1, State: trusted.state, ObservedChangeCounter: state.DBChangeCounter, VerifiedAt: at}
+			}
+			continue
+		}
+		if !settled {
 			continue
 		}
 		if pass.discovered[dbPath] == 0 ||
@@ -902,28 +1155,25 @@ func (e *Engine) finishSQLiteContainerPass(incomplete, fullDiscovery bool) {
 			if e.digestVerifiedAt == nil {
 				e.digestVerifiedAt = make(map[string]time.Time)
 			}
-			e.digestVerifiedAt[dbPath] = openCodeContainerDigestVerifyNow()
+			e.digestVerifiedAt[dbPath] = verifiedAt
+		}
+		if at, ok := e.digestVerifiedAt[dbPath]; ok {
+			if state.DBInode == 0 || state.DBDevice == 0 {
+				state = parser.SQLiteContainerState{}
+			}
+			records[dbPath] = sqliteContainerVerification{Version: 1, State: state, VerifiedAt: at}
 		}
 	}
 }
 
-// sqliteContainerDigestRevalidationFailures rechecks full-digest containers
-// without holding containerMu during filesystem I/O.
-func (e *Engine) sqliteContainerDigestRevalidationFailures(
+// sqliteContainerChangedDuringPass rechecks captured containers without
+// holding containerMu during filesystem I/O.
+func (e *Engine) sqliteContainerChangedDuringPass(
 	pass *sqliteContainerPass,
 ) map[string]struct{} {
 	e.containerMu.Lock()
-	captures := make(map[string]parser.SQLiteContainerState,
-		len(pass.fullDigestListed))
+	captures := maps.Clone(pass.captured)
 	failures := make(map[string]struct{})
-	for dbPath := range pass.fullDigestListed {
-		state, ok := pass.captured[dbPath]
-		if !ok {
-			failures[dbPath] = struct{}{}
-			continue
-		}
-		captures[dbPath] = state
-	}
 	e.containerMu.Unlock()
 
 	for dbPath, captured := range captures {
@@ -935,15 +1185,15 @@ func (e *Engine) sqliteContainerDigestRevalidationFailures(
 	return failures
 }
 
-// clearDigestVerificationForPass clears verification age for every container
-// whose capture or discovery was invalid during the pass. Failed discoveries
+// clearDigestVerificationForPass revokes skip authority while preserving history
+// for containers whose capture or discovery was invalid. Failed discoveries
 // may have no captured entry, so both maps are part of the invalidation set.
 func (e *Engine) clearDigestVerificationForPass(pass *sqliteContainerPass) {
 	for dbPath := range pass.captured {
-		delete(e.digestVerifiedAt, dbPath)
+		delete(e.trustedSQLiteContainers, dbPath)
 	}
 	for dbPath := range pass.failed {
-		delete(e.digestVerifiedAt, dbPath)
+		delete(e.trustedSQLiteContainers, dbPath)
 	}
 }
 

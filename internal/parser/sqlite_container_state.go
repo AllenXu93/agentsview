@@ -8,64 +8,48 @@ import (
 	"os"
 )
 
-// SQLiteContainerState captures a shared SQLite container file's
-// change-detection state. Two equal states mean the container provably has
-// not changed between the two captures.
+// SQLiteContainerState captures SQLite write markers for bounded freshness
+// reuse. A mismatch costs one redundant re-read; a false match hides a write,
+// so callers bound how long a matching state may be trusted.
 //
-// "Provably" deliberately does not rest on timestamp equality. Filesystem
-// mtime granularity varies (ns on APFS/ext4, 1s on HFS+, 2s on FAT) and
-// timestamps round-trip through layers with different precisions, so
-// comparisons finer than one second are not meaningful; mtimes here are
-// truncated to whole seconds and act only as coarse extra signal. The real
-// precision comes from SQLite's own write markers, which advance on every
-// committed transaction regardless of any clock:
+// The markers come from SQLite rather than the clock, because filesystem
+// mtime precision varies (1s on HFS+, 2s on FAT) and mtimes here are truncated
+// to whole seconds:
 //
-//   - the 32-bit file change counter at byte 24 of the database header
-//     (bumped per transaction in rollback-journal mode, and on every
-//     checkpoint in WAL mode), and
-//   - the WAL header's checkpoint sequence number and random salts, plus
-//     the WAL size: between WAL resets commits only append frames ("a WAL
-//     always grows from beginning toward the end", so the size advances),
-//     and frames are only ever overwritten after a reset, whose first
-//     write transaction rewrites the header with an incremented salt-1
-//     and re-randomized salt-2 — the salts are SQLite's own mechanism for
-//     invalidating stale frames. Every committed frame therefore either
-//     grows the WAL or lands behind changed salts; a state that compares
-//     equal cannot hide new frames short of a fresh WAL's two random
-//     salts colliding with the captured ones.
+//   - The database header's change counter (byte 24) advances on every
+//     rollback-journal transaction and on every WAL checkpoint.
+//   - Between WAL resets, commits only append frames, so the WAL size grows.
+//     A reset rewrites the WAL header with new salts and checkpoint sequence.
+//   - File identity distinguishes a replaced or restored file from in-place
+//     writes, which a byte-identical copy would otherwise match.
 //
-// A spurious mismatch merely costs one redundant re-read, while a wrong
-// match is what the write markers rule out.
+// Matching states are not proof of no change: a same-size write checkpointed
+// and truncated within one recorded second can preserve every marker. That is
+// why matching states still require periodic full digest verification.
 //
-// Both headers are read per the documented on-disk format, which SQLite
-// pledges to keep backwards compatible through 2050:
-//
-//	https://www.sqlite.org/fileformat2.html (database header
-//	#the_database_header, WAL format #wal_file_format; layouts
-//	unchanged since 3.0.0 and 3.7.0 respectively)
-//	https://www.sqlite.org/lts.html (long-term support and format
-//	stability pledge through 2050)
+// Both headers follow the documented on-disk format, which SQLite commits to
+// keeping compatible through 2050: https://www.sqlite.org/fileformat2.html and
+// https://www.sqlite.org/lts.html.
 type SQLiteContainerState struct {
-	DBSize          int64
-	DBMtimeSec      int64
-	DBChangeCounter uint32
+	DBSize          int64  `json:"DBSize"`
+	DBMtimeSec      int64  `json:"DBMtimeSec"`
+	DBChangeCounter uint32 `json:"DBChangeCounter"`
 	// DBInode and DBDevice distinguish a replaced or restored container
 	// file (new inode) from in-place transaction writes, which the header
 	// markers alone cannot: a byte-identical copy carries the same size,
-	// counter, and salts. Zero on platforms without cheap file identity
-	// (Windows), where replacement detection degrades to the other
-	// markers. In-place byte surgery that preserves every marker and
+	// counter, and salts. Zero when native file identity is unavailable.
+	// In-place byte surgery that preserves every marker and
 	// lands within the trusted mtime's second is explicitly out of
 	// scope — the same exposure class every mtime-based sync tool
 	// accepts.
-	DBInode  uint64
-	DBDevice uint64
+	DBInode  uint64 `json:"DBInode"`
+	DBDevice uint64 `json:"DBDevice"`
 
-	WALSize     int64
-	WALMtimeSec int64
-	WALCkptSeq  uint32
-	WALSalt1    uint32
-	WALSalt2    uint32
+	WALSize     int64  `json:"WALSize"`
+	WALMtimeSec int64  `json:"WALMtimeSec"`
+	WALCkptSeq  uint32 `json:"WALCkptSeq"`
+	WALSalt1    uint32 `json:"WALSalt1"`
+	WALSalt2    uint32 `json:"WALSalt2"`
 }
 
 // sqliteHeaderProbeSize covers the 100-byte SQLite database header; the
@@ -148,7 +132,12 @@ func sqliteWALHasFrames(path string) bool {
 // headers cannot be read, in which case the container must never be treated
 // as unchanged.
 func StatSQLiteContainerState(dbPath string) (SQLiteContainerState, bool) {
-	info, err := os.Stat(dbPath)
+	file, err := os.Open(dbPath)
+	if err != nil {
+		return SQLiteContainerState{}, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return SQLiteContainerState{}, false
 	}
@@ -156,8 +145,8 @@ func StatSQLiteContainerState(dbPath string) (SQLiteContainerState, bool) {
 		DBSize:     info.Size(),
 		DBMtimeSec: info.ModTime().Unix(),
 	}
-	state.DBInode, state.DBDevice = sourceFileIdentity(info)
-	counter, ok := readSQLiteChangeCounter(dbPath)
+	state.DBInode, state.DBDevice = sourceFileIdentityForFile(file, info)
+	counter, ok := readSQLiteChangeCounterFromFile(file)
 	if !ok {
 		return SQLiteContainerState{}, false
 	}
@@ -201,12 +190,7 @@ func StatSQLiteContainerState(dbPath string) (SQLiteContainerState, bool) {
 	return state, true
 }
 
-func readSQLiteChangeCounter(dbPath string) (uint32, bool) {
-	f, err := os.Open(dbPath)
-	if err != nil {
-		return 0, false
-	}
-	defer f.Close()
+func readSQLiteChangeCounterFromFile(f *os.File) (uint32, bool) {
 	header := make([]byte, sqliteHeaderProbeSize)
 	if _, err := f.ReadAt(header, 0); err != nil {
 		return 0, false
