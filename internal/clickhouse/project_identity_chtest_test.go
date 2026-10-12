@@ -7,12 +7,11 @@ import (
 	"database/sql"
 	"testing"
 
-	"go.kenn.io/agentsview/internal/dbtest"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/export"
 )
 
@@ -34,7 +33,6 @@ func TestProjectInventoryRulesAndCandidates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fixtureMachine, rules.Machine)
 	assert.Empty(t, rules.Rules, "no worktree mapping rules seeded")
-	assert.Contains(t, rules.Machines, fixtureMachine)
 
 	projects, err := store.BuildProjectIdentityMap(ctx, []string{"alpha"})
 	require.NoError(t, err)
@@ -73,4 +71,15 @@ func TestCHUsageGroups(t *testing.T) {
 	_, err = syncer.Push(t.Context(), false, nil)
 	require.NoError(t, err)
 	dbtest.AssertUsageGroups(t, store)
+}
+
+func TestProjectRuleMachinesSortCombinedUnion(t *testing.T) {
+	store, _, _ := newPushedStore(t)
+	for _, machine := range []string{"z-machine", "a-machine", "m-machine"} {
+		_, err := store.conn.ExecContext(t.Context(), `INSERT INTO source_worktree_project_mappings (source_archive_id, machine, path_prefix, layout, project, original_project, enabled, updated_at, push_version) VALUES ('archive-order', ?, '/repo', 'explicit', 'alpha', '', true, '', 1)`, machine)
+		require.NoError(t, err)
+	}
+	rules, err := store.ListProjectRules(t.Context(), "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a-machine", "m-machine", "test-machine", "z-machine"}, rules.Machines)
 }

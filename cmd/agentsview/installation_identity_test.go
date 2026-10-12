@@ -121,3 +121,29 @@ func TestTelemetryOptionsPassInstallationAge(t *testing.T) {
 		})
 	}
 }
+
+func TestTelemetryOptionsMigratesClaimsOnlyWhenEnabled(t *testing.T) {
+	const legacy = "install-one 2026-10-08 sessions"
+	const converted = `{"version":1,"days":{"[\"install-one\",\"screen_viewed\",\"sessions\"]":["2026-10-08"]}}`
+	for _, tc := range []struct{ enabled, want string }{
+		{"1", converted},
+		{"0", legacy},
+	} {
+		t.Run(tc.enabled, func(t *testing.T) {
+			t.Setenv(telemetry.EnabledEnv, tc.enabled)
+			t.Setenv(telemetry.GenericEnabledEnv, "1")
+			cfg := config.Config{DataDir: t.TempDir(), InstallationID: "install-one"}
+			path := filepath.Join(cfg.DataDir, "telemetry-screen-views")
+			require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
+			opts := telemetryOptions(cfg)
+			assert.Equal(t, path, opts.ScreenClaimsPath)
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			if tc.enabled == "1" {
+				assert.JSONEq(t, tc.want, string(data))
+			} else {
+				assert.Equal(t, tc.want, string(data))
+			}
+		})
+	}
+}
