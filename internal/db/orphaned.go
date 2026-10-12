@@ -1593,7 +1593,7 @@ func (d *DB) CopySessionMetadataFrom(
 				updated_at = excluded.updated_at`); err != nil {
 			return fmt.Errorf("copying archive metadata: %w", err)
 		}
-		version, err := readUserVersion(ctx, tx)
+		version, _, err := readUserVersion(ctx, tx)
 		if err != nil {
 			return err
 		}

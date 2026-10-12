@@ -8,10 +8,39 @@ ClickHouse, archive resync, or storage queries.
 SQLite is the persistent archive. Never delete, drop, truncate, or recreate it
 to handle a data-version change.
 
-Use non-destructive schema migrations such as `ALTER TABLE` and `UPDATE`. A
-parser change that needs a full resync must build a fresh database, sync source
-files, copy orphaned sessions from the old database, and swap the files
-atomically. Preserve sessions even when their source files no longer exist.
+Use non-destructive schema migrations such as `ALTER TABLE` and `UPDATE`.
+
+A parser upgrade normally requires a full resync. A parser change that needs a
+full resync must build a fresh database, sync source files, copy orphaned
+sessions from the old database, and swap the files atomically. Preserve sessions
+even when their source files no longer exist. Schema repairs also require a full
+resync. Archive-only archives use the preservation rebuild, which does not read
+source files on the receiving host.
+
+A parser upgrade can instead reparse only the affected providers in place.
+Declare it in `dataVersionScopes` in `internal/db/data_version_scope.go`:
+
+- Declare a version only when the reparse keeps source and session identities.
+  Add a regression test that proves it.
+- List every provider whose stored output changes, including each provider that
+  shares the changed parser. A provider left out keeps stale output marked as
+  current.
+- Declare only versions from 131. Released binaries treated earlier versions as
+  full rebuilds, and their retry rows cannot be told apart from complete rows.
+  `TestValidateDataVersionScopes` enforces these limits.
+
+When a writable open applies a declared upgrade, one transaction stamps
+unaffected sessions with the new version and deletes the affected providers'
+skip and failure cache entries. Rows of affected providers stay at their old
+version, so ordinary sync reparses them and retries failures. Rows already below
+the archive version are retry markers and also stay stale. Sessions whose
+sources are gone keep their old parser version.
+
+The open also sets the `scoped_upgrade_pending` key in the `stats` table. While
+that key is set, startup runs its initial sync and read-only opens report that
+the archive needs a resync. A full, authoritative sync pass deletes the key,
+even when individual sources failed to parse. Incremental passes, aborted
+passes, and passes with provider failures or deferred sources leave it in place.
 
 The replacement archive's writer raises `wal_autocheckpoint` to 128 MiB of pages
 for the bulk load; the live writer keeps SQLite's 1,000-page default. The
