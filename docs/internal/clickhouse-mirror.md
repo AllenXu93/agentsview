@@ -238,6 +238,88 @@ and rebuilt on the next schema step, and a rebuild that stopped halfway finishes
 on the next start. The schema step adds a missing projection only with the
 refresh stopped, and always starts it again.
 
+**Refresh without a table exchange.** Every refresh of the view ends with
+`EXCHANGE TABLES`, which ClickHouse runs as a `renameat2` call with the
+`RENAME_EXCHANGE` flag on the database's metadata files and has no fallback for.
+Filesystems without that flag, such as NFS, fail every refresh with
+`UNSUPPORTED_METHOD`, and the table is never filled. The schema step therefore
+exchanges two empty scratch tables in the mirror database. When that fails, it
+does not create the view, drops one an earlier version created, and creates the
+first rebuild lock if none exists. Probe tables that a killed push left behind
+are dropped once they are an hour old.
+
+The lock table is what tells pushes to rebuild. A push without the view rebuilds
+only while a lock exists and the newest one is not retired. A database that can
+swap tables has no lock. A push there that finds the view missing, as while a
+schema step recreates it, never rebuilds.
+
+Each push in rebuild mode rebuilds the table itself before it returns. It runs
+the view's query into a new `prepared_usage_build_<n>` table and moves that
+table's parts into `prepared_usage` with `REPLACE PARTITION`, which replaces all
+the parts at once. Readers see the previous rows or the new ones, never a mix,
+and read them as they read rows the view prepared. A push skips its rebuild when
+the stored stamp equals the current one, both before and after it takes the
+lock. After publishing, the holder rebuilds once more if the snapshots changed
+meanwhile. If they changed again, it logs that and leaves the rest to the next
+push. Without the view, nothing refreshes on a schedule, and a failed rebuild
+waits for the next push. Because `prepared_usage` is then not a refreshable
+view's target, native backups include its rows without
+`backup_data_from_refreshable_materialized_view_targets`.
+
+Rebuilds take turns, as the view's refreshes do. A read checks freshness and
+fetches rows in separate queries, so an older build must never replace a newer
+one between them. The lock is a numbered `prepared_usage_rebuild_lock_<n>`
+table. A push takes the lock by creating the table with the next number, which
+only one push can do. The push drops the older lock tables; the newest stays
+after release, so one lock table persists and numbers never repeat. A push that
+finds the lock held skips its rebuild, and reads prepare the changed sessions
+themselves meanwhile.
+
+A lock's comment holds its state as JSON, which ClickHouse changes atomically.
+`status` is `held`, `released`, or `retired`. A held lock also carries
+`renewed_at`, the ClickHouse server's Unix time when its holder last renewed it.
+A comment that is not valid JSON or has another status stops rebuilds with an
+error that names the lock and the statement that repairs it.
+
+A lock can outlive its holder:
+
+- The holder renews the lock's timestamp every ten minutes. A lock not renewed
+  for an hour belongs to a stopped push, and the next push takes the next
+  number.
+- A push that paused between reading the locks and creating its own can create a
+  number a newer push already retired. Right after creating its lock, a push
+  checks for a higher number and gives its own up if one exists.
+- The build table carries the lock's number, and only a lock holder creates one.
+  A new holder drops every build table with a lower number. A publish still
+  reading one finishes before the drop returns, and a later one fails without
+  its table, so older rows never land after newer ones. A push also checks for
+  a newer lock before publishing and discards its build if one exists.
+- A push drops its own build table when it finishes, so a leftover exists only
+  between a killed push and the next rebuild.
+- When a later schema step finds that the database can swap tables, as when the
+  data directory moved off NFS, it first creates one more lock number with
+  status `retired` and drops the older locks and every build table. A rebuild
+  that already took a lock finds the newer lock and discards its build;
+  dropping its build table waits for a publish already running and fails a
+  later one. A push that tries to take the lock afterwards finds it retired
+  and skips. Only then does the schema step create the view. Because a push
+  rebuilds only while a lock exists, a database with no lock has no rebuild to
+  fence.
+- If the schema step stops after retiring the lock but before creating the view,
+  a push finds the newest lock retired and no view. The push first checks that
+  the database can still swap tables. If it can, the push retires again,
+  creates the view, and starts its refresh. If it cannot, the push releases
+  the retired lock and rebuilds.
+- Retirement can pause after reading the locks while pushes take newer numbers,
+  so it checks for a higher number right after creating its retired lock, as a
+  push does after taking a lock. If one exists, it retires again above it.
+- If the database later loses the ability to swap tables, the schema step marks
+  the retired lock released and then drops the view. From then on, each push
+  rebuilds. A schema step that also replaces `prepared_usage` drops the view
+  before it releases the lock. A push in that gap finds the newest lock
+  retired and no view, and its swap check sends it to rebuild instead of
+  creating the view.
+
 **Currency is proven per read.** A read uses prepared rows only when every
 session has a current snapshot. Sessions pushed since the last refresh form a
 delta: their rows are prepared and priced in Go once per snapshot, sent to the
@@ -292,5 +374,8 @@ hides the stale ones from readers.
 
 Unit tests cover dialect rendering, config, TLS checks, and fingerprints.
 Integration tests use the `chtest` tag against
-`clickhouse/clickhouse-server:26.8` or `TEST_CLICKHOUSE_URL`.
-`make test-clickhouse` is the suite. Do not point it at a live mirror.
+`clickhouse/clickhouse-server:26.8` or `TEST_CLICKHOUSE_URL`. Tests of the
+refresh without a table exchange start a second server under a seccomp profile
+that fails every `renameat2` call with a flag, as NFS does, or use
+`TEST_CLICKHOUSE_NO_EXCHANGE_URL`. `make test-clickhouse` is the suite. Do not
+point it at a live mirror.
