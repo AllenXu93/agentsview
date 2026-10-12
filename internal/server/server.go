@@ -100,6 +100,7 @@ type Server struct {
 	httpSrv               *http.Server
 	startupProbeKey       []byte
 	version               VersionInfo
+	chrome                chromeHost
 	dataDir               string
 
 	httpRemoteCleanupRegistry *remotesync.CleanupRegistry
