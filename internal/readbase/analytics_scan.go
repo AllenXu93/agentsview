@@ -83,15 +83,18 @@ func ScanAnalyticsVelocityToolCounts(rows *sql.Rows, backend string, out map[str
 	return out, rows.Err()
 }
 
-func ScanAnalyticsTools(rows *sql.Rows, backend string, formatTime func(any) string, emit func(sessionID, category, name, timestamp string, count int)) error {
+// ScanAnalyticsTools reads rows selected as session, category, tool name,
+// count, latest timestamp, first ordinal, then db.ToolEffectivenessSQL.
+func ScanAnalyticsTools(rows *sql.Rows, backend string, formatTime func(any) string, emit func(AnalyticsToolVisit)) error {
 	for rows.Next() {
-		var sid, cat, toolName string
+		var visit AnalyticsToolVisit
 		var ts any
-		var count int
-		if err := rows.Scan(&sid, &cat, &toolName, &count, &ts); err != nil {
+		targets := append([]any{&visit.SessionID, &visit.Category, &visit.Name, &visit.Count, &ts, &visit.Ordinal}, visit.ScanTargets()...)
+		if err := rows.Scan(targets...); err != nil {
 			return fmt.Errorf("scanning %s analytics tool: %w", backend, err)
 		}
-		emit(sid, cat, toolName, formatTime(ts), count)
+		visit.Timestamp = formatTime(ts)
+		emit(visit)
 	}
 	return rows.Err()
 }

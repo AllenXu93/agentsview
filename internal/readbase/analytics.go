@@ -25,7 +25,7 @@ type AnalyticsBackend interface {
 	HeatmapSQL(f db.AnalyticsFilter, metric string) (string, []any)
 	HourOfWeekSQL(f db.AnalyticsFilter) (string, []any)
 	SummaryAgentsSQL(f db.AnalyticsFilter) (string, []any)
-	VisitTools(ctx context.Context, f db.AnalyticsFilter, ids []string, emit func(sessionID, category, name, timestamp string, count int)) error
+	VisitTools(ctx context.Context, f db.AnalyticsFilter, ids []string, emit func(AnalyticsToolVisit)) error
 	VisitSkills(ctx context.Context, f db.AnalyticsFilter, ids []string, emit func(sessionID, name, timestamp string, count int)) error
 	ToolSessionWindow(db.AnalyticsFilter) (string, []any)
 	// TopSessionsSQL returns an ordered query without LIMIT or a trailing semicolon.
@@ -491,6 +491,14 @@ func (s *Analytics) GetAnalyticsSignalSessions(
 	signal string,
 	limit int,
 ) (db.SignalSessionsResponse, error) {
+	if db.IsToolMetric(signal) {
+		f.ToolMetric = signal
+		rows, err := s.analyticsToolRows(ctx, f)
+		if err != nil {
+			return db.SignalSessionsResponse{}, err
+		}
+		return db.BuildToolMetricEvidence(rows, signal, f.ToolName, f.EvidenceOffset, limit), nil
+	}
 	if !db.IsSupportedAnalyticsSignal(signal) {
 		return db.SignalSessionsResponse{}, db.ErrUnsupportedAnalyticsSignal
 	}
@@ -731,29 +739,50 @@ func (s *Analytics) GetAnalyticsHourOfWeek(
 }
 
 func (s *Analytics) GetAnalyticsTools(ctx context.Context, f db.AnalyticsFilter) (db.ToolsAnalyticsResponse, error) {
-	ids, meta, err := s.toolSessions(ctx, f)
-	if err != nil {
-		return db.ToolsAnalyticsResponse{}, err
-	}
-	if len(ids) == 0 {
-		return db.BuildToolsAnalytics(nil), nil
-	}
-	var rows []db.ToolAnalyticsRow
-	err = s.backend.VisitTools(ctx, f, ids, func(id, category, name, timestamp string, count int) {
-		session, ok := meta[id]
-		if !ok {
-			return
-		}
-		_, date, keep := f.ResolveSkillRowTime(timestamp, analyticsDateTime(session))
-		if !keep {
-			return
-		}
-		rows = append(rows, db.ToolAnalyticsRow{SessionID: id, Category: category, ToolName: name, Agent: session.Agent, Count: count, Date: date})
-	})
+	rows, err := s.analyticsToolRows(ctx, f)
 	if err != nil {
 		return db.ToolsAnalyticsResponse{}, err
 	}
 	return db.BuildToolsAnalytics(rows), nil
+}
+
+// AnalyticsToolVisit is one grouped tool-call row with the effectiveness facts
+// and first message ordinal that rates and their evidence need.
+type AnalyticsToolVisit struct {
+	db.ToolEffectivenessCounts
+	SessionID string
+	Category  string
+	Name      string
+	Timestamp string
+	Count     int
+	// Ordinal is nil when none of the row's calls has a stored message.
+	Ordinal *int
+}
+
+func (s *Analytics) analyticsToolRows(ctx context.Context, f db.AnalyticsFilter) ([]db.ToolAnalyticsRow, error) {
+	ids, meta, err := s.toolSessions(ctx, f)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	var rows []db.ToolAnalyticsRow
+	err = s.backend.VisitTools(ctx, f, ids, func(visit AnalyticsToolVisit) {
+		session, ok := meta[visit.SessionID]
+		if !ok {
+			return
+		}
+		_, date, keep := f.ResolveSkillRowTime(visit.Timestamp, analyticsDateTime(session))
+		if !keep {
+			return
+		}
+		rows = append(rows, db.ToolAnalyticsRow{
+			ToolEffectivenessCounts: visit.ToolEffectivenessCounts, Project: session.Project, Ordinal: visit.Ordinal,
+			SessionID: visit.SessionID, Category: visit.Category, ToolName: visit.Name, Agent: session.Agent, Count: visit.Count, Date: date,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (s *Analytics) GetAnalyticsSkills(ctx context.Context, f db.AnalyticsFilter, granularity string) (db.SkillsAnalyticsResponse, error) {

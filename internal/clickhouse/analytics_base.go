@@ -214,19 +214,28 @@ func (s analyticsSQL) HourOfWeekSQL(f db.AnalyticsFilter) (string, []any) {
 		queryArgs
 }
 
-func (s analyticsSQL) VisitTools(ctx context.Context, f db.AnalyticsFilter, ids []string, emit func(sessionID, category, name, timestamp string, count int)) error {
+func (s analyticsSQL) VisitTools(ctx context.Context, f db.AnalyticsFilter, ids []string, emit func(readbase.AnalyticsToolVisit)) error {
 	ctx, ph, err := analyticsSessionIDsContext(ctx, ids)
 	if err != nil {
 		return err
 	}
 	modelPred, modelArgs := readbase.AnalyticsCSVPredicate("m.model", f.Model, db.ClickHouseQueryDialect())
+	args := slices.Clone(modelArgs)
+	for _, predicate := range db.ToolSelectionPredicates("tc", "s.quality_signal_version", f, func(value string) string { args = append(args, value); return "?" }) {
+		if modelPred != "" {
+			modelPred += " AND "
+		}
+		modelPred += predicate
+	}
 	from, to := readbase.AnalyticsWindowBounds(f)
 	windowPred, windowArgs := chAnalyticsMessageWindowPred("m.timestamp", from, to)
-	args := slices.Concat(modelArgs, windowArgs)
+	args = append(args, windowArgs...)
+	// An unmatched join reads ordinal 0, so only calls whose message exists supply the ordinal.
 	query := `SELECT tc.session_id, tc.category,
 			trim(COALESCE(tc.tool_name, '')), toInt64(COUNT(*)),
-			MAX(m.timestamp)
+			MAX(m.timestamp), minOrNullIf(m.ordinal, m.session_id != '')` + db.ToolEffectivenessSQL("tc", "s.quality_signal_version") + `
 			FROM tool_calls tc
+			JOIN (SELECT id, quality_signal_version FROM sessions WHERE id IN ` + ph + `) s ON s.id = tc.session_id
 			LEFT JOIN (` + chAnalyticsToolCallMessagesSQL + ph + `) m
 				ON m.session_id = tc.session_id
 				AND m.ordinal = tc.message_ordinal

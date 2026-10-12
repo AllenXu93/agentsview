@@ -1969,7 +1969,7 @@ func orphanSessionCols(ctx context.Context, tx *sql.Tx) string {
 		"cwd", "git_branch", "source_session_id",
 		"source_version", "group_key", "transcript_fidelity", "parser_malformed_lines",
 		"is_truncated", "last_write_incremental",
-		"transcript_revision",
+		"termination_status", "transcript_revision",
 		"secret_leak_count", "secrets_rules_version",
 	} {
 		if oldDBHasColumn(ctx, tx, "sessions", c) {
@@ -2266,6 +2266,15 @@ func copySessionDataForIDs(
 		toolCallCols = append(toolCallCols, "call_index")
 		toolCallSelect = append(toolCallSelect, "NULL")
 	}
+	for _, column := range []string{"observed_outcome", "observed_repeat", "sequence_ending"} {
+		toolCallCols = append(toolCallCols, column)
+		if oldDBHasColumn(ctx, tx, "tool_calls", column) {
+			toolCallSelect = append(toolCallSelect, "otc."+column)
+		} else {
+			toolCallSelect = append(toolCallSelect, "NULL")
+		}
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tool_calls
 			(`+strings.Join(toolCallCols, ", ")+`)
