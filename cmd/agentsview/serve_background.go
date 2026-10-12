@@ -815,28 +815,35 @@ func waitForBackgroundLaunchOwner(
 	waitTimeout time.Duration,
 ) {
 	deadline := time.Now().Add(waitTimeout)
-	for time.Now().Before(deadline) {
+	incumbent := FindDaemonRuntime(dataDir, authToken)
+	for {
+		// waitForExternalServeStartup treats a non-positive timeout as its
+		// default, so stop here rather than pass an expired deadline.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
 		if backgroundServeProbeHook != nil {
 			backgroundServeProbeHook()
 		}
 		if isExternalDaemonStarting(dataDir) {
 			_, _, _ = waitForExternalServeStartup(
-				ctx, dataDir, authToken, time.Until(deadline),
+				ctx, dataDir, authToken, remaining,
 			)
+		}
+		if ctx.Err() != nil {
 			return
 		}
-		if rt := FindDaemonRuntime(dataDir, authToken); rt != nil &&
-			!rt.ReadOnly {
+		if launchOwnerPublishedRuntime(FindDaemonRuntime(dataDir, authToken), incumbent) {
 			return
 		}
 		if IsLocalDaemonActive(dataDir, authToken) {
 			if WaitForDaemonStartupContext(
 				ctx, dataDir, time.Until(deadline), authToken,
+			) && launchOwnerPublishedRuntime(
+				FindDaemonRuntime(dataDir, authToken), incumbent,
 			) {
-				if rt := FindDaemonRuntime(dataDir, authToken); rt != nil &&
-					!rt.ReadOnly {
-					return
-				}
+				return
 			}
 			if err := ctx.Err(); err != nil {
 				return
@@ -867,6 +874,16 @@ func waitForBackgroundLaunchOwner(
 		case <-timer.C:
 		}
 	}
+}
+
+// launchOwnerPublishedRuntime reports whether rt is a daemon the launch owner
+// finished starting. While the owner holds the launch lock it may be stopping
+// the incumbent (a restart) or an older daemon (a version replacement), so
+// neither counts until the lock clears.
+func launchOwnerPublishedRuntime(rt, incumbent *DaemonRuntime) bool {
+	return rt != nil && !rt.ReadOnly &&
+		!shouldReplaceDaemonRuntime(rt, version) &&
+		!sameDaemonReplacementTarget(rt, incumbent)
 }
 
 func adoptBackgroundLaunchConfig(cfg *config.Config) {
