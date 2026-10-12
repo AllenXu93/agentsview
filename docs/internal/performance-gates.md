@@ -75,6 +75,27 @@ runner noise and fail loudly:
 - `TestCodexCursorCache`, `TestCodexCursorWarmColdParity`, and the cursor
   boundary tests in `internal/parser` — continuation state stays bounded and
   warm/cold parsing remains equivalent at safe offsets.
+- `TestCodexForkInventoryDoesNotAllocatePerUnchangedFile` (`internal/parser`) —
+  parsing another fork through the same provider factory must not enumerate
+  all unchanged rollout filenames again. Page creation and archival moves
+  still refresh the inventory through directory identity and modification
+  time.
+- `TestCodexForkInventoryFreshBatchDoesNotAllocatePerUnchangedFile`
+  (`internal/parser`) — each new sync batch reuses the thread index, including
+  its completion check. Allocations stay bounded as unrelated filenames grow.
+- `TestCodexForkParentTurnsReuseCombinedSet` (`internal/parser`) — parsing
+  another fork reuses the combined turn IDs from unchanged parent rollouts.
+  Allocation growth stays bounded as turns increase, including a parent with
+  more than 64 rollouts. `BenchmarkCodexForkParentTurns` measures that parse.
+- `TestCodexForkInventoryBatchDoesNotAllocatePerUnchangedDirectory`
+  (`internal/parser`) — warm forks in a sync batch must not walk unrelated
+  dated directories. `BenchmarkCodexForkParentDatedDirectories` compares 10
+  and 1,000 directories; parent file changes still invalidate cached turns,
+  and batch completion detects new pages.
+- `TestCodexParentInventoryBatchRetriesUnchangedForks` (`internal/sync`) — a
+  page restored during parsing leaves affected forks eligible for retry. A
+  second sync after restart removes copied history even when the fork files
+  have not changed; a third sync skips those verified files normally.
 - `TestIncrementalSync_CodexAppend`,
   `TestIncrementalSync_CodexLifecycleTailUpdatesTermination`, the partial-tail
   tests, the late tool-result append test
@@ -133,6 +154,12 @@ package list, sample count, and per-tier iteration counts for these benchmarks:
 - `BenchmarkReplaceSessionMessagesStreamingMerge` — the streaming chunk-merge
   diff path (one UPDATE, not a full delete+reinsert).
 - `BenchmarkInsertMessagesBatch` — multi-row batched ingest.
+- `BenchmarkCopySparseOrphan` — retain one missing session from archives of
+  different sizes without scanning every old message to map its session ID.
+- `BenchmarkCopyMixedLegacyPageOrphans` — upgrade archived Codex pages alongside
+  other orphans without scanning the entire orphan inventory for each page.
+- `BenchmarkCopySessionMetadataPins` — copy sparse pins from analyzed archives
+  without checking every unpinned message against its transcript.
 - `BenchmarkResyncBulkContributorIngest` — the same archive entering the atomic
   rebuild through a contributor engine.
 - `BenchmarkSearchContentSubstringPage` / `BenchmarkSearchContentFTSPage` — one

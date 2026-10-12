@@ -140,6 +140,7 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 	e.beginSQLiteContainerPass(files, preContainerStates)
 	processingCtx := context.WithValue(ctx, deferGlobalLinkContextKey{}, true)
 	processingCtx = parser.WithProjectRootMemo(processingCtx)
+	processingCtx = parser.WithCodexParentInventoryBatch(processingCtx)
 	results := e.startWorkers(processingCtx, files)
 	affectedSessionIDs := make(changedSessionLinks)
 	stats = e.collectAndBatchWithOptions(
@@ -169,6 +170,7 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 			},
 		},
 	)
+	processErr = errors.Join(processErr, e.finishCodexParentInventoryBatch(processingCtx, &stats))
 	if err := affectedSessionIDs.link(ctx, e, &stats); err != nil {
 		stats.RecordFailed()
 		processErr = errors.Join(processErr, err)

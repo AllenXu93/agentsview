@@ -136,6 +136,7 @@ func (e *Engine) ParseDiff(ctx context.Context, opts ParseDiffOptions) (*ParseDi
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	runCtx = parser.WithProjectRootMemo(runCtx)
+	runCtx = parser.WithCodexParentInventoryBatch(runCtx)
 	results := e.startWorkers(runCtx, files)
 	for i := range total {
 		var r syncJob
@@ -176,6 +177,14 @@ func (e *Engine) ParseDiff(ctx context.Context, opts ParseDiffOptions) (*ParseDi
 		if opts.Progress != nil {
 			opts.Progress(i+1, total)
 		}
+	}
+
+	changedParents, err := parser.ValidateCodexParentInventoryBatch(runCtx)
+	if err != nil {
+		return nil, fmt.Errorf("parse-diff: validate Codex parent inventory: %w", err)
+	}
+	if len(changedParents) > 0 {
+		return nil, fmt.Errorf("parse-diff: parent files changed for %d Codex forks; retry the comparison", len(changedParents))
 	}
 
 	// Presence sweep after all files: stored sessions under a
