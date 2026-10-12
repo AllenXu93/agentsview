@@ -426,6 +426,15 @@ On startup, the server:
 1. Starts periodic sync (every 15 minutes)
 1. Serves the Svelte SPA and REST API
 
+During a full parser or archive-only preservation rebuild, the daemon serves the
+retained archive with stale
+warnings. Archive writes return HTTP 503 with `Retry-After`; the CLI reports the
+server's message and exits. Scoped upgrades and schema repairs finish before the
+daemon listens.
+
+CLI commands print one stale warning to stderr. The dashboard, MCP, and the
+`X-Agentsview-Archive-Stale` HTTP header also report stale results.
+
 The server shuts down cleanly on `Ctrl+C`, flushing the database and stopping
 file watchers.
 

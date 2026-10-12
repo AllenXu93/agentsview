@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/money"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 func reflectedFieldValue(v any, name string) reflect.Value {
@@ -484,27 +485,11 @@ func TestCloseWriterKeepsReadersServing(t *testing.T) {
 	require.Error(t, err, "writes must fail cleanly while the writer is closed")
 	require.ErrorIs(t, err, ErrWriterClosed)
 
-	require.NoError(t, database.ReopenWriter())
-	assert.NoError(t, writeOneSession(t.Context(), database),
-		"writer must accept writes again after ReopenWriter")
-}
-
-// TestCloseWriterFailsEveryWritePathCleanly proves the write barrier covers
-// every writer access, not just the writerHandle facade: the Update transaction
-// path and the real star/delete session mutations must all return
-// ErrWriterClosed without panicking while the writer is closed.
-func TestCloseWriterFailsEveryWritePathCleanly(t *testing.T) {
-	database := testDB(t)
-	insertSession(t, database, "barrier-session", "handoff")
-
-	require.NoError(t, database.CloseWriter())
-	t.Cleanup(func() { require.NoError(t, database.ReopenWriter()) })
-
 	t.Run("Update", func(t *testing.T) {
 		err := database.Update(t.Context(), func(tx *sql.Tx) error {
 			_, execErr := tx.ExecContext(t.Context(),
 				"UPDATE sessions SET first_message = ? WHERE id = ?",
-				"x", "barrier-session",
+				"x", "writer-handoff-seed",
 			)
 			return execErr
 		})
@@ -512,19 +497,23 @@ func TestCloseWriterFailsEveryWritePathCleanly(t *testing.T) {
 	})
 
 	t.Run("StarSession", func(t *testing.T) {
-		_, err := database.StarSession(t.Context(), "barrier-session")
+		_, err := database.StarSession(t.Context(), "writer-handoff-seed")
 		require.ErrorIs(t, err, ErrWriterClosed)
 	})
 
 	t.Run("DeleteSession", func(t *testing.T) {
-		err := database.DeleteSession(t.Context(), "barrier-session")
+		err := database.DeleteSession(t.Context(), "writer-handoff-seed")
 		require.ErrorIs(t, err, ErrWriterClosed)
 	})
 
 	t.Run("RestoreSession", func(t *testing.T) {
-		_, err := database.RestoreSession(t.Context(), "barrier-session")
+		_, err := database.RestoreSession(t.Context(), "writer-handoff-seed")
 		require.ErrorIs(t, err, ErrWriterClosed)
 	})
+
+	require.NoError(t, database.ReopenWriter())
+	assert.NoError(t, writeOneSession(t.Context(), database),
+		"writer must accept writes again after ReopenWriter")
 }
 
 func insertSession(
@@ -1254,6 +1243,48 @@ func TestOpenAcceptsArchiveUserVersion111(t *testing.T) {
 	page, err := d2.ListSessions(t.Context(), SessionFilter{Limit: 100})
 	requireNoError(t, err, "list sessions")
 	require.Len(t, page.Sessions, 1)
+}
+
+func TestArchiveResyncState(t *testing.T) {
+	for _, tc := range []struct {
+		name                                      string
+		version                                   int
+		pending, repair, archiveOnly, needs, full bool
+	}{
+		{name: "current", version: dataVersion},
+		{name: "data stale", version: 129, needs: true, full: true},
+		{name: "scoped version", version: dataVersion - 1, needs: true},
+		{name: "scoped pending", version: dataVersion, pending: true, needs: true},
+		{name: "schema repair", version: dataVersion, repair: true, needs: true},
+		{name: "archive only", version: dataVersion - 1, archiveOnly: true, needs: true, full: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(InstallDataVersionScopesForTest(map[int][]parser.AgentType{dataVersion: {parser.AgentClaude}}))
+			d := testDB(t)
+			require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+				_, err := tx.ExecContext(t.Context(), fmt.Sprintf("PRAGMA user_version=%d", tc.version))
+				if err != nil {
+					return err
+				}
+				if tc.pending {
+					_, err = tx.ExecContext(t.Context(), "INSERT INTO stats(key,value) VALUES ('scoped_upgrade_pending',1)")
+				}
+				if tc.repair {
+					_, err = tx.ExecContext(t.Context(), "ALTER TABLE tool_calls DROP COLUMN result_content_length")
+				}
+				return err
+			}))
+			if tc.archiveOnly {
+				require.NoError(t, d.EnableArchiveOnly(t.Context()))
+			}
+			path := d.Path()
+			require.NoError(t, d.Close())
+			needs, full, err := ArchiveResyncState(t.Context(), path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.needs, needs)
+			assert.Equal(t, tc.full, full)
+		})
+	}
 }
 
 func TestOpenProbeErrorPropagates(t *testing.T) {

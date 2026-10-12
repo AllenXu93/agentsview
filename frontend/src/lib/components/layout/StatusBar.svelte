@@ -175,19 +175,25 @@
         {m.status_bar_version_mismatch()}
       </button>
     {/if}
-    {#if progressText}
+    {#if sync.archiveStale}
       {#if sync.versionMismatch}<span class="sep">&middot;</span>{/if}
+      <span class="archive-warn" role="status">
+        {sync.syncing && sync.progress?.resync ? m.status_bar_archive_rebuilding() : m.status_bar_archive_stale()}
+      </span>
+    {/if}
+    {#if progressText}
+      {#if sync.versionMismatch || sync.archiveStale}<span class="sep">&middot;</span>{/if}
       <span class="sync-progress" title={progressTitle ?? undefined}>
         {progressText}
       </span>
     {:else if lastSyncText}
-      {#if sync.versionMismatch}<span class="sep">&middot;</span>{/if}
+      {#if sync.versionMismatch || sync.archiveStale}<span class="sep">&middot;</span>{/if}
       <span title={lastSyncTimestamp ?? undefined}>
         {m.status_bar_synced_ago({ time: lastSyncText })}
       </span>
     {/if}
     {#if sync.serverVersion}
-      {#if sync.versionMismatch || progressText || sync.lastSync}
+      {#if sync.versionMismatch || sync.archiveStale || progressText || sync.lastSync}
         <span class="sep">&middot;</span>
       {/if}
       <button
@@ -216,6 +222,10 @@
 
   .sep {
     color: var(--border-default);
+  }
+
+  .archive-warn {
+    color: var(--accent-orange);
   }
 
   .sync-progress {

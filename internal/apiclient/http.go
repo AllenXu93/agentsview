@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
 )
@@ -30,5 +31,35 @@ func NewHTTPClient(baseURL, token string, client *http.Client) (*Client, error) 
 type httpTransport struct{ *http.Client }
 
 func (c httpTransport) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
-	return c.Client.Do(req.WithContext(ctx))
+	response, err := c.Client.Do(req.WithContext(ctx))
+	ObserveArchiveFreshness(ctx, response)
+	return response, err
+}
+
+const (
+	ArchiveStaleHeader  = "X-Agentsview-Archive-Stale"
+	ArchiveStaleWarning = "Archive results may be stale."
+)
+
+type archiveFreshnessKey struct{}
+
+type archiveFreshness struct {
+	stale   atomic.Bool
+	onStale func()
+}
+
+// TrackArchiveFreshness collects stale responses and optionally calls onStale once.
+func TrackArchiveFreshness(ctx context.Context, onStale func()) (context.Context, func() bool) {
+	freshness := &archiveFreshness{onStale: onStale}
+	return context.WithValue(ctx, archiveFreshnessKey{}, freshness), freshness.stale.Load
+}
+
+// ObserveArchiveFreshness records freshness for results, including missing records.
+func ObserveArchiveFreshness(ctx context.Context, response *http.Response) {
+	if response == nil || (response.StatusCode < 200 || response.StatusCode >= 300) && response.StatusCode != http.StatusNotFound || response.Header.Get(ArchiveStaleHeader) != "true" {
+		return
+	}
+	if freshness, ok := ctx.Value(archiveFreshnessKey{}).(*archiveFreshness); ok && freshness.stale.CompareAndSwap(false, true) && freshness.onStale != nil {
+		freshness.onStale()
+	}
 }

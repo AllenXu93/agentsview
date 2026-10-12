@@ -33,9 +33,10 @@ func (s *Server) registerSyncRoutes() {
 }
 
 type syncStatusResponse struct {
-	LastSync string             `json:"last_sync"`
-	Stats    *syncpkg.SyncStats `json:"stats"`
-	Progress *syncpkg.Progress  `json:"progress,omitempty"`
+	ArchiveStale bool               `json:"archive_stale" doc:"Results may reflect the archive before a required parser rebuild"`
+	LastSync     string             `json:"last_sync"`
+	Stats        *syncpkg.SyncStats `json:"stats"`
+	Progress     *syncpkg.Progress  `json:"progress,omitempty"`
 }
 
 type sessionSyncInput struct {
@@ -159,7 +160,7 @@ func (s *Server) humaSyncStatus(
 ) (*jsonOutput[syncStatusResponse], error) {
 	engine := s.syncStatusEngine()
 	if engine == nil {
-		return &jsonOutput[syncStatusResponse]{Body: syncStatusResponse{}}, nil
+		return &jsonOutput[syncStatusResponse]{Body: syncStatusResponse{ArchiveStale: s.archiveStale()}}, nil
 	}
 	lastSync := engine.LastSync()
 	stats := engine.LastSyncStats()
@@ -173,9 +174,10 @@ func (s *Server) humaSyncStatus(
 	}
 	return &jsonOutput[syncStatusResponse]{
 		Body: syncStatusResponse{
-			LastSync: lastSyncStr,
-			Stats:    &stats,
-			Progress: progress,
+			ArchiveStale: s.archiveStale(),
+			LastSync:     lastSyncStr,
+			Stats:        &stats,
+			Progress:     progress,
 		},
 	}, nil
 }
@@ -265,9 +267,9 @@ func (s *Server) humaTriggerSync(
 		if err != nil {
 			return nil, err
 		}
-	}
-	if err := s.rejectStaleArchiveForSync(); err != nil {
-		return nil, err
+		if err := s.rejectStaleArchiveForSync(); err != nil {
+			return nil, err
+		}
 	}
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		stream, ok := newHumaSSEStream(hctx)
@@ -303,7 +305,7 @@ func (s *Server) runSyncWhenReady(
 		if err := ctx.Err(); err != nil {
 			return syncpkg.SyncStats{}, err
 		}
-		if in.StartupOnly && (engine == nil || engine.StartupReconciled()) {
+		if in.StartupOnly && (s.archiveStale() || engine == nil || engine.StartupReconciled()) {
 			return syncpkg.SyncStats{}, nil
 		}
 		stats, err := s.runSyncWithResyncFallback(ctx, engine, progress)
@@ -330,6 +332,11 @@ func (s *Server) runSyncWhenReady(
 // the CLI can retry through /api/v1/resync instead of surfacing a raw HTTP
 // error. The body remains the human-readable explanation.
 const ResyncRequiredHeader = "X-Agentsview-Resync-Required"
+
+func (s *Server) archiveStale() bool {
+	local, ok := s.db.(*db.DB)
+	return ok && local.NeedsResync()
+}
 
 // rejectStaleArchiveForSync fails a worker-backed /sync when the archive's data
 // version changed, because the worker sync pass refuses to swap a stale archive

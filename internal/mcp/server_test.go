@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +17,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/service"
+	"go.kenn.io/agentsview/internal/servicehttp"
 )
 
 // newInMemoryPair connects a real MCP client to srv over an in-memory
@@ -334,5 +337,32 @@ func TestServeHTTP_ShutsDownOnContextCancel(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(10 * time.Second):
 		require.Fail(t, "ServeHTTP did not return after context cancel")
+	}
+}
+
+func TestServer_ArchiveFreshnessWarning(t *testing.T) {
+	var stale atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stale.Load() {
+			w.Header().Set(apiclient.ArchiveStaleHeader, "true")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"matches":[]}`))
+	}))
+	defer server.Close()
+	st, ct := newInMemoryPair(t, newServer(ServeOptions{Service: servicehttp.NewHTTPBackend(server.URL, "", false, "")}))
+	defer func() { require.NoError(t, ct.Close()); require.NoError(t, st.Wait()) }()
+	for _, value := range []bool{true, false} {
+		stale.Store(value)
+		result, err := ct.CallTool(t.Context(), callParams(ToolSearchContent, map[string]any{"pattern": "example", "mode": "substring", "include_active": true}))
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		warning := false
+		for _, content := range result.Content {
+			if text, ok := content.(*mcp.TextContent); ok && strings.Contains(text.Text, apiclient.ArchiveStaleWarning) {
+				warning = true
+			}
+		}
+		assert.Equal(t, value, warning)
 	}
 }

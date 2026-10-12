@@ -25,6 +25,7 @@ func TestArchiveAuditRetriesWithBackoffOnFailure(t *testing.T) {
 		first time.Duration
 		want  []time.Duration
 	}{
+		{0, []time.Duration{0, time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour, archiveAuditInterval, archiveAuditInterval}},
 		{archiveAuditInterval, []time.Duration{archiveAuditInterval, time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour, archiveAuditInterval, archiveAuditInterval}},
 		{archiveAuditRetryInitial, []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour, archiveAuditInterval, archiveAuditInterval, archiveAuditInterval}},
 	} {
@@ -109,7 +110,7 @@ func TestArchiveAuditRetriesRequiredRebuild(t *testing.T) {
 			})
 			defer restore()
 
-			err := runArchiveAudit(t.Context(), cfg, engine, database, lock, nil)
+			err := runArchiveAudit(t.Context(), cfg, engine, database, lock, nil, nil)
 
 			switch {
 			case tc.wantErrIs != nil:
@@ -171,7 +172,7 @@ func TestArchiveAuditPublishesAndClearsWorkerProgress(t *testing.T) {
 	defer restore()
 	done := make(chan error, 1)
 	go func() {
-		done <- runArchiveAudit(t.Context(), cfg, engine, database, lock, nil)
+		done <- runArchiveAudit(t.Context(), cfg, engine, database, lock, nil, nil)
 	}()
 	select {
 	case <-workerStarted:
@@ -228,7 +229,7 @@ func TestArchiveAuditEmitsOnDataChange(t *testing.T) {
 	defer restore()
 
 	require.NoError(t, runArchiveAudit(
-		t.Context(), cfg, engine, database, lock, em,
+		t.Context(), cfg, engine, database, lock, em, nil,
 	))
 	select {
 	case scope := <-em.scopes:
@@ -264,7 +265,7 @@ func TestArchiveAuditReloadsParentSkipCacheAfterWorkerTombstones(t *testing.T) {
 	defer restore()
 
 	require.NoError(t, runArchiveAudit(
-		t.Context(), cfg, engine, database, lock, nil,
+		t.Context(), cfg, engine, database, lock, nil, nil,
 	))
 	assert.NotContains(t, engine.SnapshotSkipCache(), hashKey,
 		"the daemon must discard a hash-qualified entry removed by its audit worker")
@@ -298,7 +299,7 @@ func TestArchiveAuditReloadsSkipCacheOnLostTerminalResult(t *testing.T) {
 	})
 	defer restore()
 
-	err := runArchiveAudit(t.Context(), cfg, engine, database, lock, nil)
+	err := runArchiveAudit(t.Context(), cfg, engine, database, lock, nil, nil)
 	require.Error(t, err, "the protocol failure must surface so the caller retries")
 	assert.NotContains(t, engine.SnapshotSkipCache(), hashKey,
 		"a lost terminal result must not leave the daemon's skip cache stale")
@@ -323,7 +324,7 @@ func TestArchiveAuditEmitsOnPartialSuccess(t *testing.T) {
 	})
 	defer restore()
 
-	err := runArchiveAudit(t.Context(), cfg, engine, database, lock, em)
+	err := runArchiveAudit(t.Context(), cfg, engine, database, lock, em, nil)
 	require.Error(t, err, "the partial failure must still surface for retry")
 	select {
 	case scope := <-em.scopes:
@@ -350,7 +351,7 @@ func TestArchiveAuditSurfacesWorkerFailureWithoutFallback(t *testing.T) {
 	})
 	defer restore()
 
-	err := runArchiveAudit(t.Context(), cfg, engine, database, lock, em)
+	err := runArchiveAudit(t.Context(), cfg, engine, database, lock, em, nil)
 	require.Error(t, err, "a failed audit must surface the error for retry")
 	assert.True(t, engine.LastSync().IsZero(),
 		"a failed audit must not fall back to an in-process sync")
@@ -468,7 +469,7 @@ func TestStartArchiveAuditSelectsFirstDelay(t *testing.T) {
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
-					startArchiveAudit(ctx, cfg, engine, database, lock, nil, nil)
+					startArchiveAudit(ctx, cfg, engine, database, lock, nil, nil, nil)
 				}()
 				assert.Equal(t, tc.want, <-attempts)
 				cancel()

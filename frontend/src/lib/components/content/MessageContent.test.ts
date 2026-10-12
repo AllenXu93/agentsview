@@ -15,6 +15,7 @@ vi.mock("../../stores/sessionTiming.svelte.js", () => ({ sessionTiming: timingSt
 const copyMock = vi.hoisted(() => vi.fn().mockResolvedValue(true));
 const mermaidMock = vi.hoisted(() => vi.fn(() => ({ renderNow: vi.fn(), disconnect: vi.fn() })));
 const forkMock = vi.hoisted(() => vi.fn());
+const pinMock = vi.hoisted(() => vi.fn().mockResolvedValue(true));
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
   activeSession: null as Session | null,
@@ -38,7 +39,7 @@ vi.mock("../../stores/ui.svelte.js", () => ({
 }));
 
 vi.mock("../../stores/pins.svelte.js", () => ({
-  pins: { isPinned: () => false, togglePin: vi.fn().mockResolvedValue(undefined) },
+  pins: { isPinned: () => false, togglePin: pinMock },
 }));
 vi.mock("../../stores/sessions.svelte.js", () => ({ sessions: state }));
 vi.mock("../../stores/sync.svelte.js", () => ({ sync: state }));
@@ -56,7 +57,10 @@ vi.mock("../../stores/inSessionSearch.svelte.js", () => ({
     currentOccurrence: () => -1,
   },
 }));
-vi.mock("../../api/runtime.js", () => ({ isRemoteConnection: () => state.remote }));
+vi.mock("../../api/runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/runtime.js")>()),
+  isRemoteConnection: () => state.remote,
+}));
 vi.mock("../../api/generated/index", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/generated/index")>()),
   SessionsService: { postApiV1SessionsByIdResume: forkMock },
@@ -164,6 +168,23 @@ afterEach(async () => {
 });
 
 describe("MessageContent", () => {
+  it("shows pin success only after persistence", async () => {
+    let resolve!: (saved: boolean) => void;
+    pinMock.mockReturnValueOnce(new Promise<boolean>((done) => { resolve = done; }));
+    await render(message({ id: 47, session_id: "pin-session", ordinal: 6 }));
+    await click(".pin-btn");
+    expect(pinMock).toHaveBeenCalledExactlyOnceWith("pin-session", 47, 6);
+    expect(text(".pin-feedback")).toBe("");
+    resolve(true);
+    await Promise.resolve();
+    await tick();
+    expect(text(".pin-feedback")).toBe("Pinned");
+    pinMock.mockRejectedValueOnce(new Error("archive is read-only while it rebuilds"));
+    await click(".pin-btn");
+    expect(pinMock).toHaveBeenLastCalledWith("pin-session", 47, 6);
+    expect(text(".pin-feedback")).toBe("archive is read-only while it rebuilds");
+  });
+
   it("omits duration for legacy calls without stored timing", async () => {
     await render(message({ content: "[Bash]\npwd", has_tool_use: true }));
     expect(document.querySelector(".tool-duration")).toBeNull();

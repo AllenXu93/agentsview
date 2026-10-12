@@ -31,6 +31,7 @@ export function commitsDisagree(a: string | undefined, b: string | undefined): b
 }
 
 class SyncStore {
+  archiveStale: boolean = $state(false);
   syncing: boolean = $state(false);
   progress: SyncProgress | null = $state(null);
   lastSync: string | null = $state(null);
@@ -132,6 +133,7 @@ class SyncStore {
       const changed = newLastSync !== null && newLastSync !== this.lastSync;
       this.lastSync = newLastSync;
       this.lastSyncStats = status.stats ?? null;
+      this.archiveStale = status.archive_stale === true;
       const statusProgress = status.progress ?? null;
       let statusProgressCompleted = false;
       if (statusProgress) {

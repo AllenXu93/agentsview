@@ -210,6 +210,9 @@ func recordRecallQueryOutcome(
 		Exposures:          exposures,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrWriterClosed) && !req.StrictRecording {
+			return nil
+		}
 		if req.StrictRecording {
 			return fmt.Errorf("recording recall query outcome: %w", err)
 		}

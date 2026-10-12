@@ -39,6 +39,7 @@ func (t *rawTransport) ExecuteRequest(ctx context.Context, req *http.Request, _ 
 	if err != nil {
 		return nil, err
 	}
+	ObserveArchiveFreshness(ctx, response)
 	t.response = response
 	return &runtime.Response{StatusCode: response.StatusCode, Headers: response.Header, Raw: response}, nil
 }

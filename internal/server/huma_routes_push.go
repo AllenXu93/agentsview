@@ -131,9 +131,10 @@ func runPushStream[T any](
 	result, err := run(nil)
 	if err != nil {
 		if errors.Is(err, db.ErrWriterClosed) {
-			hctx.SetHeader("Retry-After", writerClosedRetryAfterSeconds)
-			writeHumaJSON(hctx, http.StatusServiceUnavailable,
-				map[string]string{"error": err.Error()})
+			server, ok := hctx.Context().Value(ctxKeyHumaServer).(*Server)
+			response := writerClosedResponse(hctx.AppendHeader, ok && server.archiveStale())
+			writeHumaJSON(hctx, response.Status,
+				map[string]string{"error": response.Message})
 			return
 		}
 		writeHumaJSON(hctx, http.StatusInternalServerError,
@@ -560,7 +561,7 @@ func (s *Server) humaReplicaPush(
 	// CLI always negotiates SSE) must see the 503 + Retry-After, not a
 	// generic error event.
 	if local.WriterClosed() {
-		return nil, writerClosedError()
+		return nil, writerClosedError(s.archiveStale())
 	}
 	target, err := s.replicaPushTarget(replica, in.Body)
 	if err != nil {
@@ -649,7 +650,7 @@ func (s *Server) humaMirrorPush(
 	// Reject before the stream body flushes a 200 so SSE clients see the
 	// 503 + Retry-After (mirrors humaReplicaPush).
 	if local.WriterClosed() {
-		return nil, writerClosedError()
+		return nil, writerClosedError(s.archiveStale())
 	}
 	duckCfg, err := s.mirrorPushConfig(in.Body)
 	if err != nil {

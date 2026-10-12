@@ -7425,6 +7425,9 @@ components:
     SyncStatusResponse:
       additionalProperties: false
       properties:
+        archive_stale:
+          description: Results may reflect the archive before a required parser rebuild
+          type: boolean
         last_sync:
           type: string
         progress:
@@ -7432,6 +7435,7 @@ components:
         stats:
           $ref: "#/components/schemas/SyncSyncStats"
       required:
+        - archive_stale
         - last_sync
         - stats
       type: object
@@ -7934,7 +7938,7 @@ components:
         - project
       type: object
 info:
-  description: HTTP API for browsing, searching, syncing, and managing local agent sessions.
+  description: "HTTP API for browsing, searching, syncing, and managing local agent sessions. Responses carry X-Agentsview-Archive-Stale: true while a required archive rebuild is pending; GET /api/v1/sync/status reports its state."
   title: AgentsView API
   version: dev
 openapi: 3.1.0

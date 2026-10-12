@@ -22,6 +22,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
+	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/insight"
@@ -73,7 +74,7 @@ const (
 		service.SemanticSearchIntentHeader + ", " + rawSyncDeviceIDHeader +
 		", " + rawSyncUploadOffsetHeader
 	corsExposedResponseHeaders = rawSyncUploadOffsetHeader + ", " +
-		rawSyncUploadLengthHeader + ", " + rawSyncUploadCompleteHeader + ", Location"
+		rawSyncUploadLengthHeader + ", " + rawSyncUploadCompleteHeader + ", Location, " + apiclient.ArchiveStaleHeader
 )
 
 // Server is the HTTP server that serves the SPA and REST API.
@@ -683,7 +684,7 @@ func (s *Server) humaConfig() huma.Config {
 		"application/json": jsonFormat,
 		"json":             jsonFormat,
 	}
-	cfg.Info.Description = "HTTP API for browsing, searching, syncing, and managing local agent sessions."
+	cfg.Info.Description = "HTTP API for browsing, searching, syncing, and managing local agent sessions. Responses carry X-Agentsview-Archive-Stale: true while a required archive rebuild is pending; GET /api/v1/sync/status reports its state."
 	cfg.OpenAPIPath = "/api/openapi"
 	cfg.DocsPath = ""
 	cfg.SchemasPath = ""
@@ -870,7 +871,7 @@ func (s *Server) Handler() http.Handler {
 				s.protectedPath,
 				corsMiddleware(
 					allowedOrigins, bindAll, s.cfg.Port, bindAllIPs,
-					gzipMiddleware(logMiddleware(s.mux)),
+					gzipMiddleware(logMiddleware(s.archiveStaleMiddleware(s.mux))),
 				),
 			),
 		),
@@ -900,6 +901,64 @@ func (s *Server) Handler() http.Handler {
 	}
 	h = s.idle.Wrap(h)
 	return h
+}
+
+// Archive probes report readiness rather than archive results.
+func archiveFreshnessProbe(path string) bool {
+	switch path {
+	case "/api/ping", "/api/v1/version", "/api/v1/sync/status":
+		return true
+	}
+	return false
+}
+
+func (s *Server) archiveStaleMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if !archiveFreshnessProbe(r.URL.Path) && s.archiveStale() {
+				w.Header().Set(apiclient.ArchiveStaleHeader, "true")
+				if archiveWriteRequest(r) {
+					if local, ok := s.db.(*db.DB); ok && local.WriterClosed() {
+						response := writerClosedResponse(w.Header().Add, true)
+						writeError(w, response.Status, response.Message)
+						return
+					}
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Read-style POSTs and writes outside SQLite remain available during a rebuild.
+func archiveWriteRequest(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return false
+	}
+	path := r.URL.Path
+	switch path {
+	case "/api/v1/sync":
+		query := r.URL.Query()
+		value := query.Get("startup_only")
+		startupOnly, _ := strconv.ParseBool(value)
+		startupOnly = startupOnly || query.Has("startup_only") && value == ""
+		return !startupOnly
+	case "/api/v1/recall/import":
+		return r.URL.Query().Get("dry_run") != "true"
+	case "/api/v1/settings", "/api/v1/recall/query", "/api/v1/settings/worktree-mappings/preview", "/api/v1/data/strip-images/preview", "/api/v1/memory/refresh", "/api/v1/raw-sync/tokens":
+		return false
+	}
+	for _, prefix := range []string{"/api/v1/config/", "/api/v1/telemetry/", "/api/v1/remote-sync/", "/api/v1/embeddings/", "/api/v1/raw-sync/uploads", "/api/v1/import/claude-ai/sync/results/"} {
+		if strings.HasPrefix(path, prefix) {
+			return false
+		}
+	}
+	if strings.HasSuffix(path, "/publish") && (strings.HasPrefix(path, "/api/v1/sessions/") || strings.HasPrefix(path, "/api/v1/insights/")) {
+		return false
+	}
+	return !strings.HasPrefix(path, "/api/v1/sessions/") || (!strings.HasSuffix(path, "/resume") && !strings.HasSuffix(path, "/open"))
 }
 
 // cspMiddleware sets a Content-Security-Policy header on non-API

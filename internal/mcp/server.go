@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/mcpdiscovery"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -92,6 +93,20 @@ func newServer(opts ServeOptions) *mcp.Server {
 		Title:   "agentsview session history",
 		Version: version,
 	}, &mcp.ServerOptions{Instructions: "Use returned web_url values when linking to recorded sessions."})
+
+	s.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+			if method != "tools/call" {
+				return next(ctx, method, request)
+			}
+			ctx, stale := apiclient.TrackArchiveFreshness(ctx, nil)
+			result, err := next(ctx, method, request)
+			if call, ok := result.(*mcp.CallToolResult); ok && call != nil && stale() {
+				call.Content = append(call.Content, &mcp.TextContent{Text: "Warning: " + apiclient.ArchiveStaleWarning})
+			}
+			return result, err
+		}
+	})
 
 	t := &toolset{svc: opts.Service, now: opts.Now, version: version}
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}

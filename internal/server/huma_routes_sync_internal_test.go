@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/clickhouse"
@@ -1567,6 +1568,7 @@ func TestHumaTriggerSyncLocalNoSyncResyncsStaleDB(t *testing.T) {
 	f := newSyncRouteFixture(t, withStaleDB())
 	f.writeClaudeSession(t, "proj/session.jsonl", "stale no sync route")
 	require.True(t, f.db.NeedsResync())
+	require.Nil(t, f.srv.engine)
 	w := serveJSON(t, f.handler, http.MethodPost, "/api/v1/sync", nil)
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -1618,27 +1620,40 @@ func TestHumaTriggerSyncWorkerRunnerErrorRejectsStream(t *testing.T) {
 		"a failed worker pass must not be reported as a completed sync")
 }
 
-func TestHumaTriggerSyncDoesNotRetryFailures(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		path string
-		err  error
+func TestHumaTriggerSyncRetryDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		err        error
+		retry      bool
 	}{
-		{"busy without wait", "/api/v1/sync", syncpkg.ErrSyncInProgress},
-		{"worker failed with wait", "/api/v1/sync?wait=true", errors.New("worker failed")},
+		{"busy with wait", "/api/v1/sync?wait=true", syncpkg.ErrSyncInProgress, true},
+		{"busy without wait", "/api/v1/sync", syncpkg.ErrSyncInProgress, false},
+		{"worker failed with wait", "/api/v1/sync?wait=true", errors.New("worker failed"), false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSyncRouteFixture(t)
+			require.NoError(t, f.db.CloseWriter())
 			calls := 0
-			f := newSyncRouteFixture(t, withLocalSyncRunner(
-				func(context.Context, func(syncpkg.Progress)) (syncpkg.SyncStats, error) {
-					calls++
-					return syncpkg.SyncStats{}, tt.err
-				},
-			))
-			w := serveJSON(t, f.handler, http.MethodPost, tt.path, nil)
-			assert.Contains(t, w.Body.String(), "event: error")
-			assert.Contains(t, w.Body.String(), tt.err.Error())
-			assert.Equal(t, 1, calls)
+			f.srv.localSyncRunner = func(context.Context, func(syncpkg.Progress)) (syncpkg.SyncStats, error) {
+				calls++
+				if calls == 1 {
+					return syncpkg.SyncStats{}, tc.err
+				}
+				return syncpkg.SyncStats{}, f.db.ReopenWriter()
+			}
+			w := serveJSON(t, f.handler, http.MethodPost, tc.path, nil)
+			assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Empty(t, w.Header().Get("X-Agentsview-Archive-Stale"))
+			if tc.retry {
+				assert.Contains(t, w.Body.String(), "event: done")
+				assert.Equal(t, 2, calls)
+				assert.False(t, f.db.WriterClosed())
+			} else {
+				assert.Contains(t, w.Body.String(), "event: error")
+				assert.Contains(t, w.Body.String(), tc.err.Error())
+				assert.Equal(t, 1, calls)
+				require.NoError(t, f.db.ReopenWriter())
+			}
 		})
 	}
 }
@@ -2321,4 +2336,113 @@ func TestOnDemandSyncEngineKeepsStartupProvidersUntilRestart(t *testing.T) {
 
 	assert.Equal(t, []string{geminiDir},
 		engine.ReconciliationRootsForAgent(string(parser.AgentGemini)))
+}
+
+func TestStartupRebuildWriteGate(t *testing.T) {
+	t.Setenv("AGENTSVIEW_GITHUB_TOKEN", "")
+	t.Setenv("PATH", t.TempDir())
+	originalTokenLookup := ghAuthTokenOutput
+	ghAuthTokenOutput = func(context.Context) ([]byte, error) { return nil, errors.New("test has no credentials") }
+	t.Cleanup(func() { ghAuthTokenOutput = originalTokenLookup })
+	f := newSyncRouteFixture(t, withStaleDB())
+	dbtest.SeedSessionWithMessages(t, f.db, "retained", "project", []db.Message{dbtest.UserMsg("retained", 0, "retained transcript"), dbtest.UserMsg("retained", 1, "follow-up")}, dbtest.WithMessageCounts(2, 2), func(session *db.Session) { session.Cwd = "/work/branch" })
+	syncCalls := 0
+	f.srv.localSyncRunner = func(context.Context, func(syncpkg.Progress)) (syncpkg.SyncStats, error) {
+		syncCalls++
+		return syncpkg.SyncStats{}, errors.New("startup rebuild must not ingest")
+	}
+	require.NoError(t, f.db.CloseWriter())
+	engine := f.srv.syncEngineForLocal(t.Context(), f.db)
+	f.srv.engine = engine
+	require.False(t, engine.StartupReconciled())
+	locked, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- engine.RunExclusive(func() error { close(locked); <-release; return nil })
+	}()
+	t.Cleanup(func() { close(release); require.NoError(t, <-done) })
+	<-locked
+	direct := serveJSON(t, f.srv.mux, http.MethodPatch, "/api/v1/sessions/retained/rename", map[string]any{"display_name": "renamed"})
+	require.Equal(t, http.StatusServiceUnavailable, direct.Code, direct.Body.String())
+	assert.Equal(t, writerClosedRetryAfterSeconds, direct.Header().Get("Retry-After"))
+	assert.Contains(t, direct.Body.String(), "archive is read-only while it rebuilds")
+	for _, tc := range []struct {
+		method, path, body string
+		blocked, probe     bool
+		status             int
+		response           string
+	}{
+		{http.MethodPost, "/api/v1/sync?wait=true", "", true, false, http.StatusServiceUnavailable, ""},
+		{http.MethodPost, "/api/v1/sync?startup_only=true", "", false, false, http.StatusOK, ""},
+		{http.MethodPost, "/api/v1/sync?startup_only", "", false, false, http.StatusOK, ""},
+		{http.MethodPost, "/api/v1/recall/import?dry_run=true", `{"candidate_id":"dry-run","type":"debugging_method","scope":"repository","title":"Check transcript","body":"Read the retained transcript.","project":"project","agent":"claude","session_id":"retained","label":"correct","transferable":true,"provenance_ok":true,"evidence":{"ordinal_start":0,"ordinal_end":1}}`, false, false, http.StatusOK, ""},
+		{http.MethodPatch, "/api/v1/sessions/retained/rename", `{"display_name":"renamed"}`, true, false, http.StatusServiceUnavailable, ""},
+		{http.MethodPost, "/api/v1/config/github", `{"token":" "}`, false, false, http.StatusBadRequest, "token required"},
+		{http.MethodPost, "/api/v1/sessions/retained/publish", `{}`, false, false, http.StatusUnauthorized, "GitHub token not configured"},
+		{http.MethodPost, "/api/v1/sessions/retained/resume", `{"command_only":true}`, false, false, http.StatusOK, "command"},
+		{http.MethodPost, "/api/v1/sessions/retained/open", `{}`, false, false, http.StatusBadRequest, "opener"},
+		{http.MethodPost, "/api/v1/settings/worktree-mappings/preview", `{"machine":"local","path_prefix":"/work","project":"new-project","enabled":true}`, false, false, http.StatusOK, ""},
+		{http.MethodGet, "/api/v1/sessions", "", false, false, http.StatusOK, ""},
+		{http.MethodGet, "/api/v1/sync/status", "", false, true, http.StatusOK, ""},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			var body any
+			if tc.body != "" {
+				require.NoError(t, json.Unmarshal([]byte(tc.body), &body))
+			}
+			w := serveJSON(t, f.handler, tc.method, tc.path, body)
+			if strings.HasPrefix(tc.path, "/api/v1/sync?startup_only") {
+				assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				assert.Zero(t, syncCalls)
+			}
+			if tc.path == "/api/v1/recall/import?dry_run=true" {
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				assert.Contains(t, w.Body.String(), `"would_import":1`)
+				assert.Contains(t, w.Body.String(), `"imported":0`)
+			}
+			if tc.path == "/api/v1/sessions" {
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				var page service.SessionList
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+				require.Len(t, page.Sessions, 1)
+				assert.Equal(t, "retained", page.Sessions[0].ID)
+			}
+			if tc.path == "/api/v1/settings/worktree-mappings/preview" {
+				assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				assert.Equal(t, "true", w.Header().Get("X-Agentsview-Archive-Stale"))
+				return
+			}
+			if tc.path == "/api/v1/sync/status" {
+				var status map[string]any
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &status))
+				assert.Equal(t, true, status["archive_stale"])
+			}
+			if tc.probe {
+				assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				assert.Empty(t, w.Header().Get("X-Agentsview-Archive-Stale"))
+			} else if tc.blocked {
+				assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+				assert.Equal(t, writerClosedRetryAfterSeconds, w.Header().Get("Retry-After"))
+				assert.Equal(t, "true", w.Header().Get("X-Agentsview-Archive-Stale"))
+				assert.Contains(t, w.Body.String(), "archive is read-only while it rebuilds")
+			} else {
+				assert.Equal(t, tc.status, w.Code, w.Body.String())
+				assert.Contains(t, w.Body.String(), tc.response)
+				assert.Equal(t, "true", w.Header().Get("X-Agentsview-Archive-Stale"))
+				assert.NotContains(t, w.Body.String(), "archive is read-only")
+			}
+		})
+	}
+}
+
+func TestHandlerErrorsPreserveOnlyWriterClosedCause(t *testing.T) {
+	for _, convert := range []func(error) error{
+		serverError,
+		func(err error) error { return internalError("test", err) },
+	} {
+		wrappedStatus := fmt.Errorf("write failed: %w", apiError(http.StatusConflict, "conflict"))
+		status, ok := errors.AsType[huma.StatusError](convert(wrappedStatus))
+		require.True(t, ok)
+		assert.Equal(t, http.StatusInternalServerError, status.GetStatus())
+		assert.ErrorIs(t, convert(fmt.Errorf("write failed: %w", db.ErrWriterClosed)), db.ErrWriterClosed)
+	}
 }

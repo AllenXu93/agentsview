@@ -5,6 +5,8 @@ import type { SyncProgress } from "./syncProgress.ts";
 import type { SyncSyncStats } from "./syncSyncStats.ts";
 
 export interface SyncStatusResponse {
+  /** Results may reflect the archive before a required parser rebuild */
+  archive_stale: boolean;
   last_sync: string;
   progress?: SyncProgress;
   stats: SyncSyncStats;
