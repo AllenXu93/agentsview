@@ -33,8 +33,6 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Precompile package exports
         if: matrix.mode == 'precompile'
-        run: |
-          make pricing-snapshot ensure-embed-dir nilaway-golangci-build
-          /usr/bin/time -v go list -export ./... > /dev/null
+        run: make --eval 'nilaway-exports: pricing-snapshot ensure-embed-dir nilaway-golangci-build; /usr/bin/time -v go list -export ./... > /dev/null' nilaway-exports
       - name: Run NilAway
         run: /usr/bin/time -v make nilaway
