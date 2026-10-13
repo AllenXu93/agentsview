@@ -168,6 +168,7 @@ test.describe("go to session", () => {
     await input.press("Enter");
     await expect(page.getByRole("alert")).toHaveText("No session matches that ID or UUID.");
     await expect(page).toHaveURL(/\/usage\?desktop=1$/);
+    expect(await page.evaluate(() => window.history.length)).toBe(initialHistoryLength);
 
     for (const width of [1280, 768, 400]) {
       await page.setViewportSize({ width, height: 900 });
@@ -181,10 +182,7 @@ test.describe("go to session", () => {
       expect(field!.x + field!.width).toBeLessThanOrEqual(width + 1);
       await page.screenshot({ path: testInfo.outputPath(`go-to-session-error-${width}.png`) });
       if (renderLint) {
-        const lint = await page.evaluate(
-          (snippet) => (0, eval)(snippet),
-          renderLint.renderLintSnippet(".kit-modal-panel"),
-        );
+        const lint = await page.evaluate(renderLint.renderLintSnippet(".kit-modal-panel"));
         console.log(`render-lint width=${width}px violations=${JSON.stringify(lint)}`);
         if (renderProofDir) {
           mkdirSync(renderProofDir, { recursive: true });

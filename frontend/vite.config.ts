@@ -67,7 +67,25 @@ export default defineConfig(({ command }) => {
       jsPlugins: [{ name: "vite-plus", specifier: "vite-plus/oxlint-plugin" }],
       rules: {
         "vite-plus/prefer-vite-plus-imports": "error",
+        "typescript/no-floating-promises": [
+          "warn",
+          {
+            // Svelte's unmount() returns a promise that only waits when the
+            // caller asks for outro transitions; otherwise it resolves at once.
+            allowForKnownSafeCalls: [{ from: "package", name: "unmount", package: "svelte" }],
+          },
+        ],
       },
+      overrides: [
+        {
+          // Tests pass mocked methods to expect() and vi.mocked(), which never
+          // call them, so this rule reports only false positives there.
+          // typescript-eslint's fix is a Vitest-aware variant that oxlint
+          // does not have.
+          files: ["**/*.test.ts"],
+          rules: { "typescript/unbound-method": "off" },
+        },
+      ],
       options: {
         typeAware: true,
         typeCheck: true,
