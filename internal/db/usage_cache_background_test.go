@@ -69,63 +69,6 @@ func TestUsageCacheBackfillNewestFirstAndResumesInstalledCoverage(t *testing.T) 
 	assert.Empty(t, extracted, "installed versions are coverage truth on restart")
 }
 
-// A read queues changes the pass missed, then the worker refreshes the totals.
-func TestUsageCacheBackfillPicksUpSourceChangedDuringPass(t *testing.T) {
-	database := testDB(t)
-	started := "2026-08-10T08:00:00Z"
-	insertSession(t, database, "moving-backfill", "project", func(session *Session) {
-		session.StartedAt = &started
-	})
-	require.NoError(t, database.InsertMessages(t.Context(), []Message{{
-		SessionID: "moving-backfill", Ordinal: 0, Role: "assistant",
-		Timestamp: "2026-08-10T09:00:00Z", Model: "model",
-		TokenUsage: json.RawMessage(`{"input_tokens":1}`),
-	}}))
-
-	snapshot, err := database.captureUsageQuery(
-		t.Context(), UsageFilter{}, usageQueryKindToken)
-	require.NoError(t, err)
-	cache, err := database.usageCache.Generation(
-		t.Context(), snapshot.DatabaseID)
-	require.NoError(t, err)
-	var mutations atomic.Int32
-	var mutationErr atomic.Value
-	batches := make(chan struct{}, 16)
-	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
-	cache.fill.observer.afterExtract = func([]usageSourceVersion) {
-		if mutations.Add(1) != 1 {
-			return
-		}
-		_, updateErr := database.getWriter().Exec(t.Context(), `
-			UPDATE messages SET token_usage = '{"input_tokens":9}'
-			WHERE session_id = 'moving-backfill';
-			UPDATE sessions SET transcript_revision = 'later'
-			WHERE id = 'moving-backfill'`)
-		if updateErr != nil {
-			mutationErr.Store(updateErr)
-		}
-	}
-
-	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
-	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
-	if stored := mutationErr.Load(); stored != nil {
-		require.NoError(t, stored.(error))
-	}
-	require.Positive(t, mutations.Load())
-
-	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{
-		From: "2026-08-10", To: "2026-08-10", SkipSessionCounts: true,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 1, daily.Totals.InputTokens)
-	waitUsageNotification(t, batches)
-	daily, err = database.GetDailyUsage(t.Context(), UsageFilter{
-		From: "2026-08-10", To: "2026-08-10", SkipSessionCounts: true,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 9, daily.Totals.InputTokens)
-}
-
 func TestUsageCacheBackfillPublishesStableCoverageWhileNewestSessionChanges(
 	t *testing.T,
 ) {

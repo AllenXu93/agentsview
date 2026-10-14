@@ -160,6 +160,48 @@ func waitUsageNotification(t *testing.T, batches <-chan struct{}) {
 	}
 }
 
+func staleUsageFixture(t *testing.T, daemon bool) (*DB, *usageCache) {
+	t.Helper()
+	database := testDB(t)
+	seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+	require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+	if daemon {
+		require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+		require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+	}
+	_, _, cache := prepareUsageRollupTest(t, database)
+	return database, cache
+}
+
+func changeStaleUsage(t *testing.T, database *DB, marker time.Time) {
+	t.Helper()
+	_, err := database.getWriter().Exec(t.Context(), `UPDATE messages SET token_usage = '{"input_tokens":17}' WHERE session_id = 'session'; UPDATE sessions SET transcript_revision = 'changed', created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE id = 'session'`, marker.UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+}
+
+func TestUsageNotificationContinuousArrivalsReachBatchCap(t *testing.T) {
+	database, cache := staleUsageFixture(t, true)
+	changeStaleUsage(t, database, time.Now().Add(-time.Second))
+	batches := make(chan struct{}, 16)
+	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	guard := time.NewTimer(10 * usageFillNotificationBatchCap)
+	defer guard.Stop()
+	cache.fill.enqueueSessions([]string{"session"})
+	for {
+		select {
+		case <-ticker.C:
+			cache.fill.enqueueSessions([]string{"session"})
+		case <-batches:
+			assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"))
+			return
+		case <-guard.C:
+			require.FailNow(t, "continuous notifications postponed refresh")
+		}
+	}
+}
+
 func TestUsageNotificationRefreshesWrittenSession(t *testing.T) {
 	for _, daemon := range []bool{false, true} {
 		t.Run(strconv.FormatBool(daemon), func(t *testing.T) {
