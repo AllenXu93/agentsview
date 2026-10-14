@@ -95,16 +95,30 @@ func TestUsageStaleRejectedStatesStayExact(t *testing.T) {
 	}
 }
 
+func TestUsageStaleCorrectedFutureTimestampStaysExact(t *testing.T) {
+	for _, offset := range []time.Duration{time.Minute, 5 * time.Second} {
+		t.Run(offset.String(), func(t *testing.T) {
+			database, _ := staleUsageFixture(t, false)
+			_, err := database.getWriter().Exec(t.Context(), `UPDATE sessions SET created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE id = 'session'`, time.Now().Add(offset).UTC().Format(time.RFC3339Nano))
+			require.NoError(t, err)
+			require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+			require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+			require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+			changeStaleUsage(t, database, time.Now().Add(-time.Second))
+			assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"))
+		})
+	}
+}
+
 func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	t.Run("facts pending with narrower read", func(t *testing.T) {
 		database := testDB(t)
-		for _, id := range []string{"a", "b"} {
-			seedUsageSnapshotSession(t, database, id, id, "2026-08-10T09:00:00Z", 0, 10, "model-a")
-		}
+		seedUsageSnapshotSession(t, database, "a", "a", "2026-08-10T09:00:00Z", 0, 20, "model-a")
+		seedUsageSnapshotSession(t, database, "b", "b", "2026-08-10T09:00:00Z", 0, 10, "model-a")
 		filter := UsageFilter{Timezone: "UTC"}
 		daily, err := database.GetDailyUsage(t.Context(), filter)
 		require.NoError(t, err)
-		require.Equal(t, 10, daily.Totals.OutputTokens)
+		require.Equal(t, 20, daily.Totals.OutputTokens)
 		require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
 		require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 		_, _, cache := prepareUsageRollupTest(t, database)
@@ -112,13 +126,18 @@ func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 		require.NoError(t, err)
 		_, err = cache.db.ExecContext(t.Context(), `DELETE FROM usage_rollup_installs WHERE session_id = 'b'`)
 		require.NoError(t, err)
-		_, err = database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC", Project: "b"})
-		require.NoError(t, err)
+		cache.fill.processNotificationBatch(map[string]bool{"b": true}, false)
+		batches := make(chan struct{}, 16)
+		cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 		var builds atomic.Int32
 		cache.rollup.observer.beforeEnsure = func() { builds.Add(1) }
 		daily, err = database.GetDailyUsage(t.Context(), filter)
 		require.NoError(t, err)
-		assert.Equal(t, 10, daily.Totals.OutputTokens)
+		assert.Equal(t, 20, daily.Totals.OutputTokens)
 		assert.Zero(t, builds.Load())
+		waitUsageNotification(t, batches)
+		daily, err = database.GetDailyUsage(t.Context(), filter)
+		require.NoError(t, err)
+		assert.Equal(t, 10, daily.Totals.OutputTokens)
 	})
 }

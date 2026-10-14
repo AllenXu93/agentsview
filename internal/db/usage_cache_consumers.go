@@ -78,7 +78,8 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 		if !fill.source.Equal(version) {
 			installed, err := time.Parse(extractTimeLayout, fill.source.SyncMarker)
 			changed, changedErr := time.Parse(extractTimeLayout, version.SyncMarker)
-			if err != nil || changedErr != nil || !recent(version.SyncMarker) || changed.Sub(installed) > usageRollupStaleServeWindow {
+			gap := changed.Sub(installed)
+			if err != nil || changedErr != nil || !recent(version.SyncMarker) || installed.After(now) || gap < -usageRollupStaleServeWindow || gap > usageRollupStaleServeWindow {
 				return nil, nil, nil
 			}
 			behind = append(behind, version.SessionID)

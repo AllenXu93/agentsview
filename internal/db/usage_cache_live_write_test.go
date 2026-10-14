@@ -131,11 +131,14 @@ func TestUsageCacheBackfillCompletesUnderConcurrentArchiveWrites(t *testing.T) {
 	var appends atomic.Int32
 	churn := func() {
 		ordinal := int(appends.Add(1))
-		appendLiveWriteMessage(t, database, "churn-0",
-			"2026-08-10T09:00:00Z", ordinal, 1)
+		suffix := "churn-0-" + strconv.Itoa(ordinal)
+		_, err := database.getWriter().Exec(t.Context(), `INSERT INTO messages(session_id, ordinal, role, content, timestamp, model, token_usage, claude_message_id, claude_request_id) VALUES ('churn-0', ?, 'assistant', '', '2026-08-10T09:00:00Z', 'model-a', '{"input_tokens":1}', ?, ?); UPDATE sessions SET transcript_revision = ?, local_modified_at = ? WHERE id = 'churn-0'`, ordinal, "message-"+suffix, "request-"+suffix, suffix, time.Now().UTC().Format(time.RFC3339Nano))
+		require.NoError(t, err)
 	}
 	cache.fill.observer.afterExtract = func([]usageSourceVersion) { churn() }
 	cache.rollup.observer.beforeEnsure = churn
+	batches := make(chan struct{}, 16)
+	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 
 	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
 	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
@@ -146,8 +149,11 @@ func TestUsageCacheBackfillCompletesUnderConcurrentArchiveWrites(t *testing.T) {
 
 	cache.fill.observer.afterExtract = nil
 	cache.rollup.observer.beforeEnsure = nil
-	// Every write the pass raced is still accounted for once the next
-	// request refills the session it touched.
+	initial := liveWriteDailyInput(t, database, "project")
+	assert.GreaterOrEqual(t, initial, 4)
+	assert.LessOrEqual(t, initial, 4+written)
+	cache.fill.enqueueSessions([]string{"churn-0"})
+	waitUsageNotification(t, batches)
 	assert.Equal(t, 4+written, liveWriteDailyInput(t, database, "project"))
 }
 
