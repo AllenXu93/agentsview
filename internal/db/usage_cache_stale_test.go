@@ -332,15 +332,16 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 					require.True(t, cache.fill.staleSourceEligible(t.Context(), version, fills[version.SessionID]), "session %s must get a window after earlier batches complete", version.SessionID)
 					ids = append(ids, version.SessionID)
 				}
-				if completion == "refill" {
+				switch completion {
+				case "refill":
 					_, err = cache.fill.FillBackground(t.Context(), batch, 0)
-				} else if completion == "sweep before notification" || completion == "other process sweeps" {
+				case "sweep before notification", "other process sweeps":
 					_, err = database.getWriter().Exec(t.Context(), `DELETE FROM sessions WHERE id >= ? AND id <= ?`, ids[0], ids[len(ids)-1])
 					require.NoError(t, err)
 					require.NoError(t, sweeper.sweepDeletionJournal(t.Context(), database))
 					require.NoError(t, cache.sweepDeletionJournal(t.Context(), database))
 					err = cache.fill.deleteNotificationSessions(ids)
-				} else {
+				default:
 					err = cache.fill.deleteNotificationSessions(ids)
 				}
 				require.NoError(t, err)

@@ -41,6 +41,7 @@ func seedToolEffectivenessSession(t *testing.T, d *db.DB, sessionID, termination
 		s.Agent = "claude"
 		s.MessageCount = len(msgs)
 		s.StartedAt = new("2026-04-26T10:00:00Z")
+		s.EndedAt = new("2026-04-26T10:00:08Z")
 		if termination != "" {
 			s.TerminationStatus = new(termination)
 		}
