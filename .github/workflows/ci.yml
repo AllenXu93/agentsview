@@ -23,7 +23,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.linter == 'nilaway' && 30 || 10 }}
+    timeout-minutes: ${{ matrix.linter == 'nilaway' && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
