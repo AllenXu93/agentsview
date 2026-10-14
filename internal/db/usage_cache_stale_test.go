@@ -451,6 +451,7 @@ func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	case <-returned:
 	case <-ctx.Done():
 		release()
+		<-returned
 		require.FailNow(t, "stale read waited for blocked extraction")
 	}
 	require.NoError(t, err)
