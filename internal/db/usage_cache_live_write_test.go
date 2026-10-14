@@ -252,6 +252,62 @@ func TestUsageNotificationLeavesCursorRollupForRequest(t *testing.T) {
 	assert.Equal(t, 1011, daily.Totals.InputTokens)
 }
 
+func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
+	database := testDB(t)
+	for _, id := range []string{"peer-a", "peer-b"} {
+		seedUsageSnapshotSession(t, database, id, "project", "2026-08-10T09:00:00Z", 0, 10, "model-a")
+	}
+	_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+	require.NoError(t, err)
+	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+	blocked, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	batches := make(chan struct{}, 16)
+	var paused atomic.Bool
+	cache.fill.observer.afterNotificationBatch = func() {
+		if !paused.Swap(true) {
+			close(blocked)
+			<-release
+		}
+		batches <- struct{}{}
+	}
+	database.usageCache.NotifySessions([]string{"missing"})
+	waitUsageNotification(t, blocked)
+	ids := make([]string, cap(cache.fill.notify))
+	for i := range ids {
+		ids[i] = "missing"
+	}
+	database.usageCache.NotifySessions(ids)
+	seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
+	snapshot, err = database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	_, err = cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+	require.NoError(t, err)
+	var installs atomic.Int32
+	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
+	release <- struct{}{}
+	for {
+		waitUsageNotification(t, batches)
+		var warmed int
+		require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
+			FROM usage_rollup_installs i JOIN usage_rollup_timezones z ON z.id = i.timezone_id
+			WHERE z.timezone_name = 'UTC' AND i.session_id IN ('peer-a', 'peer-b', 'sibling')`).Scan(&warmed))
+		if warmed == 3 {
+			break
+		}
+	}
+	background := installs.Load()
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, 10, daily.Totals.OutputTokens)
+	assert.Equal(t, background, installs.Load(), "request rebuilt peers lost from the full queue")
+}
+
 func TestUsageNotificationRefreshChunks(t *testing.T) {
 	database := testDB(t)
 	for index := range 600 {
@@ -278,4 +334,35 @@ func TestUsageNotificationRefreshChunks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 600, daily.Totals.InputTokens)
 	assert.Len(t, sizes, 3, "request rebuilt warmed sessions")
+}
+
+func TestUsageNotificationRefreshContinuesAfterChunkFailure(t *testing.T) {
+	database := testDB(t)
+	for index := range 257 {
+		seedLiveWriteSession(t, database, "session-"+strconv.Itoa(index), "project", "2026-08-10T09:00:00Z", 0, 1)
+	}
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+	require.NoError(t, err)
+	fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+	require.NoError(t, err)
+	database.usageBackfillMu.Lock()
+	database.usageBackfillEnabled = true
+	database.usageBackfillMu.Unlock()
+	var attempts atomic.Int32
+	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) {
+		switch attempts.Add(1) {
+		case 1:
+			_, err := cache.db.ExecContext(t.Context(), `CREATE TRIGGER reject_rollup_chunk
+				BEFORE INSERT ON usage_rollup_installs BEGIN SELECT RAISE(ABORT, 'rollup install failed'); END`)
+			require.NoError(t, err)
+		case 2:
+			_, err := cache.db.ExecContext(t.Context(), `DROP TRIGGER reject_rollup_chunk`)
+			require.NoError(t, err)
+		}
+	}
+	database.refreshUsageRollups(t.Context(), cache, fills)
+	assert.Equal(t, int32(2), attempts.Load(), "failed chunk prevented the later chunk from running")
+	assert.Equal(t, 1, usageCacheCount(t, cache, "usage_rollup_installs"))
 }

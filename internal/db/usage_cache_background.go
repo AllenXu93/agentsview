@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -126,10 +127,7 @@ func (db *DB) WaitUsageCacheBackfill(ctx context.Context) error {
 // it (daemon lifecycle). A CLI resync or compaction reopening the archive
 // must not kick off a full background scan on its own.
 func (db *DB) restartUsageCacheBackfillIfEnabled() error {
-	db.usageBackfillMu.Lock()
-	enabled := db.usageBackfillEnabled
-	db.usageBackfillMu.Unlock()
-	if !enabled {
+	if !db.isUsageBackfillEnabled() {
 		return nil
 	}
 	return db.StartUsageCacheBackfill(context.Background())
@@ -146,13 +144,16 @@ func (db *DB) UsagePricingDigest(ctx context.Context) (string, error) {
 
 // RewarmUsageCache rebuilds price-stale rollups; a call during a pass queues one rerun because passes pin their catalog.
 func (db *DB) RewarmUsageCache() error {
-	db.usageBackfillMu.Lock()
-	enabled := db.usageBackfillEnabled
-	db.usageBackfillMu.Unlock()
-	if !enabled {
+	if !db.isUsageBackfillEnabled() {
 		return nil
 	}
 	return db.startUsageCacheBackfill(context.Background(), true)
+}
+
+func (db *DB) isUsageBackfillEnabled() bool {
+	db.usageBackfillMu.Lock()
+	defer db.usageBackfillMu.Unlock()
+	return db.usageBackfillEnabled
 }
 
 // StopUsageCacheBackfill cancels and joins the active pass before cache handles
@@ -552,17 +553,12 @@ func ensureUsageRollupsAcross(ctx context.Context, cache *usageCache, snapshot u
 		total.DailyRows += metrics.DailyRows
 		total.ExceptionGroups += metrics.ExceptionGroups
 		total.ExceptionRows += metrics.ExceptionRows
-		total.BuildDuration += metrics.BuildDuration
-		total.InstallDuration += metrics.InstallDuration
 	}
 	return total, nil
 }
 
 func (db *DB) refreshUsageRollups(ctx context.Context, cache *usageCache, fills map[string]usageFillResult) {
-	db.usageBackfillMu.Lock()
-	enabled := db.usageBackfillEnabled
-	db.usageBackfillMu.Unlock()
-	if !enabled {
+	if !db.isUsageBackfillEnabled() {
 		return
 	}
 	ids := make([]string, 0, len(fills))
@@ -571,22 +567,27 @@ func (db *DB) refreshUsageRollups(ctx context.Context, cache *usageCache, fills 
 			ids = append(ids, id)
 		}
 	}
-	err := QueryChunkedSize(ids, usageCacheBackfillBatchSize, func(chunk []string) error {
-		snapshot, err := db.captureUsageSessions(ctx, chunk)
-		if err != nil {
+	for chunk := range slices.Chunk(ids, usageCacheBackfillBatchSize) {
+		if ctx.Err() != nil {
+			return
+		}
+		err := func() error {
+			snapshot, err := db.captureUsageSessions(ctx, chunk)
+			if err != nil {
+				return err
+			}
+			for i, session := range snapshot.Sessions {
+				snapshot.Versions[i] = fills[session.ID].source
+			}
+			locations, err := usageBackfillLocations(ctx, cache, snapshot.location)
+			if err != nil {
+				return err
+			}
+			_, err = ensureUsageRollupsAcross(ctx, cache, snapshot, fills, export.NewPricingResolver(snapshot.PricingRows), locations)
 			return err
+		}()
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errUsageCacheSourceChanged) {
+			log.Printf("usage cache notification rollups: %v", err)
 		}
-		for i, session := range snapshot.Sessions {
-			snapshot.Versions[i] = fills[session.ID].source
-		}
-		locations, err := usageBackfillLocations(ctx, cache, snapshot.location)
-		if err != nil {
-			return err
-		}
-		_, err = ensureUsageRollupsAcross(ctx, cache, snapshot, fills, export.NewPricingResolver(snapshot.PricingRows), locations)
-		return err
-	})
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errUsageCacheSourceChanged) {
-		log.Printf("usage cache notification rollups: %v", err)
 	}
 }

@@ -87,15 +87,14 @@ type usageQuerySessionRecord struct {
 func (db *DB) captureUsageQuery(
 	ctx context.Context, filter UsageFilter, kind usageQueryKind,
 ) (usageQuerySnapshot, error) {
-	return db.captureUsageSnapshot(ctx, filter, kind, nil)
+	return db.captureUsageSnapshot(ctx, filter, kind, nil, true)
 }
 
 func (db *DB) captureUsageSessions(ctx context.Context, ids []string) (usageQuerySnapshot, error) {
-	return db.captureUsageSnapshot(ctx, UsageFilter{}, usageQueryKindToken, ids)
+	return db.captureUsageSnapshot(ctx, UsageFilter{}, usageQueryKindToken, ids, false)
 }
 
-func (db *DB) captureUsageSnapshot(ctx context.Context, filter UsageFilter, kind usageQueryKind, candidateIDs []string) (usageQuerySnapshot, error) {
-	queryCapture := candidateIDs == nil
+func (db *DB) captureUsageSnapshot(ctx context.Context, filter UsageFilter, kind usageQueryKind, candidateIDs []string, queryCapture bool) (usageQuerySnapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

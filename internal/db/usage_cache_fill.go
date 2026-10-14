@@ -70,6 +70,7 @@ type usageFillCoordinator struct {
 	cursorTarget int64
 	observer     usageFillObserver
 	notify       chan usageFillNotification
+	overflow     map[string]bool
 	done         chan struct{}
 }
 
@@ -1346,11 +1347,21 @@ func (m *usageCacheManager) NotifySessions(sessionIDs []string) {
 	}
 	m.mu.Unlock()
 	for _, coordinator := range coordinators {
-		for _, id := range sessionIDs {
-			select {
-			case coordinator.notify <- usageFillNotification{sessionID: id}:
-			default:
+		coordinator.enqueueSessions(sessionIDs)
+	}
+}
+
+func (c *usageFillCoordinator) enqueueSessions(ids []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range ids {
+		select {
+		case c.notify <- usageFillNotification{sessionID: id}:
+		default:
+			if c.overflow == nil {
+				c.overflow = make(map[string]bool)
 			}
+			c.overflow[id] = true
 		}
 	}
 }
@@ -1391,6 +1402,18 @@ func (c *usageFillCoordinator) runNotifications() {
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
+		c.mu.Lock()
+		maps.Copy(pending, c.overflow)
+		clear(c.overflow)
+		c.mu.Unlock()
+		if len(pending) > 0 && timerC == nil {
+			if timer == nil {
+				timer = time.NewTimer(usageFillNotificationDebounce)
+			} else {
+				timer.Reset(usageFillNotificationDebounce)
+			}
+			timerC = timer.C
+		}
 		select {
 		case <-c.ctx.Done():
 			if timer != nil {
@@ -1535,15 +1558,7 @@ func (c *usageFillCoordinator) deleteNotificationSessions(ids []string) error {
 }
 
 func (c *usageFillCoordinator) requeueSessions(ids []string) {
-	c.archive.usageBackfillMu.Lock()
-	enabled := c.archive.usageBackfillEnabled
-	c.archive.usageBackfillMu.Unlock()
-	if enabled {
-		for _, id := range ids {
-			select {
-			case c.notify <- usageFillNotification{sessionID: id}:
-			default:
-			}
-		}
+	if c.archive.isUsageBackfillEnabled() {
+		c.enqueueSessions(ids)
 	}
 }
