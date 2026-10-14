@@ -69,9 +69,7 @@ func TestUsageCacheBackfillNewestFirstAndResumesInstalledCoverage(t *testing.T) 
 	assert.Empty(t, extracted, "installed versions are coverage truth on restart")
 }
 
-// The pass no longer recaptures when a source moves under it: it installs the
-// facts its read snapshot saw, and the next request refills the session that
-// changed. The observable outcome, an exact answer afterwards, is unchanged.
+// A read queues changes the pass missed, then the worker refreshes the totals.
 func TestUsageCacheBackfillPicksUpSourceChangedDuringPass(t *testing.T) {
 	database := testDB(t)
 	started := "2026-08-10T08:00:00Z"
@@ -92,6 +90,8 @@ func TestUsageCacheBackfillPicksUpSourceChangedDuringPass(t *testing.T) {
 	require.NoError(t, err)
 	var mutations atomic.Int32
 	var mutationErr atomic.Value
+	batches := make(chan struct{}, 16)
+	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 	cache.fill.observer.afterExtract = func([]usageSourceVersion) {
 		if mutations.Add(1) != 1 {
 			return
@@ -114,6 +114,12 @@ func TestUsageCacheBackfillPicksUpSourceChangedDuringPass(t *testing.T) {
 	require.Positive(t, mutations.Load())
 
 	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{
+		From: "2026-08-10", To: "2026-08-10", SkipSessionCounts: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, daily.Totals.InputTokens)
+	waitUsageNotification(t, batches)
+	daily, err = database.GetDailyUsage(t.Context(), UsageFilter{
 		From: "2026-08-10", To: "2026-08-10", SkipSessionCounts: true,
 	})
 	require.NoError(t, err)

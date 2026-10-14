@@ -362,7 +362,10 @@ day, making costs from shared multi-machine archives separable without another
 query.
 
 On large archives, aggregate usage reads are served from a local cache of daily
-totals that stays exact as sessions sync. The first query after an install,
+totals. Daemon-served reads, including CLI reads through a daemon, may return
+the last complete totals and counts while only sessions changed within 10 seconds
+await fact refresh. Ten seconds is an eligibility window, not a freshness bound.
+A standalone CLI run stays exact. The first query after an install,
 upgrade, or cache deletion is slower while that cache builds; subsequent queries
 are fast.
 

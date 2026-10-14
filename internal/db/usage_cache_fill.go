@@ -1445,6 +1445,7 @@ func (c *usageFillCoordinator) runNotifications() {
 	var cursorPending bool
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	var deadline time.Time
 	for {
 		c.mu.Lock()
 		for id := range c.overflow {
@@ -1459,6 +1460,7 @@ func (c *usageFillCoordinator) runNotifications() {
 		}
 		c.mu.Unlock()
 		if len(pending) > 0 && timerC == nil {
+			deadline = time.Now().Add(time.Second)
 			if timer == nil {
 				timer = time.NewTimer(usageFillNotificationDebounce)
 			} else {
@@ -1473,6 +1475,9 @@ func (c *usageFillCoordinator) runNotifications() {
 			}
 			return
 		case notification := <-c.notify:
+			if timerC == nil {
+				deadline = time.Now().Add(time.Second)
+			}
 			if notification.cursor {
 				cursorPending = true
 			} else if notification.sessionID != "" && len(pending) < 2*usageFillNotificationCapacity {
@@ -1487,7 +1492,7 @@ func (c *usageFillCoordinator) runNotifications() {
 					default:
 					}
 				}
-				timer.Reset(usageFillNotificationDebounce)
+				timer.Reset(min(usageFillNotificationDebounce, time.Until(deadline)))
 			}
 			timerC = timer.C
 		case <-timerC:

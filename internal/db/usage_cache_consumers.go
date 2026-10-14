@@ -13,12 +13,16 @@ import (
 
 // usageRollupSlowRequestThreshold gates the privacy-safe phase-timing log so
 // warm reads stay silent and slow requests explain where the time went.
-const usageRollupSlowRequestThreshold = 2 * time.Second
+const (
+	usageRollupSlowRequestThreshold = 2 * time.Second
+	usageRollupStaleServeWindow     = 10 * time.Second
+)
 
 type usageRollupRequestTimings struct {
 	capture, sweep, fill, read time.Duration
 	rollup                     usageRollupMetrics
 	candidates                 int
+	servedStale                int
 }
 
 func (timings usageRollupRequestTimings) logIfSlow(started time.Time) {
@@ -31,12 +35,56 @@ func (timings usageRollupRequestTimings) logIfSlow(started time.Time) {
 	}
 	log.Printf("usage rollup read took %s: capture %s, deletion sweep %s, "+
 		"fact fill %s, rollup build %s, rollup install %s, cache read %s "+
-		"(%d candidate sessions; built %d daily rows, %d exception rows in %d groups)",
+		"(%d candidate sessions; served stale %d; built %d daily rows, %d exception rows in %d groups)",
 		round(total), round(timings.capture), round(timings.sweep),
 		round(timings.fill), round(timings.rollup.BuildDuration),
 		round(timings.rollup.InstallDuration), round(timings.read),
-		timings.candidates, timings.rollup.DailyRows,
+		timings.candidates, timings.servedStale, timings.rollup.DailyRows,
 		timings.rollup.ExceptionRows, timings.rollup.ExceptionGroups)
+}
+
+func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usageQuerySnapshot, resolver *export.PricingResolver) (map[string]usageRollupInstall, []string, error) {
+	now := time.Now()
+	recent := func(marker string) bool {
+		changed, err := time.Parse(extractTimeLayout, marker)
+		age := now.Sub(changed)
+		return err == nil && age >= 0 && age <= usageRollupStaleServeWindow
+	}
+	anyRecent := false
+	for _, version := range snapshot.Versions {
+		anyRecent = anyRecent || recent(version.SyncMarker)
+	}
+	if !anyRecent {
+		return nil, nil, nil
+	}
+	conn, err := cache.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN`); err != nil {
+		return nil, nil, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
+	fills, err := readCurrentUsageFillResults(ctx, conn, snapshot.Versions)
+	if err != nil {
+		return nil, nil, err
+	}
+	var behind []string
+	for _, version := range snapshot.Versions {
+		fill := fills[version.SessionID]
+		if fill.Deleted || !fill.source.Equal(version) && !recent(version.SyncMarker) {
+			return nil, nil, nil
+		}
+		if !fill.source.Equal(version) {
+			behind = append(behind, version.SessionID)
+		}
+	}
+	installs, stale, err := readUsageRollupInstalls(ctx, conn, usageTimezoneIdentityFor(snapshot.location, snapshot.Intervals), snapshot, fills, newUsagePricingIdentities(resolver))
+	if err != nil || len(stale) > 0 || installs[usageRollupCursorSessionID].FactRevision < snapshot.CursorHighWater {
+		return nil, nil, err
+	}
+	return installs, behind, nil
 }
 
 func (db *DB) queryUsageRollups(
@@ -84,34 +132,47 @@ func (db *DB) queryUsageRollups(
 			return usageQuerySnapshot{}, usageFactsResult{}, nil, sweepErr
 		}
 		timings.sweep = time.Since(sweepStarted)
-		fillStarted := time.Now()
-		report(fmt.Sprintf("Preparing usage data for %d sessions in this report", timings.candidates))
-		fills, fillErr := cache.fill.Ensure(
-			ctx, snapshot.Versions, snapshot.CursorHighWater,
-		)
-		if fillErr != nil {
-			release()
-			if errors.Is(fillErr, errUsageCacheSourceChanged) {
-				lastErr = fillErr
-				continue
-			}
-			return usageQuerySnapshot{}, usageFactsResult{}, nil, fillErr
-		}
-		timings.fill = time.Since(fillStarted)
-		snapshot.dropDeleted(fills)
 		resolver := export.NewPricingResolver(snapshot.PricingRows)
-		report(fmt.Sprintf("Calculating daily totals for %d sessions in this report", timings.candidates))
-		installs, rollupMetrics, rollupErr := cache.rollup.Ensure(
-			ctx, snapshot, fills, resolver)
-		if rollupErr != nil {
-			release()
-			if errors.Is(rollupErr, errUsageCacheSourceChanged) {
-				lastErr = rollupErr
-				continue
+		var installs map[string]usageRollupInstall
+		var behind []string
+		if db.isUsageBackfillEnabled() {
+			var staleErr error
+			installs, behind, staleErr = cache.installedUsageRollups(ctx, snapshot, resolver)
+			if staleErr != nil {
+				log.Printf("checking installed usage rollups: %v", staleErr)
 			}
-			return usageQuerySnapshot{}, usageFactsResult{}, nil, rollupErr
 		}
-		timings.rollup = rollupMetrics
+		if installs == nil {
+			fillStarted := time.Now()
+			report(fmt.Sprintf("Preparing usage data for %d sessions in this report", timings.candidates))
+			fills, fillErr := cache.fill.Ensure(
+				ctx, snapshot.Versions, snapshot.CursorHighWater,
+			)
+			if fillErr != nil {
+				release()
+				if errors.Is(fillErr, errUsageCacheSourceChanged) {
+					lastErr = fillErr
+					continue
+				}
+				return usageQuerySnapshot{}, usageFactsResult{}, nil, fillErr
+			}
+			timings.fill = time.Since(fillStarted)
+			snapshot.dropDeleted(fills)
+			report(fmt.Sprintf("Calculating daily totals for %d sessions in this report", timings.candidates))
+			var rollupMetrics usageRollupMetrics
+			var rollupErr error
+			installs, rollupMetrics, rollupErr = cache.rollup.Ensure(
+				ctx, snapshot, fills, resolver)
+			if rollupErr != nil {
+				release()
+				if errors.Is(rollupErr, errUsageCacheSourceChanged) {
+					lastErr = rollupErr
+					continue
+				}
+				return usageQuerySnapshot{}, usageFactsResult{}, nil, rollupErr
+			}
+			timings.rollup = rollupMetrics
+		}
 		readStarted := time.Now()
 		report("Reading cached daily totals")
 		var facts usageFactsResult
@@ -127,6 +188,8 @@ func (db *DB) queryUsageRollups(
 		}
 		timings.read = time.Since(readStarted)
 		if queryErr == nil {
+			timings.servedStale = len(behind)
+			cache.fill.enqueueSessions(behind)
 			release()
 			timings.logIfSlow(started)
 			return snapshot, facts, resolver, nil
