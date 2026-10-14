@@ -128,7 +128,7 @@ func (c *usageFillCoordinator) Ensure(
 		if err != nil {
 			return nil, err
 		}
-		c.staleSourceEligible(version, cached)
+		c.staleSourceEligible(ctx, version, cached)
 		if ok && cached.source.Equal(version) {
 			results[version.SessionID] = cached
 			continue
@@ -338,7 +338,7 @@ func (c *usageFillCoordinator) FillBackground(
 		if err != nil {
 			return nil, err
 		}
-		c.staleSourceEligible(version, cached)
+		c.staleSourceEligible(ctx, version, cached)
 		if ok && cached.source.Equal(version) {
 			results[version.SessionID] = cached
 			continue

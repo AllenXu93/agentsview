@@ -100,7 +100,7 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 	}
 	for _, version := range snapshot.Versions {
 		fill := fills[version.SessionID]
-		eligible := cache.fill.staleSourceEligible(version, fill)
+		eligible := cache.fill.staleSourceEligible(ctx, version, fill)
 		if !fill.source.Equal(version) {
 			if !eligible {
 				return nil, nil, nil
@@ -117,11 +117,11 @@ func (c *usageFillCoordinator) observeStaleFillLocked(id string, fill usageFillR
 	}
 }
 
-func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, fill usageFillResult) bool {
+func (c *usageFillCoordinator) staleSourceEligible(ctx context.Context, version usageSourceVersion, fill usageFillResult) bool {
 	if !c.archive.isUsageBackfillEnabled() {
 		return false
 	}
-	conn, err := c.cache.db.Conn(c.ctx)
+	conn, err := c.cache.db.Conn(ctx)
 	if err != nil {
 		return false
 	}
@@ -129,7 +129,7 @@ func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, f
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// The installed revision fences pinned observations without retaining completed windows.
-	current, err := readCurrentUsageFillResult(c.ctx, conn, version.SessionID)
+	current, err := readCurrentUsageFillResult(ctx, conn, version.SessionID)
 	if err != nil || current.Deleted || fill.Deleted || current.InstallRevision != fill.InstallRevision {
 		return false
 	}

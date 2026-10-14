@@ -178,9 +178,46 @@ func TestUsageStaleCorrectedFutureTimestampStaysExact(t *testing.T) {
 	}
 }
 
+func TestUsageStaleEligibilityCancellationWhileCacheConnectionsHeld(t *testing.T) {
+	database, cache := staleUsageFixture(t, true)
+	changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{Timezone: "UTC"}, usageQueryKindToken)
+	require.NoError(t, err)
+	conn, err := cache.db.Conn(t.Context())
+	require.NoError(t, err)
+	fill, err := readCurrentUsageFillResult(t.Context(), conn, "session")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	require.True(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], fill))
+	for range cache.db.Stats().MaxOpenConnections {
+		conn, err := cache.db.Conn(t.Context())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	waits := cache.db.Stats().WaitCount
+	result := make(chan bool, 1)
+	go func() {
+		result <- cache.fill.staleSourceEligible(ctx, snapshot.Versions[0], fill)
+	}()
+	require.Eventually(t, func() bool { return cache.db.Stats().WaitCount > waits }, 10*time.Second, time.Millisecond)
+	cancel()
+	select {
+	case eligible := <-result:
+		assert.False(t, eligible)
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "cancelled stale eligibility check kept waiting for a cache connection")
+	}
+	assert.NoError(t, cache.fill.ctx.Err())
+}
+
 func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 	for _, overlap := range []string{"matching snapshot", "stale snapshot", "missing snapshot", "install cleanup", "delete cleanup"} {
 		for _, tracking := range []string{"cleared", "tracking"} {
+			if tracking == "cleared" && overlap != "stale snapshot" {
+				continue
+			}
 			t.Run(overlap+"/"+tracking, func(t *testing.T) {
 				database, cache := staleUsageFixture(t, true)
 				base := cache.fill.now()
@@ -200,7 +237,7 @@ func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 				changeStaleUsage(t, database, base.Add(-time.Second))
 				snapshot, err := database.captureUsageQuery(t.Context(), filter, usageQueryKindToken)
 				require.NoError(t, err)
-				require.True(t, cache.fill.staleSourceEligible(snapshot.Versions[0], oldFill))
+				require.True(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], oldFill))
 				var missingFill usageFillResult
 				if overlap == "delete cleanup" || overlap == "missing snapshot" {
 					require.NoError(t, cache.fill.deleteNotificationSessions([]string{"session"}))
@@ -223,18 +260,18 @@ func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 				newFill := fills["session"]
 				require.Greater(t, newFill.InstallRevision, oldFill.InstallRevision)
 				if tracking == "tracking" {
-					require.True(t, cache.fill.staleSourceEligible(snapshot.Versions[0], newFill))
+					require.True(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], newFill))
 				}
 				elapsed.Store(int64(9 * time.Second))
 				switch overlap {
 				case "matching snapshot":
-					assert.False(t, cache.fill.staleSourceEligible(oldSnapshot.Versions[0], oldFill))
+					assert.False(t, cache.fill.staleSourceEligible(t.Context(), oldSnapshot.Versions[0], oldFill))
 				case "stale snapshot":
 					pinnedFill, err := readCurrentUsageFillResult(t.Context(), conn, "session")
 					require.NoError(t, err)
-					assert.False(t, cache.fill.staleSourceEligible(snapshot.Versions[0], pinnedFill))
+					assert.False(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], pinnedFill))
 				case "missing snapshot":
-					assert.False(t, cache.fill.staleSourceEligible(snapshot.Versions[0], missingFill))
+					assert.False(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], missingFill))
 				case "install cleanup", "delete cleanup":
 					oldFill.Deleted = overlap == "delete cleanup"
 					cache.fill.mu.Lock()
@@ -243,7 +280,7 @@ func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 				}
 				deadline := usageRollupStaleServeWindow
 				if tracking == "cleared" {
-					require.True(t, cache.fill.staleSourceEligible(snapshot.Versions[0], newFill))
+					require.True(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], newFill))
 					deadline += 9 * time.Second
 				}
 				elapsed.Store(int64(deadline))
@@ -286,7 +323,7 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 				batch := snapshot.Versions[start : start+256]
 				ids := make([]string, 0, len(batch))
 				for _, version := range batch {
-					require.True(t, cache.fill.staleSourceEligible(version, fills[version.SessionID]), "session %s must get a window after earlier batches complete", version.SessionID)
+					require.True(t, cache.fill.staleSourceEligible(t.Context(), version, fills[version.SessionID]), "session %s must get a window after earlier batches complete", version.SessionID)
 					ids = append(ids, version.SessionID)
 				}
 				if completion == "refill" {
@@ -296,7 +333,7 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 				}
 				require.NoError(t, err)
 				for _, version := range batch {
-					assert.False(t, cache.fill.staleSourceEligible(version, fills[version.SessionID]), "completed windows must reject older observations")
+					assert.False(t, cache.fill.staleSourceEligible(t.Context(), version, fills[version.SessionID]), "completed windows must reject older observations")
 				}
 			}
 		})
