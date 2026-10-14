@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/money"
 )
 
@@ -96,45 +97,69 @@ func TestUsageStaleRejectedStatesStayExact(t *testing.T) {
 }
 
 func TestUsageStaleWindowExpiresDuringSlowRefresh(t *testing.T) {
-	database, cache := staleUsageFixture(t, true)
-	base := cache.fill.now()
-	var elapsed atomic.Int64
-	cache.fill.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
-	started, release := make(chan struct{}, 4), make(chan struct{})
-	cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
-		started <- struct{}{}
-		<-release
-	}
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
+	for _, overlap := range []string{"none", "request", "fill", "backfill", "future marker"} {
+		t.Run(overlap, func(t *testing.T) {
+			database, cache := staleUsageFixture(t, true)
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{Timezone: "UTC"}, usageQueryKindToken)
+			require.NoError(t, err)
+			base := cache.fill.now()
+			var elapsed atomic.Int64
+			cache.fill.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+			started, release := make(chan struct{}, 4), make(chan struct{})
+			cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
+				started <- struct{}{}
+				<-release
+			}
+			t.Cleanup(func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			})
+			changeStaleUsage(t, database, base.Add(-2*time.Second))
+			assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+			waitUsageNotification(t, started)
+			elapsed.Store(int64(9 * time.Second))
+			assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+			switch overlap {
+			case "request":
+				installs, behind, err := cache.installedUsageRollups(t.Context(), snapshot, export.NewPricingResolver(snapshot.PricingRows))
+				require.NoError(t, err)
+				assert.NotNil(t, installs)
+				assert.Empty(t, behind)
+			case "fill":
+				_, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+				require.NoError(t, err)
+			case "backfill":
+				_, err := cache.fill.FillBackground(t.Context(), snapshot.Versions, 0)
+				require.NoError(t, err)
+			}
+			if overlap == "future marker" {
+				changeStaleUsage(t, database, cache.fill.now().Add(time.Minute))
+			} else {
+				changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
+				assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+				elapsed.Store(int64(10 * time.Second))
+			}
+			result := make(chan DailyUsageResult, 1)
+			errors := make(chan error, 1)
+			go func() {
+				daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+				result <- daily
+				errors <- err
+			}()
+			waitUsageNotification(t, started)
+			select {
+			case <-result:
+				require.FailNow(t, "ineligible stale totals returned while refresh was paused")
+			default:
+			}
 			close(release)
-		}
-	})
-	changeStaleUsage(t, database, base.Add(-time.Second))
-	assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
-	waitUsageNotification(t, started)
-	elapsed.Store(int64(9 * time.Second))
-	assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
-	elapsed.Store(int64(10 * time.Second))
-	changeStaleUsage(t, database, cache.fill.now())
-	result := make(chan DailyUsageResult, 1)
-	errors := make(chan error, 1)
-	go func() {
-		daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
-		result <- daily
-		errors <- err
-	}()
-	waitUsageNotification(t, started)
-	select {
-	case <-result:
-		require.FailNow(t, "expired totals returned while refresh was paused")
-	default:
+			require.NoError(t, <-errors)
+			assert.Equal(t, 17, (<-result).Totals.InputTokens)
+		})
 	}
-	close(release)
-	require.NoError(t, <-errors)
-	assert.Equal(t, 17, (<-result).Totals.InputTokens)
 }
 
 func TestUsageStaleCorrectedFutureTimestampStaysExact(t *testing.T) {

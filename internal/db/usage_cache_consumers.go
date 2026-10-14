@@ -53,9 +53,7 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 	cache.fill.mu.Lock()
 	for _, version := range snapshot.Versions {
 		if state, ok := cache.fill.stale[version.SessionID]; ok {
-			if state.source.Equal(version) {
-				delete(cache.fill.stale, version.SessionID)
-			} else if now.Sub(state.since) >= usageRollupStaleServeWindow {
+			if !state.source.Equal(version) && now.Sub(state.since) >= usageRollupStaleServeWindow {
 				cache.fill.mu.Unlock()
 				return nil, nil, nil
 			} else {
@@ -109,18 +107,22 @@ func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, f
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if fill.Deleted || fill.source.SyncMarker == "" || fill.source.Equal(version) {
+	state, exists := c.stale[version.SessionID]
+	if fill.Deleted || exists && !state.source.Equal(fill.source) {
 		delete(c.stale, version.SessionID)
+		exists = false
+	}
+	if fill.Deleted || fill.source.SyncMarker == "" || fill.source.Equal(version) {
 		return false
 	}
 	now := c.now()
-	state, exists := c.stale[version.SessionID]
-	if !exists || !state.source.Equal(fill.source) {
-		delete(c.stale, version.SessionID)
-		changed, err := time.Parse(extractTimeLayout, version.SyncMarker)
-		installed, installedErr := time.Parse(extractTimeLayout, fill.source.SyncMarker)
-		age := now.Sub(changed)
-		if err != nil || installedErr != nil || installed.After(now) || age < 0 || age > usageRollupStaleServeWindow {
+	changed, err := time.Parse(extractTimeLayout, version.SyncMarker)
+	installed, installedErr := time.Parse(extractTimeLayout, fill.source.SyncMarker)
+	if err != nil || installedErr != nil || installed.After(now) || changed.After(now) {
+		return false
+	}
+	if !exists {
+		if now.Sub(changed) > usageRollupStaleServeWindow {
 			return false
 		}
 		// Keep expired versions until refill so later appends cannot restart their window.
