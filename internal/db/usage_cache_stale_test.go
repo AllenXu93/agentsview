@@ -177,6 +177,88 @@ func TestUsageStaleCorrectedFutureTimestampStaysExact(t *testing.T) {
 	}
 }
 
+func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
+	for _, overlap := range []string{"matching snapshot", "stale snapshot", "missing snapshot", "install cleanup", "delete cleanup"} {
+		for _, tracking := range []string{"cleared", "tracking"} {
+			t.Run(overlap+"/"+tracking, func(t *testing.T) {
+				database, cache := staleUsageFixture(t, true)
+				base := cache.fill.now()
+				var elapsed atomic.Int64
+				cache.fill.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+				filter := UsageFilter{Timezone: "UTC"}
+				oldSnapshot, err := database.captureUsageQuery(t.Context(), filter, usageQueryKindToken)
+				require.NoError(t, err)
+				conn, err := cache.db.Conn(t.Context())
+				require.NoError(t, err)
+				defer conn.Close()
+				_, err = conn.ExecContext(t.Context(), `BEGIN`)
+				require.NoError(t, err)
+				defer func() { _, _ = conn.ExecContext(t.Context(), `ROLLBACK`) }()
+				oldFill, err := readCurrentUsageFillResult(t.Context(), conn, "session")
+				require.NoError(t, err)
+				changeStaleUsage(t, database, base.Add(-time.Second))
+				snapshot, err := database.captureUsageQuery(t.Context(), filter, usageQueryKindToken)
+				require.NoError(t, err)
+				require.True(t, cache.fill.staleSourceEligible(snapshot.Versions[0], oldFill))
+				var missingFill usageFillResult
+				if overlap == "delete cleanup" || overlap == "missing snapshot" {
+					require.NoError(t, cache.fill.deleteNotificationSessions([]string{"session"}))
+					missingConn, err := cache.db.Conn(t.Context())
+					require.NoError(t, err)
+					missingFill, err = readCurrentUsageFillResult(t.Context(), missingConn, "session")
+					require.NoError(t, err)
+					require.NoError(t, missingConn.Close())
+					require.True(t, missingFill.Deleted)
+				}
+				fills, err := cache.fill.FillBackground(t.Context(), snapshot.Versions, 0)
+				require.NoError(t, err)
+				_, _, err = cache.rollup.Ensure(t.Context(), snapshot, fills, export.NewPricingResolver(snapshot.PricingRows))
+				require.NoError(t, err)
+				changeStaleUsage(t, database, base.Add(-500*time.Millisecond))
+				_, err = database.getWriter().Exec(t.Context(), `UPDATE messages SET token_usage = '{"input_tokens":24}' WHERE session_id = 'session'`)
+				require.NoError(t, err)
+				snapshot, err = database.captureUsageQuery(t.Context(), filter, usageQueryKindToken)
+				require.NoError(t, err)
+				newFill := fills["session"]
+				require.Greater(t, newFill.InstallRevision, oldFill.InstallRevision)
+				if tracking == "tracking" {
+					require.True(t, cache.fill.staleSourceEligible(snapshot.Versions[0], newFill))
+				}
+				elapsed.Store(int64(9 * time.Second))
+				switch overlap {
+				case "matching snapshot":
+					assert.False(t, cache.fill.staleSourceEligible(oldSnapshot.Versions[0], oldFill))
+				case "stale snapshot":
+					pinnedFill, err := readCurrentUsageFillResult(t.Context(), conn, "session")
+					require.NoError(t, err)
+					assert.False(t, cache.fill.staleSourceEligible(snapshot.Versions[0], pinnedFill))
+				case "missing snapshot":
+					assert.False(t, cache.fill.staleSourceEligible(snapshot.Versions[0], missingFill))
+				case "install cleanup", "delete cleanup":
+					oldFill.Deleted = overlap == "delete cleanup"
+					cache.fill.mu.Lock()
+					cache.fill.observeStaleFillLocked("session", oldFill)
+					cache.fill.mu.Unlock()
+				}
+				deadline := usageRollupStaleServeWindow
+				if tracking == "cleared" {
+					require.True(t, cache.fill.staleSourceEligible(snapshot.Versions[0], newFill))
+					deadline += 9 * time.Second
+				}
+				elapsed.Store(int64(deadline))
+				installs, _, err := cache.installedUsageRollups(t.Context(), snapshot, export.NewPricingResolver(snapshot.PricingRows))
+				require.NoError(t, err)
+				assert.Nil(t, installs, "older observations must preserve the newer revision's original deadline")
+				_, err = conn.ExecContext(t.Context(), `ROLLBACK`)
+				require.NoError(t, err)
+				daily, err := database.GetDailyUsage(t.Context(), filter)
+				require.NoError(t, err)
+				assert.Equal(t, 24, daily.Totals.InputTokens)
+			})
+		}
+	}
+}
+
 func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	t.Run("facts pending with narrower read", func(t *testing.T) {
 		database := testDB(t)

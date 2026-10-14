@@ -52,7 +52,7 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 	anyRecent := false
 	cache.fill.mu.Lock()
 	for _, version := range snapshot.Versions {
-		if state, ok := cache.fill.stale[version.SessionID]; ok {
+		if state, ok := cache.fill.stale[version.SessionID]; ok && !state.since.IsZero() {
 			if !state.source.Equal(version) && now.Sub(state.since) >= usageRollupStaleServeWindow {
 				cache.fill.mu.Unlock()
 				return nil, nil, nil
@@ -101,16 +101,23 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 	return installs, behind, nil
 }
 
+func (c *usageFillCoordinator) observeStaleFillLocked(id string, fill usageFillResult) {
+	if state, ok := c.stale[id]; ok && (fill.InstallRevision > state.InstallRevision || fill.InstallRevision == state.InstallRevision && fill.Deleted) {
+		// Retain the revision fence so pinned readers cannot restart a cleared deadline.
+		c.stale[id] = usageStaleSource{usageFillResult: fill}
+	}
+}
+
 func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, fill usageFillResult) bool {
 	if !c.archive.isUsageBackfillEnabled() {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.observeStaleFillLocked(version.SessionID, fill)
 	state, exists := c.stale[version.SessionID]
-	if fill.Deleted || exists && !state.source.Equal(fill.source) {
-		delete(c.stale, version.SessionID)
-		exists = false
+	if exists && (fill.InstallRevision < state.InstallRevision || state.Deleted) {
+		return false
 	}
 	if fill.Deleted || fill.source.SyncMarker == "" || fill.source.Equal(version) {
 		return false
@@ -121,15 +128,15 @@ func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, f
 	if err != nil || installedErr != nil || installed.After(now) || changed.After(now) {
 		return false
 	}
-	if !exists {
+	if !exists || state.since.IsZero() {
 		if now.Sub(changed) > usageRollupStaleServeWindow {
 			return false
 		}
 		// Keep expired versions until refill so later appends cannot restart their window.
-		if len(c.stale) >= usageFillNotificationCapacity {
+		if !exists && len(c.stale) >= usageFillNotificationCapacity {
 			return false
 		}
-		state = usageStaleSource{source: fill.source, since: now}
+		state = usageStaleSource{usageFillResult: fill, since: now}
 		c.stale[version.SessionID] = state
 	}
 	return now.Sub(state.since) < usageRollupStaleServeWindow

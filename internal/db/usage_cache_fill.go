@@ -81,8 +81,8 @@ type usageFillCoordinator struct {
 }
 
 type usageStaleSource struct {
-	source usageSourceVersion
-	since  time.Time
+	usageFillResult
+	since time.Time
 }
 
 type usageFillNotification struct {
@@ -845,7 +845,7 @@ func (c *usageFillCoordinator) installSpoolBatch(
 	results := make(map[string]usageFillResult,
 		len(eligibleStable)+len(eligibleDeleted))
 	for _, sessionID := range eligibleDeleted {
-		results[sessionID] = usageFillResult{Deleted: true}
+		results[sessionID] = usageFillResult{InstallRevision: expected[sessionID].InstallRevision, Deleted: true}
 	}
 	affected := append([]string(nil), eligibleDeleted...)
 	for _, version := range eligibleStable {
@@ -882,9 +882,7 @@ func (c *usageFillCoordinator) installSpoolBatch(
 	committed = true
 	c.mu.Lock()
 	for id, result := range results {
-		if state, ok := c.stale[id]; ok && (result.Deleted || !state.source.Equal(result.source)) {
-			delete(c.stale, id)
-		}
+		c.observeStaleFillLocked(id, result)
 	}
 	c.mu.Unlock()
 	c.requeueSessions(sharers)
@@ -1606,7 +1604,14 @@ func (c *usageFillCoordinator) deleteNotificationSessions(ids []string) error {
 		return err
 	}
 	excluded := make(map[string]bool, len(ids))
+	deleted := make(map[string]usageFillResult, len(ids))
 	for _, id := range ids {
+		result, err := readCurrentUsageFillResult(c.ctx, conn, id)
+		if err != nil {
+			return err
+		}
+		result.Deleted = true
+		deleted[id] = result
 		excluded[id] = true
 		if _, err := conn.ExecContext(c.ctx,
 			`DELETE FROM usage_rollup_installs WHERE session_id = ?`, id,
@@ -1630,8 +1635,8 @@ func (c *usageFillCoordinator) deleteNotificationSessions(ids []string) error {
 	}
 	committed = true
 	c.mu.Lock()
-	for _, id := range ids {
-		delete(c.stale, id)
+	for id, result := range deleted {
+		c.observeStaleFillLocked(id, result)
 	}
 	c.mu.Unlock()
 	c.requeueSessions(sharers)
