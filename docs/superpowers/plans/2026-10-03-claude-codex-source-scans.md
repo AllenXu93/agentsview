@@ -63,10 +63,12 @@ deletions, and once more after the collection fits again. Saturation is
 recomputed each pass. Dangling project links are skipped. An unreadable subtree
 keeps its cached rows, marks the pass incomplete, and does not stop coverage of
 its siblings. On Windows, size, write time, and identity come from one fresh
-file handle because directory listings can be stale for open writers. Rejected
-scanner acknowledgement tokens leave retries, while native lifecycle tokens
-remain pending. Claude project symlinks follow the existing discovery contract.
-Other providers keep probe-gated polling.
+file handle because directory listings can be stale for open writers. Scanner
+file and directory handles share delete access so agents can still rename and
+remove sources during a scan. Rejected scanner acknowledgement tokens leave
+retries, while native lifecycle tokens remain pending. Claude project symlinks
+follow the existing discovery contract. Other providers keep probe-gated
+polling.
 
 ## Verification limits
 

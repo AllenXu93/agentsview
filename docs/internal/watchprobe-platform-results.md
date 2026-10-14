@@ -126,6 +126,8 @@ to 1,048,576 rows and 8 MiB of directory paths.
 
 On Windows, size, write time, and identity come from one fresh file handle.
 Directory listings can report stale sizes while a writer keeps the file open.
+Scanner file and directory handles share delete access, so agents can rename or
+remove sources and folders while a scan holds them.
 
 Coverage runs 30 seconds after the previous pass completes. Scans read at most
 256 entries at a time outside the native event loop. Changes enter the existing
@@ -157,10 +159,10 @@ remain qualification work.
 | Cache layout                                      | Retained bytes | Bytes per file | Unchanged pass |
 | ------------------------------------------------- | -------------: | -------------: | -------------: |
 | Per-file Go maps with basename strings (rejected) |      7,647,912 |            153 |          84 ms |
-| Hashed 16-byte rows (current)                     |        849,088 |             17 |          81 ms |
+| Hashed 16-byte rows (current)                     |        857,432 |             17 |          77 ms |
 
 At the 1,048,576-row limit, the current layout extrapolates to about 17 MiB.
-Each pass still allocates about 28.7 MiB temporarily, mostly directory entries
+Each pass still allocates about 21 MiB temporarily, mostly directory entries
 returned by `ReadDir`.
 
 ```bash

@@ -250,7 +250,7 @@ func (s *sourceScanner) scanRoot(ctx context.Context, root *sourceScanRoot, emit
 		if shouldExcludeForRoot(s.excludes, directory, root.plan.Path) {
 			return nil
 		}
-		dir, err := os.Open(directory)
+		dir, err := openSourceScanDirectory(directory)
 		if err != nil {
 			if directory == root.plan.Path {
 				return err
@@ -409,6 +409,22 @@ func (s *sourceScanner) scanRoot(ctx context.Context, root *sourceScanRoot, emit
 		prune = true
 	}
 	return incomplete
+}
+
+// openSourceScanDirectory lists through Root.Open, which shares delete access
+// on Windows, so a directory held across a paused page acknowledgement can
+// still be renamed. The root handle lacks that sharing and closes at once.
+func openSourceScanDirectory(path string) (*os.File, error) {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := root.Open(".")
+	if closeErr := root.Close(); closeErr != nil && err == nil {
+		_ = dir.Close()
+		return nil, closeErr
+	}
+	return dir, err
 }
 
 func (s *sourceScanner) admits(root *sourceScanRoot, directory string) bool {

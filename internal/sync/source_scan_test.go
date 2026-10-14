@@ -203,6 +203,32 @@ func TestSourceScanDetectsOpenWriterAppend(t *testing.T) {
 	assert.Equal(t, []string{path}, paths, "an append through a still-open writer must be dispatched")
 }
 
+func TestSourceScanDirectoryRenameDuringPageAcknowledgement(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	require.NoError(t, os.Mkdir(project, 0o700))
+	for i := range sourceScanPageSize + 44 {
+		require.NoError(t, os.WriteFile(filepath.Join(project, fmt.Sprintf("session-%03d.jsonl", i)), nil, 0o600))
+	}
+	scanner := newSourceScanner([]WatchRoot{{Path: root, Recursive: true, SourceFileGlobs: []string{"*.jsonl"}}}, nil)
+	require.NoError(t, scanner.scan(t.Context(), func(context.Context, WatchBatch) error { return nil }))
+	for i := range sourceScanPageSize + 44 {
+		require.NoError(t, os.WriteFile(filepath.Join(project, fmt.Sprintf("session-%03d.jsonl", i)), []byte("changed"), 0o600))
+	}
+	// The first full page is acknowledged while the project listing is open.
+	renamed := false
+	var renameErr error
+	require.NoError(t, scanner.scan(t.Context(), func(_ context.Context, batch WatchBatch) error {
+		if !renamed && len(batch.Paths) == sourceScanPageSize {
+			renamed = true
+			renameErr = os.Rename(project, project+"-moved")
+		}
+		return nil
+	}))
+	require.True(t, renamed)
+	assert.NoError(t, renameErr, "an open scan listing must not block renaming its directory")
+}
+
 func TestWatcherSourceScanRetryAndCancellation(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "session.jsonl"), []byte("one"), 0o600))
@@ -318,11 +344,13 @@ func TestSourceScanCancellationDuringPageDispatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	calls := 0
+	// The page succeeds; only the scanner's own cancellation checks can stop
+	// it from dispatching the remaining changed sources.
 	err := scanner.scan(ctx, func(_ context.Context, batch WatchBatch) error {
 		calls++
 		assert.Len(t, batch.Paths, 256)
 		cancel()
-		return context.Canceled
+		return nil
 	})
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 1, calls)

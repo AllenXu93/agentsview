@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -169,7 +170,14 @@ func TestSustainedTelemetryAndCancellation(t *testing.T) {
 		_, err := runProbe(ctx, options{Files: 2, Passes: 1, Queue: 8, Output: out, Pattern: "repetitive", Duration: time.Hour})
 		done <- err
 	}()
-	require.Eventually(t, func() bool { _, err := os.Stat(filepath.Join(out, "metrics.jsonl")); return err == nil }, time.Second, 10*time.Millisecond)
+	// metrics.jsonl exists before scenarios run; only the sustained loop
+	// records native telemetry, so wait for that before cancelling.
+	require.Eventually(t, func() bool {
+		metrics, err := os.ReadFile(filepath.Join(out, "metrics.jsonl"))
+		return err == nil && bytes.Contains(metrics, []byte(`"Kind":"native"`))
+	}, 30*time.Second, 10*time.Millisecond)
+	_, err := os.Stat(filepath.Join(out, "sources"))
+	require.NoError(t, err, "sources must exist while the sustained loop runs")
 	cancel()
 	select {
 	case err := <-done:
@@ -177,7 +185,7 @@ func TestSustainedTelemetryAndCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.FailNow(t, "owned probe work did not cancel")
 	}
-	_, err := os.Stat(filepath.Join(out, "sources"))
+	_, err = os.Stat(filepath.Join(out, "sources"))
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
