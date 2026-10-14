@@ -117,6 +117,52 @@ func (c *usageFillCoordinator) observeStaleFillLocked(id string, fill usageFillR
 	}
 }
 
+func (c *usageFillCoordinator) reconcileStaleDeletions(ctx context.Context, revision int64) error {
+	c.mu.Lock()
+	if revision <= c.staleDeletionRevision {
+		c.mu.Unlock()
+		return nil
+	}
+	ids := make([]string, 0, len(c.stale))
+	fills := make(map[string]usageFillResult, len(c.stale))
+	for id, state := range c.stale {
+		ids = append(ids, id)
+		fills[id] = usageFillResult{InstallRevision: state.InstallRevision, Deleted: true}
+	}
+	c.mu.Unlock()
+	if c.observer.afterStaleSnapshot != nil {
+		c.observer.afterStaleSnapshot()
+	}
+	if err := QueryChunkedSize(ids, usageFillInstallBatchSize, func(chunk []string) error {
+		placeholders, args := InPlaceholders(chunk)
+		rows, err := c.cache.db.QueryContext(ctx, `SELECT session_id, install_revision
+			FROM usage_cached_sessions WHERE session_id IN `+placeholders, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			var fill usageFillResult
+			if err := rows.Scan(&id, &fill.InstallRevision); err != nil {
+				return err
+			}
+			fills[id] = fill
+		}
+		return rows.Err()
+	}); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, fill := range fills {
+		c.observeStaleFillLocked(id, fill)
+	}
+	// Keep the pre-snapshot watermark so later deletions trigger another reconciliation.
+	c.staleDeletionRevision = max(c.staleDeletionRevision, revision)
+	return nil
+}
+
 func (c *usageFillCoordinator) staleSourceEligible(ctx context.Context, version usageSourceVersion, fill usageFillResult) bool {
 	if !c.archive.isUsageBackfillEnabled() {
 		return false
@@ -135,9 +181,6 @@ func (c *usageFillCoordinator) staleSourceEligible(ctx context.Context, version 
 	}
 	c.observeStaleFillLocked(version.SessionID, fill)
 	state, exists := c.stale[version.SessionID]
-	if exists && fill.InstallRevision < state.InstallRevision {
-		return false
-	}
 	if fill.source.SyncMarker == "" || fill.source.Equal(version) {
 		return false
 	}

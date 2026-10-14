@@ -128,6 +128,7 @@ takes the exact path. An archive marker within 10 seconds of now starts the
 in-memory window, including after a long idle period. Further appends leave
 that installed source version's deadline unchanged. Requests and refreshes
 clear tracked versions when facts catch up; tracking is capped at 1,024 sessions.
+A sweep that advances the shared deletion watermark makes each process reconcile its tracked revisions on its next sweep, including deletions swept by an offline report.
 A slow or failed refresh expires at the same deadline and forces the exact path.
 
 Request cancellation detaches the waiter from shared fill work. The fill keeps

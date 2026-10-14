@@ -58,6 +58,7 @@ type usageFillObserver struct {
 	beforeInstall          func([]usageSourceVersion)
 	afterNotificationBatch func()
 	afterMaintenance       func()
+	afterStaleSnapshot     func()
 }
 
 type usageFillCoordinator struct {
@@ -76,6 +77,8 @@ type usageFillCoordinator struct {
 	done         chan struct{}
 	now          func() time.Time
 	stale        map[string]usageStaleSource
+
+	staleDeletionRevision int64
 
 	notificationDone func()
 }

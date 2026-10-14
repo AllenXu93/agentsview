@@ -298,7 +298,7 @@ func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 }
 
 func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
-	for _, completion := range []string{"refill", "delete", "sweep before notification"} {
+	for _, completion := range []string{"refill", "delete", "sweep before notification", "other process sweeps"} {
 		t.Run(completion, func(t *testing.T) {
 			database := testDB(t)
 			for i := range 1280 {
@@ -307,6 +307,14 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 			require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
 			require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 			_, _, cache := prepareUsageRollupTest(t, database)
+			sweeper := cache
+			if completion == "other process sweeps" {
+				var err error
+				sweeper, err = openUsageCache(t.Context(), cache.path, cache.databaseID, false)
+				require.NoError(t, err)
+				sweeper.fill = newUsageFillCoordinator(t.Context(), database, sweeper)
+				t.Cleanup(func() { sweeper.fill.Close(); _ = sweeper.db.Close() })
+			}
 			now := time.Now().Add(time.Hour)
 			cache.fill.now = func() time.Time { return now }
 			filter := UsageFilter{Timezone: "UTC", Project: "turnover"}
@@ -328,9 +336,10 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 				}
 				if completion == "refill" {
 					_, err = cache.fill.FillBackground(t.Context(), batch, 0)
-				} else if completion == "sweep before notification" {
+				} else if completion == "sweep before notification" || completion == "other process sweeps" {
 					_, err = database.getWriter().Exec(t.Context(), `DELETE FROM sessions WHERE id >= ? AND id <= ?`, ids[0], ids[len(ids)-1])
 					require.NoError(t, err)
+					require.NoError(t, sweeper.sweepDeletionJournal(t.Context(), database))
 					require.NoError(t, cache.sweepDeletionJournal(t.Context(), database))
 					err = cache.fill.deleteNotificationSessions(ids)
 				} else {
@@ -340,6 +349,73 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 				for _, version := range batch {
 					assert.False(t, cache.fill.staleSourceEligible(t.Context(), version, fills[version.SessionID]), "completed windows must reject older observations")
 				}
+			}
+		})
+	}
+}
+
+func TestUsageStaleDeletionReconciliation(t *testing.T) {
+	for _, timing := range []string{"expired same revision", "insert during reconciliation"} {
+		t.Run(timing, func(t *testing.T) {
+			database := testDB(t)
+			seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+			seedLiveWriteSession(t, database, "deleted", "removed", "2026-08-10T09:00:00Z", 0, 10)
+			require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+			require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+			_, _, cache := prepareUsageRollupTest(t, database)
+			now := time.Now().Add(time.Hour)
+			cache.fill.now = func() time.Time { return now }
+			changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{Timezone: "UTC", Project: "project"}, usageQueryKindToken)
+			require.NoError(t, err)
+			var version usageSourceVersion
+			for _, candidate := range snapshot.Versions {
+				if candidate.SessionID == "session" {
+					version = candidate
+				}
+			}
+			require.Equal(t, "session", version.SessionID)
+			conn, err := cache.db.Conn(t.Context())
+			require.NoError(t, err)
+			fill, err := readCurrentUsageFillResult(t.Context(), conn, "session")
+			require.NoError(t, err)
+			require.NoError(t, conn.Close())
+			if timing == "expired same revision" {
+				require.True(t, cache.fill.staleSourceEligible(t.Context(), version, fill))
+				now = now.Add(usageRollupStaleServeWindow)
+			} else {
+				other, err := openUsageCache(t.Context(), cache.path, cache.databaseID, false)
+				require.NoError(t, err)
+				other.fill = newUsageFillCoordinator(t.Context(), database, other)
+				t.Cleanup(func() { other.fill.Close(); _ = other.db.Close() })
+				cache.fill.observer.afterStaleSnapshot = func() {
+					require.True(t, cache.fill.staleSourceEligible(t.Context(), version, fill))
+					require.NoError(t, database.DeleteSession(t.Context(), "session"))
+					require.NoError(t, other.sweepDeletionJournal(t.Context(), database))
+				}
+			}
+			require.NoError(t, database.DeleteSession(t.Context(), "deleted"))
+			require.NoError(t, cache.sweepDeletionJournal(t.Context(), database))
+			cache.fill.observer.afterStaleSnapshot = nil
+			cache.fill.mu.Lock()
+			_, tracked := cache.fill.stale["session"]
+			cache.fill.mu.Unlock()
+			require.True(t, tracked)
+			require.NoError(t, cache.sweepDeletionJournal(t.Context(), database))
+			if timing == "expired same revision" {
+				changeStaleUsage(t, database, now.Add(-time.Second))
+				snapshot, err = database.captureUsageQuery(t.Context(), UsageFilter{Timezone: "UTC", Project: "project"}, usageQueryKindToken)
+				require.NoError(t, err)
+				for _, candidate := range snapshot.Versions {
+					if candidate.SessionID == "session" {
+						version = candidate
+					}
+				}
+				assert.False(t, cache.fill.staleSourceEligible(t.Context(), version, fill), "reconciliation must preserve the expired deadline")
+			} else {
+				cache.fill.mu.Lock()
+				assert.NotContains(t, cache.fill.stale, "session", "the next sweep must reconcile the concurrent deletion")
+				cache.fill.mu.Unlock()
 			}
 		})
 	}
