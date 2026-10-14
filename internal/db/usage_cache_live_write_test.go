@@ -4,6 +4,7 @@ package db
 
 import (
 	"encoding/json"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/export"
 )
 
 // seedLiveWriteSession inserts one session whose message carries a unique
@@ -173,12 +175,12 @@ func TestUsageNotificationRefreshesWrittenSession(t *testing.T) {
 			require.NoError(t, err)
 			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
 			require.NoError(t, err)
+			batches := make(chan struct{}, 16)
+			cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 			if daemon {
 				require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
 				require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 			}
-			batches := make(chan struct{}, 16)
-			cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 			var installs atomic.Int32
 			cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
 			appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
@@ -210,10 +212,10 @@ func TestUsageNotificationRefreshesDedupPeer(t *testing.T) {
 	require.NoError(t, err)
 	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
 	require.NoError(t, err)
-	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
-	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 	batches := make(chan struct{}, 16)
 	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
+	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 	var installs atomic.Int32
 	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
 	seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
@@ -263,8 +265,6 @@ func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
 	require.NoError(t, err)
 	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
 	require.NoError(t, err)
-	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
-	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 	blocked, release := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	batches := make(chan struct{}, 16)
@@ -276,6 +276,8 @@ func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
 		}
 		batches <- struct{}{}
 	}
+	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 	database.usageCache.NotifySessions([]string{"missing"})
 	waitUsageNotification(t, blocked)
 	ids := make([]string, cap(cache.fill.notify))
@@ -334,6 +336,38 @@ func TestUsageNotificationRefreshChunks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 600, daily.Totals.InputTokens)
 	assert.Len(t, sizes, 3, "request rebuilt warmed sessions")
+}
+
+func TestUsageNotificationRollupAllocationScalesWithSnapshot(t *testing.T) {
+	database := testDB(t)
+	seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+	require.NoError(t, err)
+	fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+	require.NoError(t, err)
+	resolver := export.NewPricingResolver(snapshot.PricingRows)
+	_, _, err = cache.rollup.Ensure(t.Context(), snapshot, fills, resolver)
+	require.NoError(t, err)
+	allocated := func(size int) uint64 {
+		for index := len(fills); index < size; index++ {
+			fills["outside-"+strconv.Itoa(index)] = usageFillResult{}
+		}
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range 5 {
+			installs, _, err := cache.rollup.Ensure(t.Context(), snapshot, fills, resolver)
+			require.NoError(t, err)
+			require.Len(t, installs, 1)
+		}
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	small := allocated(256)
+	large := allocated(10000)
+	assert.Less(t, large, small*2, "unselected notification fills multiplied rollup allocations")
+	assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
 }
 
 func TestUsageNotificationRefreshContinuesAfterChunkFailure(t *testing.T) {

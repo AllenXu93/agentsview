@@ -69,6 +69,8 @@ recall extraction still own their timing; migrating them is separate work.
   rollups and requeues invalidated dedup peers for the same timezones, in chunks
   of 256. A failed rebuild is retried by the next write or usage request.
   Cursor rollups stay with the request.
+- Session notifications that exceed the channel capacity retain their IDs in a
+  deduplicated overflow map until the worker drains them, including dedup peers.
 - A scheduled pricing refresh calls `RewarmUsageCache` once it returns, when the
   stored catalog digest changed, including a partial refresh that also reports
   an error. It starts the same coverage pass, which rebuilds only rollups

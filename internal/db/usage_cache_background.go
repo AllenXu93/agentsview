@@ -576,9 +576,6 @@ func (db *DB) refreshUsageRollups(ctx context.Context, cache *usageCache, fills 
 			if err != nil {
 				return err
 			}
-			for i, session := range snapshot.Sessions {
-				snapshot.Versions[i] = fills[session.ID].source
-			}
 			locations, err := usageBackfillLocations(ctx, cache, snapshot.location)
 			if err != nil {
 				return err

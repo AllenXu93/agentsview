@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -287,7 +286,12 @@ func (c *usageRollupCoordinator) ensureNow(
 	}
 	defer conn.Close()
 	var metrics usageRollupMetrics
-	currentFills := maps.Clone(fills)
+	currentFills := make(map[string]usageFillResult, len(snapshot.Versions))
+	for _, version := range snapshot.Versions {
+		if fill, ok := fills[version.SessionID]; ok {
+			currentFills[version.SessionID] = fill
+		}
+	}
 	// A concurrent fill can replace a session's facts or add a sibling to a
 	// dedup identity this build finalized. The install transaction rejects
 	// both races. Refresh committed facts before the next attempt instead of
