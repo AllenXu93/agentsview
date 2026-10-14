@@ -87,6 +87,60 @@ type usageQuerySessionRecord struct {
 func (db *DB) captureUsageQuery(
 	ctx context.Context, filter UsageFilter, kind usageQueryKind,
 ) (usageQuerySnapshot, error) {
+	return db.captureUsageSnapshot(ctx, filter, func(ctx context.Context, tx *sql.Tx, snapshot *usageQuerySnapshot) error {
+		ids, err := discoverUsageCandidates(ctx, tx, filter, kind)
+		if err != nil {
+			return err
+		}
+		if err := loadUsageSnapshotSessions(ctx, tx, ids, filter, snapshot); err != nil {
+			return err
+		}
+		fingerprints, err := usageEventFingerprintsWithQuerier(ctx, tx, ids)
+		if err != nil {
+			return fmt.Errorf("fingerprinting usage events: %w", err)
+		}
+		for i := range snapshot.Versions {
+			snapshot.Versions[i].UsageEventFingerprint = fingerprints[snapshot.Versions[i].SessionID]
+		}
+		snapshot.Intervals = usageQueryIntervals(filter)
+		var hasCursorTable bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM sqlite_master
+		WHERE type = 'table' AND name = 'cursor_usage_events'
+	)`).Scan(&hasCursorTable); err != nil {
+			return fmt.Errorf("checking Cursor usage table: %w", err)
+		}
+		if hasCursorTable {
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`,
+			).Scan(&snapshot.CursorHighWater); err != nil {
+				return fmt.Errorf("reading Cursor usage high-water mark: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func (db *DB) captureUsageSessions(ctx context.Context, ids []string) (usageQuerySnapshot, error) {
+	// Rollups use committed fills' source versions, so metadata capture skips usage-event fingerprints.
+	return db.captureUsageSnapshot(ctx, UsageFilter{}, func(ctx context.Context, tx *sql.Tx, snapshot *usageQuerySnapshot) error {
+		return loadUsageSnapshotSessions(ctx, tx, ids, UsageFilter{}, snapshot)
+	})
+}
+
+func loadUsageSnapshotSessions(ctx context.Context, tx *sql.Tx, ids []string, filter UsageFilter, snapshot *usageQuerySnapshot) error {
+	records, err := loadUsageQuerySessionRecords(ctx, tx, ids, filter)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		snapshot.Sessions = append(snapshot.Sessions, record.session)
+		snapshot.Versions = append(snapshot.Versions, record.version)
+	}
+	return nil
+}
+
+func (db *DB) captureUsageSnapshot(ctx context.Context, filter UsageFilter, capture func(context.Context, *sql.Tx, *usageQuerySnapshot) error) (usageQuerySnapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -120,11 +174,21 @@ func (db *DB) captureUsageQuery(
 	}
 	snapshot.PricingRows = pricingRows
 
+	if err := capture(ctx, tx, &snapshot); err != nil {
+		return usageQuerySnapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return usageQuerySnapshot{}, fmt.Errorf("closing usage archive snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func discoverUsageCandidates(ctx context.Context, tx *sql.Tx, filter UsageFilter, kind usageQueryKind) ([]string, error) {
 	bounds := usageCandidateBoundsForFilter(filter)
 	query, args := usageCandidateDiscoverySQL(bounds, kind)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("discovering usage candidates: %w", err)
+		return nil, fmt.Errorf("discovering usage candidates: %w", err)
 	}
 	defer rows.Close()
 	var candidateIDs []string
@@ -132,49 +196,18 @@ func (db *DB) captureUsageQuery(
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return usageQuerySnapshot{}, fmt.Errorf("scanning usage candidate: %w", err)
+			return nil, fmt.Errorf("scanning usage candidate: %w", err)
 		}
 		candidateIDs = append(candidateIDs, id)
 	}
 	if err := rows.Close(); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("closing usage candidate rows: %w", err)
+		return nil, fmt.Errorf("closing usage candidate rows: %w", err)
 	}
 	if err := rows.Err(); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("iterating usage candidates: %w", err)
+		return nil, fmt.Errorf("iterating usage candidates: %w", err)
 	}
 
-	records, err := loadUsageQuerySessionRecords(ctx, tx, candidateIDs, filter)
-	if err != nil {
-		return usageQuerySnapshot{}, err
-	}
-	fingerprints, err := usageEventFingerprintsWithQuerier(ctx, tx, candidateIDs)
-	if err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("fingerprinting usage events: %w", err)
-	}
-	for i := range records {
-		records[i].version.UsageEventFingerprint = fingerprints[records[i].session.ID]
-		snapshot.Sessions = append(snapshot.Sessions, records[i].session)
-		snapshot.Versions = append(snapshot.Versions, records[i].version)
-	}
-	snapshot.Intervals = usageQueryIntervals(filter)
-	var hasCursorTable bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
-		SELECT 1 FROM sqlite_master
-		WHERE type = 'table' AND name = 'cursor_usage_events'
-	)`).Scan(&hasCursorTable); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("checking Cursor usage table: %w", err)
-	}
-	if hasCursorTable {
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`,
-		).Scan(&snapshot.CursorHighWater); err != nil {
-			return usageQuerySnapshot{}, fmt.Errorf("reading Cursor usage high-water mark: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("closing usage archive snapshot: %w", err)
-	}
-	return snapshot, nil
+	return candidateIDs, nil
 }
 
 // usageCandidateBoundsForFilter converts local calendar-day filters to their

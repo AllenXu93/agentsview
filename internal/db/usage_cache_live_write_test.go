@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,4 +149,228 @@ func TestUsageCacheBackfillCompletesUnderConcurrentArchiveWrites(t *testing.T) {
 	// Every write the pass raced is still accounted for once the next
 	// request refills the session it touched.
 	assert.Equal(t, 4+written, liveWriteDailyInput(t, database, "project"))
+}
+
+func waitUsageNotification(t *testing.T, batches <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-batches:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "usage notification batch did not finish")
+	}
+}
+
+func TestUsageNotificationRefreshesWrittenSession(t *testing.T) {
+	for _, daemon := range []bool{false, true} {
+		t.Run(strconv.FormatBool(daemon), func(t *testing.T) {
+			database := testDB(t)
+			seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+			for _, zone := range []string{"UTC", "America/Chicago"} {
+				_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: zone})
+				require.NoError(t, err)
+			}
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+			require.NoError(t, err)
+			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+			require.NoError(t, err)
+			batches := make(chan struct{}, 16)
+			cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
+			if daemon {
+				require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+				require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+			}
+			var installs atomic.Int32
+			cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
+			appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
+			waitUsageNotification(t, batches)
+			background := installs.Load()
+			if daemon {
+				assert.Positive(t, background)
+			} else {
+				assert.Zero(t, background)
+			}
+			for _, zone := range []string{"UTC", "America/Chicago"} {
+				daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: zone})
+				require.NoError(t, err)
+				assert.Equal(t, 17, daily.Totals.InputTokens)
+			}
+			if daemon {
+				assert.Equal(t, background, installs.Load(), "requests rebuilt already warmed totals")
+			}
+		})
+	}
+}
+
+func TestUsageNotificationLeavesCursorRollupForRequest(t *testing.T) {
+	database := testDB(t)
+	seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+	_, cache := usageCursorBatchFailureFixture(t, database)
+	database.usageBackfillMu.Lock()
+	database.usageBackfillEnabled = true
+	database.usageBackfillMu.Unlock()
+	var rollupAttempts int
+	cache.rollup.observer.beforeEnsure = func() {
+		rollupAttempts++
+		assert.Equal(t, usageCursorCopyBatchSize, usageCacheCount(t, cache, "cursor_usage_facts"), "rollup refresh delayed Cursor fact progress")
+	}
+	cache.fill.processNotificationBatch(map[string]bool{"session": true}, true)
+	assert.Positive(t, rollupAttempts)
+	cache.rollup.observer.beforeEnsure = nil
+	var cursorInstalls int
+	require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM usage_rollup_installs WHERE session_id = ?`, usageRollupCursorSessionID).Scan(&cursorInstalls))
+	assert.Zero(t, cursorInstalls, "session refresh stamped incomplete Cursor facts as current")
+	_, err := cache.db.ExecContext(t.Context(), `DROP TRIGGER reject_late_cursor_fact`)
+	require.NoError(t, err)
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, 1011, daily.Totals.InputTokens)
+}
+
+func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
+	database := testDB(t)
+	for _, id := range []string{"peer-a", "peer-b"} {
+		seedUsageSnapshotSession(t, database, id, "project", "2026-08-10T09:00:00Z", 0, 10, "model-a")
+	}
+	_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+	require.NoError(t, err)
+	blocked, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	batches := make(chan struct{}, 16)
+	var paused atomic.Bool
+	cache.fill.observer.afterNotificationBatch = func() {
+		if !paused.Swap(true) {
+			close(blocked)
+			<-release
+		}
+		batches <- struct{}{}
+	}
+	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+	database.usageCache.NotifySessions([]string{"missing"})
+	waitUsageNotification(t, blocked)
+	ids := make([]string, cap(cache.fill.notify))
+	for i := range ids {
+		ids[i] = "missing"
+	}
+	database.usageCache.NotifySessions(ids)
+	seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
+	snapshot, err = database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	_, err = cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+	require.NoError(t, err)
+	var installs atomic.Int32
+	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
+	release <- struct{}{}
+	for {
+		waitUsageNotification(t, batches)
+		var warmed int
+		require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
+			FROM usage_rollup_installs i JOIN usage_rollup_timezones z ON z.id = i.timezone_id
+			WHERE z.timezone_name = 'UTC' AND i.session_id IN ('peer-a', 'peer-b', 'sibling')`).Scan(&warmed))
+		if warmed == 3 {
+			break
+		}
+	}
+	background := installs.Load()
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, 10, daily.Totals.OutputTokens)
+	assert.Equal(t, background, installs.Load(), "request rebuilt peers lost from the full queue")
+}
+
+func TestUsageNotificationRefreshChunks(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		sessions     int
+		failFirst    bool
+		wantSizes    []int
+		wantInstalls int
+	}{
+		{name: "chunks", sessions: 600, wantSizes: []int{256, 256, 88}, wantInstalls: 600},
+		{name: "continues after chunk failure", sessions: 257, failFirst: true, wantSizes: []int{256, 1}, wantInstalls: 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			database := testDB(t)
+			for index := range testCase.sessions {
+				seedLiveWriteSession(t, database, "session-"+strconv.Itoa(index), "project", "2026-08-10T09:00:00Z", 0, 1)
+			}
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+			require.NoError(t, err)
+			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+			require.NoError(t, err)
+			fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+			require.NoError(t, err)
+			database.usageBackfillMu.Lock()
+			database.usageBackfillEnabled = true
+			database.usageBackfillMu.Unlock()
+			var sizes []int
+			cache.rollup.observer.beforeInstall = func(builds []usageRollupBuild) {
+				sizes = append(sizes, len(builds))
+				if testCase.failFirst {
+					switch len(sizes) {
+					case 1:
+						_, err := cache.db.ExecContext(t.Context(), `CREATE TRIGGER reject_rollup_chunk
+							BEFORE INSERT ON usage_rollup_installs BEGIN SELECT RAISE(ABORT, 'rollup install failed'); END`)
+						require.NoError(t, err)
+					case 2:
+						_, err := cache.db.ExecContext(t.Context(), `DROP TRIGGER reject_rollup_chunk`)
+						require.NoError(t, err)
+					}
+				}
+			}
+			var fillSizes []int
+			cache.rollup.observer.beforeAttempt = func(fills map[string]usageFillResult) { fillSizes = append(fillSizes, len(fills)) }
+			database.refreshUsageRollups(t.Context(), cache, fills)
+			assert.Len(t, sizes, len(testCase.wantSizes), "failed chunk prevented the later chunk from running")
+			assert.Equal(t, testCase.wantSizes, fillSizes, "rollup attempts received fills outside their notification chunk")
+			assert.Equal(t, testCase.wantInstalls, usageCacheCount(t, cache, "usage_rollup_installs"))
+		})
+	}
+}
+
+func TestUsageNotificationLargeBurstBoundsOverflow(t *testing.T) {
+	for _, count := range []int{4096, 20000} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			database := testDB(t)
+			seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+			require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+			require.NoError(t, err)
+			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+			require.NoError(t, err)
+			blocked, release, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			defer close(release)
+			var leases atomic.Int32
+			database.SetUsageCacheNotificationWork(func() (func(), bool) {
+				leases.Add(1)
+				return func() { close(drained) }, true
+			})
+			var paused atomic.Bool
+			cache.fill.observer.afterNotificationBatch = func() {
+				if !paused.Swap(true) {
+					close(blocked)
+					<-release
+				}
+			}
+			database.usageCache.NotifySessions([]string{"missing"})
+			waitUsageNotification(t, blocked)
+			ids := make([]string, count)
+			for i := range ids {
+				ids[i] = "missing-" + strconv.Itoa(i)
+			}
+			database.usageCache.NotifySessions(ids)
+			appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
+			cache.fill.mu.Lock()
+			assert.Len(t, cache.fill.overflow, 1024, "burst retained an unbounded overflow")
+			cache.fill.mu.Unlock()
+			assert.EqualValues(t, 1, leases.Load(), "overflow acquired a second lease while a batch was in flight")
+			release <- struct{}{}
+			waitUsageNotification(t, drained)
+			assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"), "request lost usage dropped beyond the overflow cap")
+		})
+	}
 }

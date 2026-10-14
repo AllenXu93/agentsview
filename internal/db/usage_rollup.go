@@ -203,6 +203,7 @@ type usageRollupCall struct {
 
 type usageRollupObserver struct {
 	beforeEnsure  func()
+	beforeAttempt func(map[string]usageFillResult)
 	beforeInstall func([]usageRollupBuild)
 }
 
@@ -324,6 +325,9 @@ func (c *usageRollupCoordinator) ensureAttempt(
 	snapshot usageQuerySnapshot, fills map[string]usageFillResult,
 	pricing *usagePricingIdentities,
 ) (map[string]usageRollupInstall, bool, usageRollupMetrics, error) {
+	if c.observer.beforeAttempt != nil {
+		c.observer.beforeAttempt(fills)
+	}
 	installs, stale, err := readUsageRollupInstalls(
 		ctx, conn, identity, snapshot, fills, pricing)
 	if err != nil || len(stale) == 0 {

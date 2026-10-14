@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -99,6 +100,13 @@ func (db *DB) SetUsageCacheBackfillStarted(started func()) {
 	}
 }
 
+// SetUsageCacheNotificationWork connects queued rebuilds to daemon idle tracking.
+func (db *DB) SetUsageCacheNotificationWork(begin func() (func(), bool)) {
+	db.usageBackfillMu.Lock()
+	db.usageNotifyWork = begin
+	db.usageBackfillMu.Unlock()
+}
+
 // WaitUsageCacheBackfill waits for the current pass, if any.
 func (db *DB) WaitUsageCacheBackfill(ctx context.Context) error {
 	if ctx == nil {
@@ -126,10 +134,7 @@ func (db *DB) WaitUsageCacheBackfill(ctx context.Context) error {
 // it (daemon lifecycle). A CLI resync or compaction reopening the archive
 // must not kick off a full background scan on its own.
 func (db *DB) restartUsageCacheBackfillIfEnabled() error {
-	db.usageBackfillMu.Lock()
-	enabled := db.usageBackfillEnabled
-	db.usageBackfillMu.Unlock()
-	if !enabled {
+	if !db.isUsageBackfillEnabled() {
 		return nil
 	}
 	return db.StartUsageCacheBackfill(context.Background())
@@ -146,13 +151,16 @@ func (db *DB) UsagePricingDigest(ctx context.Context) (string, error) {
 
 // RewarmUsageCache rebuilds price-stale rollups; a call during a pass queues one rerun because passes pin their catalog.
 func (db *DB) RewarmUsageCache() error {
-	db.usageBackfillMu.Lock()
-	enabled := db.usageBackfillEnabled
-	db.usageBackfillMu.Unlock()
-	if !enabled {
+	if !db.isUsageBackfillEnabled() {
 		return nil
 	}
 	return db.startUsageCacheBackfill(context.Background(), true)
+}
+
+func (db *DB) isUsageBackfillEnabled() bool {
+	db.usageBackfillMu.Lock()
+	defer db.usageBackfillMu.Unlock()
+	return db.usageBackfillEnabled
 }
 
 // StopUsageCacheBackfill cancels and joins the active pass before cache handles
@@ -195,6 +203,14 @@ func (db *DB) runUsageCacheBackfillPass(
 	if cache == nil || cache.fill == nil || cache.rollup == nil {
 		return errors.New("usage cache generation is not attached to the archive")
 	}
+	localIdentity := usageTimezoneIdentityFor(snapshot.location, nil)
+	// Unnamed sets left behind by an earlier local zone resolution are never
+	// read again; the foreign keys cascade to their days and installs.
+	if _, err := cache.db.ExecContext(ctx, `DELETE FROM usage_rollup_timezones
+		WHERE timezone_name IN ('', 'Local') AND timezone_key != ?`,
+		localIdentity.Key); err != nil {
+		return fmt.Errorf("pruning stale local usage timezones: %w", err)
+	}
 	locations, err := usageBackfillLocations(ctx, cache, snapshot.location)
 	if err != nil {
 		return err
@@ -226,17 +242,13 @@ func (db *DB) runUsageCacheBackfillPass(
 		batch.Sessions = snapshot.Sessions[start:end]
 		batch.Versions = snapshot.Versions[start:end]
 		batch.CursorHighWater = cursorTarget
-		for _, location := range locations {
-			zoned := batch
-			zoned.location = location
-			if _, metrics, err := cache.rollup.Ensure(ctx, zoned, results, resolver); err != nil {
-				return fmt.Errorf("building usage rollups during backfill: %w", err)
-			} else {
-				dailyRows += metrics.DailyRows
-				exceptionGroups += metrics.ExceptionGroups
-				exceptionRows += metrics.ExceptionRows
-			}
+		metrics, err := ensureUsageRollupsAcross(ctx, cache, batch, results, resolver, locations)
+		if err != nil {
+			return fmt.Errorf("building usage rollups during backfill: %w", err)
 		}
+		dailyRows += metrics.DailyRows
+		exceptionGroups += metrics.ExceptionGroups
+		exceptionRows += metrics.ExceptionRows
 		if _, err := cache.db.ExecContext(ctx, `PRAGMA optimize`); err != nil {
 			return fmt.Errorf("optimizing usage cache during backfill: %w", err)
 		}
@@ -258,36 +270,26 @@ func (db *DB) runUsageCacheBackfillPass(
 	// snapshot once after every fact is filled, so the pass never
 	// completes with rollups it deleted itself.
 	if len(snapshot.Versions) > usageCacheBackfillBatchSize {
-		for _, location := range locations {
-			zoned := snapshot
-			zoned.location = location
-			if _, metrics, err := cache.rollup.Ensure(
-				ctx, zoned, allResults, resolver); err != nil {
-				return fmt.Errorf(
-					"rebuilding invalidated usage rollups during backfill: %w", err)
-			} else {
-				dailyRows += metrics.DailyRows
-				exceptionGroups += metrics.ExceptionGroups
-				exceptionRows += metrics.ExceptionRows
-			}
+		metrics, err := ensureUsageRollupsAcross(ctx, cache, snapshot, allResults, resolver, locations)
+		if err != nil {
+			return fmt.Errorf("rebuilding invalidated usage rollups during backfill: %w", err)
 		}
+		dailyRows += metrics.DailyRows
+		exceptionGroups += metrics.ExceptionGroups
+		exceptionRows += metrics.ExceptionRows
 	}
 	if len(snapshot.Versions) == 0 {
 		results, err := cache.fill.FillBackground(ctx, nil, snapshot.CursorHighWater)
 		if err != nil {
 			return err
 		}
-		for _, location := range locations {
-			zoned := snapshot
-			zoned.location = location
-			if _, metrics, err := cache.rollup.Ensure(ctx, zoned, results, resolver); err != nil {
-				return fmt.Errorf("building Cursor usage rollups during backfill: %w", err)
-			} else {
-				dailyRows += metrics.DailyRows
-				exceptionGroups += metrics.ExceptionGroups
-				exceptionRows += metrics.ExceptionRows
-			}
+		metrics, err := ensureUsageRollupsAcross(ctx, cache, snapshot, results, resolver, locations)
+		if err != nil {
+			return fmt.Errorf("building Cursor usage rollups during backfill: %w", err)
 		}
+		dailyRows += metrics.DailyRows
+		exceptionGroups += metrics.ExceptionGroups
+		exceptionRows += metrics.ExceptionRows
 	}
 	if err := cache.sweepDeletionJournal(ctx, db); err != nil {
 		return err
@@ -317,13 +319,6 @@ func usageBackfillLocations(
 	ctx context.Context, cache *usageCache, local *time.Location,
 ) ([]*time.Location, error) {
 	localIdentity := usageTimezoneIdentityFor(local, nil)
-	// Unnamed sets left behind by an earlier local zone resolution are never
-	// read again; the foreign keys cascade to their days and installs.
-	if _, err := cache.db.ExecContext(ctx, `DELETE FROM usage_rollup_timezones
-		WHERE timezone_name IN ('', 'Local') AND timezone_key != ?`,
-		localIdentity.Key); err != nil {
-		return nil, fmt.Errorf("pruning stale local usage timezones: %w", err)
-	}
 	rows, err := cache.db.QueryContext(ctx, `SELECT timezone_name
 		FROM usage_rollup_timezones
 		WHERE timezone_key != ? AND timezone_name NOT IN ('', 'Local')
@@ -499,7 +494,8 @@ func (cache *usageCache) sweepDeletionJournal(ctx context.Context, archive *DB) 
 	}
 	// Rebuild the survivors' rollups so groups the deleted sessions kept
 	// irreducible can finalize again.
-	if err := invalidateUsageDedupSharers(ctx, conn, removed, excluded); err != nil {
+	sharers, err := invalidateUsageDedupSharers(ctx, conn, removed, excluded)
+	if err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `
@@ -513,6 +509,7 @@ func (cache *usageCache) sweepDeletionJournal(ctx context.Context, archive *DB) 
 		return fmt.Errorf("committing usage cache deletion sweep: %w", err)
 	}
 	committed = true
+	cache.fill.requeueSessions(sharers)
 	return nil
 }
 
@@ -550,4 +547,55 @@ func (c *usageFillCoordinator) maintainBetweenInstallBatches(ctx context.Context
 		c.observer.afterMaintenance()
 	}
 	runtime.Gosched()
+}
+
+func ensureUsageRollupsAcross(ctx context.Context, cache *usageCache, snapshot usageQuerySnapshot, fills map[string]usageFillResult, resolver *export.PricingResolver, locations []*time.Location) (usageRollupMetrics, error) {
+	var total usageRollupMetrics
+	for _, location := range locations {
+		snapshot.location = location
+		_, metrics, err := cache.rollup.Ensure(ctx, snapshot, fills, resolver)
+		if err != nil {
+			return total, err
+		}
+		total.DailyRows += metrics.DailyRows
+		total.ExceptionGroups += metrics.ExceptionGroups
+		total.ExceptionRows += metrics.ExceptionRows
+	}
+	return total, nil
+}
+
+func (db *DB) refreshUsageRollups(ctx context.Context, cache *usageCache, fills map[string]usageFillResult) {
+	if !db.isUsageBackfillEnabled() {
+		return
+	}
+	ids := make([]string, 0, len(fills))
+	for id, fill := range fills {
+		if !fill.Deleted {
+			ids = append(ids, id)
+		}
+	}
+	for chunk := range slices.Chunk(ids, usageCacheBackfillBatchSize) {
+		if ctx.Err() != nil {
+			return
+		}
+		err := func() error {
+			snapshot, err := db.captureUsageSessions(ctx, chunk)
+			if err != nil {
+				return err
+			}
+			locations, err := usageBackfillLocations(ctx, cache, snapshot.location)
+			if err != nil {
+				return err
+			}
+			chunkFills := make(map[string]usageFillResult, len(chunk))
+			for _, id := range chunk {
+				chunkFills[id] = fills[id]
+			}
+			_, err = ensureUsageRollupsAcross(ctx, cache, snapshot, chunkFills, export.NewPricingResolver(snapshot.PricingRows), locations)
+			return err
+		}()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("usage cache notification rollups: %v", err)
+		}
+	}
 }

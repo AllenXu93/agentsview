@@ -497,7 +497,8 @@ rollup installs of every other session holding a changed identity; rollup
 installation re-verifies inside its transaction that no finalized identity
 gained an outside member and, when one did, reclassifies against the newly
 committed facts rather than failing the caller. A finalized daily row must never
-survive gaining a sibling.
+survive gaining a sibling. The daemon requeues invalidated sessions after
+commit and rebuilds their rollups; CLI writes leave rebuilding to the request.
 
 Treat a usage-cache file as identifiable only after both its SQLite
 `application_id` and `usage_cache_metadata.cache_kind` match. Filename matching

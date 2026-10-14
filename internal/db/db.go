@@ -803,6 +803,7 @@ type DB struct {
 	// background backfill (the daemon lifecycle). Reopen restarts a pass
 	// only then, so CLI resyncs never trigger an unrequested archive scan.
 	usageBackfillEnabled bool
+	usageNotifyWork      func() (func(), bool)
 	mu                   sync.Mutex // serializes writes
 	compactMu            sync.Mutex // serializes staged archive compactions
 	connMu               sync.RWMutex
