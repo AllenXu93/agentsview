@@ -276,8 +276,11 @@ func TestUsageRollupCompletionWaitsForCallRemoval(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return usageCacheCount(t, cache, "usage_rollup_installs") == 1
 		}, 5*time.Second, time.Millisecond)
-		assert.Never(t, func() bool { return len(done) != 0 }, time.Second, time.Millisecond,
-			"a completed request must be removed before its caller can request another rollup")
+		select {
+		case <-done:
+			require.FailNow(t, "a completed request must be removed before its caller can request another rollup")
+		case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence check; the held rollup mutex keeps call removal and completion waiting
+		}
 	}()
 	require.NoError(t, <-done)
 }

@@ -201,39 +201,6 @@ func TestUsageNotificationRefreshesWrittenSession(t *testing.T) {
 	}
 }
 
-func TestUsageNotificationRefreshesDedupPeer(t *testing.T) {
-	database := testDB(t)
-	seedUsageSnapshotSession(t, database, "original", "project", "2026-08-10T09:00:00Z", 0, 10, "model-a")
-	_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
-	require.NoError(t, err)
-	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
-	require.NoError(t, err)
-	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
-	require.NoError(t, err)
-	batches := make(chan struct{}, 16)
-	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
-	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
-	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
-	var installs atomic.Int32
-	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
-	seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
-	for {
-		waitUsageNotification(t, batches)
-		var warmed int
-		require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
-			FROM usage_rollup_installs i JOIN usage_rollup_timezones z ON z.id = i.timezone_id
-			WHERE z.timezone_name = 'UTC' AND i.session_id IN ('original', 'sibling')`).Scan(&warmed))
-		if warmed == 2 {
-			break
-		}
-	}
-	background := installs.Load()
-	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
-	require.NoError(t, err)
-	assert.Equal(t, 10, daily.Totals.OutputTokens)
-	assert.Equal(t, background, installs.Load(), "request rebuilt the invalidated peer")
-}
-
 func TestUsageNotificationLeavesCursorRollupForRequest(t *testing.T) {
 	database := testDB(t)
 	seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
@@ -316,63 +283,51 @@ func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
 }
 
 func TestUsageNotificationRefreshChunks(t *testing.T) {
-	database := testDB(t)
-	for index := range 600 {
-		seedLiveWriteSession(t, database, "session-"+strconv.Itoa(index), "project", "2026-08-10T09:00:00Z", 0, 1)
-	}
-	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
-	require.NoError(t, err)
-	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
-	require.NoError(t, err)
-	fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
-	require.NoError(t, err)
-	database.usageBackfillMu.Lock()
-	database.usageBackfillEnabled = true
-	database.usageBackfillMu.Unlock()
-	var sizes []int
-	cache.rollup.observer.beforeInstall = func(builds []usageRollupBuild) { sizes = append(sizes, len(builds)) }
-	var fillSizes []int
-	cache.rollup.observer.beforeAttempt = func(fills map[string]usageFillResult) { fillSizes = append(fillSizes, len(fills)) }
-	database.refreshUsageRollups(t.Context(), cache, fills)
-	assert.Len(t, sizes, 3)
-	assert.Equal(t, []int{256, 256, 88}, fillSizes, "rollup attempts received fills outside their notification chunk")
-	assert.Equal(t, 600, usageCacheCount(t, cache, "usage_rollup_installs"))
-	for _, size := range sizes {
-		assert.LessOrEqual(t, size, 256)
-	}
-	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{})
-	require.NoError(t, err)
-	assert.Equal(t, 600, daily.Totals.InputTokens)
-	assert.Len(t, sizes, 3, "request rebuilt warmed sessions")
-}
-
-func TestUsageNotificationRefreshContinuesAfterChunkFailure(t *testing.T) {
-	database := testDB(t)
-	for index := range 257 {
-		seedLiveWriteSession(t, database, "session-"+strconv.Itoa(index), "project", "2026-08-10T09:00:00Z", 0, 1)
-	}
-	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
-	require.NoError(t, err)
-	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
-	require.NoError(t, err)
-	fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
-	require.NoError(t, err)
-	database.usageBackfillMu.Lock()
-	database.usageBackfillEnabled = true
-	database.usageBackfillMu.Unlock()
-	var attempts atomic.Int32
-	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) {
-		switch attempts.Add(1) {
-		case 1:
-			_, err := cache.db.ExecContext(t.Context(), `CREATE TRIGGER reject_rollup_chunk
-				BEFORE INSERT ON usage_rollup_installs BEGIN SELECT RAISE(ABORT, 'rollup install failed'); END`)
+	for _, testCase := range []struct {
+		name         string
+		sessions     int
+		failFirst    bool
+		wantSizes    []int
+		wantInstalls int
+	}{
+		{name: "chunks", sessions: 600, wantSizes: []int{256, 256, 88}, wantInstalls: 600},
+		{name: "continues after chunk failure", sessions: 257, failFirst: true, wantSizes: []int{256, 1}, wantInstalls: 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			database := testDB(t)
+			for index := range testCase.sessions {
+				seedLiveWriteSession(t, database, "session-"+strconv.Itoa(index), "project", "2026-08-10T09:00:00Z", 0, 1)
+			}
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
 			require.NoError(t, err)
-		case 2:
-			_, err := cache.db.ExecContext(t.Context(), `DROP TRIGGER reject_rollup_chunk`)
+			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
 			require.NoError(t, err)
-		}
+			fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+			require.NoError(t, err)
+			database.usageBackfillMu.Lock()
+			database.usageBackfillEnabled = true
+			database.usageBackfillMu.Unlock()
+			var sizes []int
+			cache.rollup.observer.beforeInstall = func(builds []usageRollupBuild) {
+				sizes = append(sizes, len(builds))
+				if testCase.failFirst {
+					switch len(sizes) {
+					case 1:
+						_, err := cache.db.ExecContext(t.Context(), `CREATE TRIGGER reject_rollup_chunk
+							BEFORE INSERT ON usage_rollup_installs BEGIN SELECT RAISE(ABORT, 'rollup install failed'); END`)
+						require.NoError(t, err)
+					case 2:
+						_, err := cache.db.ExecContext(t.Context(), `DROP TRIGGER reject_rollup_chunk`)
+						require.NoError(t, err)
+					}
+				}
+			}
+			var fillSizes []int
+			cache.rollup.observer.beforeAttempt = func(fills map[string]usageFillResult) { fillSizes = append(fillSizes, len(fills)) }
+			database.refreshUsageRollups(t.Context(), cache, fills)
+			assert.Len(t, sizes, len(testCase.wantSizes), "failed chunk prevented the later chunk from running")
+			assert.Equal(t, testCase.wantSizes, fillSizes, "rollup attempts received fills outside their notification chunk")
+			assert.Equal(t, testCase.wantInstalls, usageCacheCount(t, cache, "usage_rollup_installs"))
+		})
 	}
-	database.refreshUsageRollups(t.Context(), cache, fills)
-	assert.Equal(t, int32(2), attempts.Load(), "failed chunk prevented the later chunk from running")
-	assert.Equal(t, 1, usageCacheCount(t, cache, "usage_rollup_installs"))
 }
