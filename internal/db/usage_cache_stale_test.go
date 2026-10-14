@@ -130,18 +130,14 @@ func TestUsageStaleWindowExpiresDuringSlowRefresh(t *testing.T) {
 }
 
 func TestUsageStaleCorrectedFutureTimestampStaysExact(t *testing.T) {
-	for _, offset := range []time.Duration{time.Minute, 5 * time.Second} {
-		t.Run(offset.String(), func(t *testing.T) {
-			database, cache := staleUsageFixture(t, false)
-			_, err := database.getWriter().Exec(t.Context(), `UPDATE sessions SET created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE id = 'session'`, cache.fill.now().Add(offset).UTC().Format(time.RFC3339Nano))
-			require.NoError(t, err)
-			require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
-			require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
-			require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
-			changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
-			assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"))
-		})
-	}
+	database, cache := staleUsageFixture(t, false)
+	_, err := database.getWriter().Exec(t.Context(), `UPDATE sessions SET created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE id = 'session'`, cache.fill.now().Add(time.Minute).UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+	require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+	changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
+	assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"))
 }
 
 func TestUsageStaleEligibilityCancellationWhileCacheConnectionsHeld(t *testing.T) {

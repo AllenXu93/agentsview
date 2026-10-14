@@ -44,13 +44,16 @@ type cursorSecretRecorder struct {
 }
 
 type usageCacheBackfillRecorder struct {
-	started  chan struct{}
-	release  chan struct{}
-	waited   chan struct{}
-	observer func()
+	started          chan struct{}
+	release          chan struct{}
+	waited           chan struct{}
+	observer         func()
+	notificationWork func() (func(), bool)
 }
 
-func (recorder *usageCacheBackfillRecorder) SetUsageCacheNotificationWork(func() (func(), bool)) {}
+func (recorder *usageCacheBackfillRecorder) SetUsageCacheNotificationWork(begin func() (func(), bool)) {
+	recorder.notificationWork = begin
+}
 
 func (recorder *usageCacheBackfillRecorder) SetUsageCacheBackfillStarted(
 	observer func(),
@@ -77,23 +80,48 @@ func (recorder *usageCacheBackfillRecorder) WaitUsageCacheBackfill(
 }
 
 func TestServeStartsUsageCacheBackfill(t *testing.T) {
-	recorder := &usageCacheBackfillRecorder{
-		started: make(chan struct{}), release: make(chan struct{}),
-		waited: make(chan struct{}),
-	}
-	idle := server.NewIdleTracker(time.Minute, func() {})
-	startDaemonUsageCacheBackfill(t.Context(), recorder, idle)
-	select {
-	case <-recorder.started:
-	case <-time.After(time.Second):
-		require.FailNow(t, "usage cache backfill did not start")
-	}
-	select {
-	case <-recorder.waited:
-	case <-time.After(time.Second):
-		require.FailNow(t, "usage cache backfill was not joined by tracked work")
-	}
-	close(recorder.release)
+	synctest.Test(t, func(t *testing.T) {
+		recorder := &usageCacheBackfillRecorder{
+			started: make(chan struct{}), release: make(chan struct{}),
+			waited: make(chan struct{}),
+		}
+		defer close(recorder.release)
+		idled := make(chan struct{})
+		tracker := server.NewIdleTracker(time.Minute, func() { close(idled) })
+		finishSync, ok := tracker.BeginWork()
+		require.True(t, ok)
+		startDaemonUsageCacheBackfill(t.Context(), recorder, tracker)
+		<-recorder.started
+		<-recorder.waited
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go tracker.Run(ctx)
+		finishSync()
+		synctest.Sleep(time.Minute)
+		select {
+		case <-idled:
+			require.FailNow(t, "idle shutdown ran while backfill held its lease")
+		default:
+		}
+		require.NotNil(t, recorder.notificationWork)
+		finishNotification, ok := recorder.notificationWork()
+		require.True(t, ok)
+		defer finishNotification()
+		recorder.release <- struct{}{}
+		synctest.Wait()
+		select {
+		case <-idled:
+			require.FailNow(t, "idle shutdown ran while notification work held its lease")
+		default:
+		}
+		finishNotification()
+		synctest.Wait()
+		select {
+		case <-idled:
+		default:
+			require.FailNow(t, "usage cache work did not release its idle leases")
+		}
+	})
 }
 
 // Foreground servers and daemons with idle timeout disabled pass a nil
@@ -115,40 +143,6 @@ func TestServeStartsUsageCacheBackfillWithoutIdleTracker(t *testing.T) {
 		require.FailNow(t, "usage cache backfill was not awaited without an idle tracker")
 	}
 	close(recorder.release)
-}
-
-func TestUsageNotificationHoldsIdleWorkAfterSync(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		recorder := &usageCacheBackfillRecorder{
-			started: make(chan struct{}), release: make(chan struct{}),
-			waited: make(chan struct{}),
-		}
-		defer close(recorder.release)
-		idled := make(chan struct{})
-		tracker := server.NewIdleTracker(time.Minute, func() { close(idled) })
-		finishSync, ok := tracker.BeginWork()
-		require.True(t, ok)
-		defer finishSync()
-		startDaemonUsageCacheBackfill(t.Context(), recorder, tracker)
-		<-recorder.waited
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		go tracker.Run(ctx)
-		finishSync()
-		synctest.Sleep(time.Minute)
-		select {
-		case <-idled:
-			require.FailNow(t, "idle shutdown ran while backfill held its lease")
-		default:
-		}
-		recorder.release <- struct{}{}
-		synctest.Wait()
-		select {
-		case <-idled:
-		default:
-			require.FailNow(t, "backfill did not release its idle lease")
-		}
-	})
 }
 
 func (recorder *cursorSecretRecorder) SetCursorSecret(secret []byte) {

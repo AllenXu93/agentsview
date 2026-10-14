@@ -274,7 +274,7 @@ func TestUsageNotificationLeavesCursorRollupForRequest(t *testing.T) {
 	assert.Equal(t, 1011, daily.Totals.InputTokens)
 }
 
-func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
+func TestUsageNotificationChannelOverflow(t *testing.T) {
 	t.Run("peers", func(t *testing.T) {
 		database := testDB(t)
 		for _, id := range []string{"peer-a", "peer-b"} {
