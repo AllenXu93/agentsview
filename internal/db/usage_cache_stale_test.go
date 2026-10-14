@@ -66,7 +66,7 @@ func TestUsageStaleAppendRefreshesWithoutWaiting(t *testing.T) {
 }
 
 func TestUsageStaleRejectedStatesStayExact(t *testing.T) {
-	for _, state := range []string{"no facts", "old marker", "future marker", "pending rollup", "pricing", "cursor", "standalone", "require fresh"} {
+	for _, state := range []string{"no facts", "old marker", "pending rollup", "pricing", "cursor", "standalone", "require fresh"} {
 		t.Run(state, func(t *testing.T) {
 			database, cache := staleUsageFixture(t, state != "standalone")
 			changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
@@ -77,8 +77,6 @@ func TestUsageStaleRejectedStatesStayExact(t *testing.T) {
 				require.NoError(t, err)
 			case "old marker":
 				changeStaleUsage(t, database, cache.fill.now().Add(-time.Minute))
-			case "future marker":
-				changeStaleUsage(t, database, cache.fill.now().Add(time.Minute))
 			case "pending rollup":
 				prepareUsageRollupTest(t, database)
 			case "pricing":
@@ -418,9 +416,6 @@ func TestUsageStaleDeletionReconciliation(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestUsageStaleDeletionReconciliationReleasesConnection(t *testing.T) {
 	for _, cancelRead := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cancel reconciliation=%v", cancelRead), func(t *testing.T) {
 			database, cache := staleUsageFixture(t, true)

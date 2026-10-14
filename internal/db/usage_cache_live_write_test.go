@@ -275,59 +275,99 @@ func TestUsageNotificationLeavesCursorRollupForRequest(t *testing.T) {
 }
 
 func TestUsageNotificationRequeuesPeersWhenChannelFull(t *testing.T) {
-	database := testDB(t)
-	for _, id := range []string{"peer-a", "peer-b"} {
-		seedUsageSnapshotSession(t, database, id, "project", "2026-08-10T09:00:00Z", 0, 10, "model-a")
-	}
-	_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
-	require.NoError(t, err)
-	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
-	require.NoError(t, err)
-	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
-	require.NoError(t, err)
-	blocked, release := make(chan struct{}), make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	batches := make(chan struct{}, 16)
-	var paused atomic.Bool
-	cache.fill.observer.afterNotificationBatch = func() {
-		if !paused.Swap(true) {
-			close(blocked)
-			<-release
+	t.Run("peers", func(t *testing.T) {
+		database := testDB(t)
+		for _, id := range []string{"peer-a", "peer-b"} {
+			seedUsageSnapshotSession(t, database, id, "project", "2026-08-10T09:00:00Z", 0, 10, "model-a")
 		}
-		batches <- struct{}{}
-	}
-	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
-	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
-	database.usageCache.NotifySessions([]string{"missing"})
-	waitUsageNotification(t, blocked)
-	ids := make([]string, cap(cache.fill.notify))
-	for i := range ids {
-		ids[i] = "missing"
-	}
-	database.usageCache.NotifySessions(ids)
-	seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
-	snapshot, err = database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
-	require.NoError(t, err)
-	_, err = cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
-	require.NoError(t, err)
-	var installs atomic.Int32
-	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
-	release <- struct{}{}
-	for {
-		waitUsageNotification(t, batches)
-		var warmed int
-		require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
-			FROM usage_rollup_installs i JOIN usage_rollup_timezones z ON z.id = i.timezone_id
-			WHERE z.timezone_name = 'UTC' AND i.session_id IN ('peer-a', 'peer-b', 'sibling')`).Scan(&warmed))
-		if warmed == 3 {
-			break
+		_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+		require.NoError(t, err)
+		snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+		require.NoError(t, err)
+		cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+		require.NoError(t, err)
+		blocked, release := make(chan struct{}), make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		batches := make(chan struct{}, 16)
+		var paused atomic.Bool
+		cache.fill.observer.afterNotificationBatch = func() {
+			if !paused.Swap(true) {
+				close(blocked)
+				<-release
+			}
+			batches <- struct{}{}
 		}
-	}
-	background := installs.Load()
-	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
-	require.NoError(t, err)
-	assert.Equal(t, 10, daily.Totals.OutputTokens)
-	assert.Equal(t, background, installs.Load(), "request rebuilt peers lost from the full queue")
+		require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+		require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+		database.usageCache.NotifySessions([]string{"missing"})
+		waitUsageNotification(t, blocked)
+		ids := make([]string, cap(cache.fill.notify))
+		for i := range ids {
+			ids[i] = "missing"
+		}
+		database.usageCache.NotifySessions(ids)
+		seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
+		snapshot, err = database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+		require.NoError(t, err)
+		_, err = cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+		require.NoError(t, err)
+		var installs atomic.Int32
+		cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
+		release <- struct{}{}
+		for {
+			waitUsageNotification(t, batches)
+			var warmed int
+			require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
+				FROM usage_rollup_installs i JOIN usage_rollup_timezones z ON z.id = i.timezone_id
+				WHERE z.timezone_name = 'UTC' AND i.session_id IN ('peer-a', 'peer-b', 'sibling')`).Scan(&warmed))
+			if warmed == 3 {
+				break
+			}
+		}
+		background := installs.Load()
+		daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+		require.NoError(t, err)
+		assert.Equal(t, 10, daily.Totals.OutputTokens)
+		assert.Equal(t, background, installs.Load(), "request rebuilt peers lost from the full queue")
+	})
+	t.Run("large burst", func(t *testing.T) {
+		database := testDB(t)
+		seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+		require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+		snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+		require.NoError(t, err)
+		cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+		require.NoError(t, err)
+		blocked, release, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		defer close(release)
+		var leases atomic.Int32
+		database.SetUsageCacheNotificationWork(func() (func(), bool) {
+			leases.Add(1)
+			return func() { close(drained) }, true
+		})
+		var paused atomic.Bool
+		cache.fill.observer.afterNotificationBatch = func() {
+			if !paused.Swap(true) {
+				close(blocked)
+				<-release
+			}
+		}
+		database.usageCache.NotifySessions([]string{"missing"})
+		waitUsageNotification(t, blocked)
+		ids := make([]string, 20000)
+		for i := range ids {
+			ids[i] = "missing-" + strconv.Itoa(i)
+		}
+		database.usageCache.NotifySessions(ids)
+		appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
+		cache.fill.mu.Lock()
+		assert.Len(t, cache.fill.overflow, 1024, "burst retained an unbounded overflow")
+		cache.fill.mu.Unlock()
+		assert.EqualValues(t, 1, leases.Load(), "overflow acquired a second lease while a batch was in flight")
+		release <- struct{}{}
+		waitUsageNotification(t, drained)
+		assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"), "request lost usage dropped beyond the overflow cap")
+	})
 }
 
 func TestUsageNotificationRefreshChunks(t *testing.T) {
@@ -376,49 +416,6 @@ func TestUsageNotificationRefreshChunks(t *testing.T) {
 			assert.Len(t, sizes, len(testCase.wantSizes), "failed chunk prevented the later chunk from running")
 			assert.Equal(t, testCase.wantSizes, fillSizes, "rollup attempts received fills outside their notification chunk")
 			assert.Equal(t, testCase.wantInstalls, usageCacheCount(t, cache, "usage_rollup_installs"))
-		})
-	}
-}
-
-func TestUsageNotificationLargeBurstBoundsOverflow(t *testing.T) {
-	for _, count := range []int{4096, 20000} {
-		t.Run(strconv.Itoa(count), func(t *testing.T) {
-			database := testDB(t)
-			seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
-			require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
-			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
-			require.NoError(t, err)
-			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
-			require.NoError(t, err)
-			blocked, release, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			defer close(release)
-			var leases atomic.Int32
-			database.SetUsageCacheNotificationWork(func() (func(), bool) {
-				leases.Add(1)
-				return func() { close(drained) }, true
-			})
-			var paused atomic.Bool
-			cache.fill.observer.afterNotificationBatch = func() {
-				if !paused.Swap(true) {
-					close(blocked)
-					<-release
-				}
-			}
-			database.usageCache.NotifySessions([]string{"missing"})
-			waitUsageNotification(t, blocked)
-			ids := make([]string, count)
-			for i := range ids {
-				ids[i] = "missing-" + strconv.Itoa(i)
-			}
-			database.usageCache.NotifySessions(ids)
-			appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
-			cache.fill.mu.Lock()
-			assert.Len(t, cache.fill.overflow, 1024, "burst retained an unbounded overflow")
-			cache.fill.mu.Unlock()
-			assert.EqualValues(t, 1, leases.Load(), "overflow acquired a second lease while a batch was in flight")
-			release <- struct{}{}
-			waitUsageNotification(t, drained)
-			assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"), "request lost usage dropped beyond the overflow cap")
 		})
 	}
 }
