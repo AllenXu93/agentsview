@@ -547,6 +547,20 @@ because a cached fingerprint merely looks newer.
 
 ### Activity report index
 
+SQLite keeps paired candidates in memory per session and range start, with
+separate limits of 200,000 candidates and 4,096 entries. A full cache measured
+64.3 MiB of resident Go heap on Windows amd64, using the post-GC
+`runtime.MemStats.HeapInuse` delta for 200,000 candidates across 4,096 entries,
+with 36-byte session IDs, 24-byte models, and append-grown slices. Empty sessions
+use only the entry budget. A week report then a month report keep separate
+entries for their range starts. Entries run to `max(EffectiveEnd, RangeEnd)` and
+remain valid while the transcript revision and session creation time match.
+Reader swaps clear the entries and reject stores from earlier generations.
+Reports exceeding the entry limit reuse retained hits and store up to the cap.
+Reports exceeding the candidate budget skip storing new entries. Warm reads
+still load session revisions and merge the per-session candidates in SQLite's
+microsecond order.
+
 Activity session selection checks terminal tool-execution events even when a
 session's `ended_at` predates the report. Keep the partial
 `idx_tool_result_events_terminal` index on `(session_id, timestamp)` aligned
