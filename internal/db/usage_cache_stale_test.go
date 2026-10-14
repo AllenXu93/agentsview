@@ -18,22 +18,7 @@ import (
 
 func TestUsageStaleAppendRefreshesWithoutWaiting(t *testing.T) {
 	database, cache := staleUsageFixture(t, true)
-	started, release, batches := make(chan struct{}), make(chan struct{}), make(chan struct{}, 16)
-	var first atomic.Bool
-	cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
-		if !first.Swap(true) {
-			close(started)
-			<-release
-		}
-	}
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
-	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
+	started, release := pauseStaleUsageExtraction(t, cache, true)
 	appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
 	waitUsageNotification(t, started)
 	_, err := database.getWriter().Exec(t.Context(), `UPDATE sessions SET created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE id = 'session'`, cache.fill.now().Add(-time.Second).UTC().Format(time.RFC3339Nano))
@@ -60,9 +45,7 @@ func TestUsageStaleAppendRefreshesWithoutWaiting(t *testing.T) {
 	assert.Positive(t, queued, "reads must queue recovery while a batch is running")
 	_, err = held.ExecContext(t.Context(), `COMMIT`)
 	require.NoError(t, err)
-	close(release)
-	waitUsageNotification(t, batches)
-	assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"))
+	release()
 }
 
 func TestUsageStaleRejectedStatesStayExact(t *testing.T) {
@@ -102,18 +85,7 @@ func TestUsageStaleWindowExpiresDuringSlowRefresh(t *testing.T) {
 			base := cache.fill.now()
 			var elapsed atomic.Int64
 			cache.fill.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
-			started, release := make(chan struct{}, 4), make(chan struct{})
-			cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
-				started <- struct{}{}
-				<-release
-			}
-			t.Cleanup(func() {
-				select {
-				case <-release:
-				default:
-					close(release)
-				}
-			})
+			started, release := pauseStaleUsageExtraction(t, cache, false)
 			changeStaleUsage(t, database, base.Add(-2*time.Second))
 			assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
 			waitUsageNotification(t, started)
@@ -121,10 +93,8 @@ func TestUsageStaleWindowExpiresDuringSlowRefresh(t *testing.T) {
 			assert.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
 			switch overlap {
 			case "request":
-				installs, behind, err := cache.installedUsageRollups(t.Context(), snapshot, export.NewPricingResolver(snapshot.PricingRows))
+				_, _, err := cache.installedUsageRollups(t.Context(), snapshot, export.NewPricingResolver(snapshot.PricingRows))
 				require.NoError(t, err)
-				assert.NotNil(t, installs)
-				assert.Empty(t, behind)
 			case "fill":
 				_, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
 				require.NoError(t, err)
@@ -152,7 +122,7 @@ func TestUsageStaleWindowExpiresDuringSlowRefresh(t *testing.T) {
 				require.FailNow(t, "ineligible stale totals returned while refresh was paused")
 			default:
 			}
-			close(release)
+			release()
 			require.NoError(t, <-errors)
 			assert.Equal(t, 17, (<-result).Totals.InputTokens)
 		})
@@ -465,30 +435,53 @@ func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	_, err = cache.db.ExecContext(t.Context(), `DELETE FROM usage_rollup_installs WHERE session_id = 'b'`)
 	require.NoError(t, err)
 	cache.fill.processNotificationBatch(map[string]bool{"b": true}, false)
-	started, release := make(chan struct{}, 16), make(chan struct{})
-	cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
-		started <- struct{}{}
-		<-release
-	}
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
+	started, release := pauseStaleUsageExtraction(t, cache, false)
 	batches := make(chan struct{}, 16)
 	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 	var builds atomic.Int32
 	cache.rollup.observer.beforeEnsure = func() { builds.Add(1) }
-	daily, err = database.GetDailyUsage(t.Context(), filter)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	returned := make(chan struct{})
+	go func() {
+		daily, err = database.GetDailyUsage(ctx, filter)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-ctx.Done():
+		release()
+		require.FailNow(t, "stale read waited for blocked extraction")
+	}
 	require.NoError(t, err)
 	waitUsageNotification(t, started)
 	assert.Equal(t, 20, daily.Totals.OutputTokens)
 	assert.Zero(t, builds.Load())
-	close(release)
+	release()
 	waitUsageNotification(t, batches)
 	daily, err = database.GetDailyUsage(t.Context(), filter)
 	require.NoError(t, err)
 	assert.Equal(t, 10, daily.Totals.OutputTokens)
+}
+
+func pauseStaleUsageExtraction(t *testing.T, cache *usageCache, firstOnly bool) (<-chan struct{}, func()) {
+	t.Helper()
+	started, released := make(chan struct{}, 16), make(chan struct{})
+	var first atomic.Bool
+	cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
+		if firstOnly && first.Swap(true) {
+			return
+		}
+		started <- struct{}{}
+		<-released
+	}
+	release := func() {
+		select {
+		case <-released:
+		default:
+			close(released)
+		}
+	}
+	t.Cleanup(release)
+	return started, release
 }

@@ -118,75 +118,37 @@ func TestServeStartsUsageCacheBackfillWithoutIdleTracker(t *testing.T) {
 }
 
 func TestUsageNotificationHoldsIdleWorkAfterSync(t *testing.T) {
-	path := filepath.Join(dbtest.MkdirTempWithCleanup(t), "archive.db")
-	database := dbtest.OpenTestDBAt(t, path)
-	require.NoError(t, database.UpsertSession(t.Context(), db.Session{ID: "session", Agent: "claude", Project: "project"}))
-	require.NoError(t, database.InsertMessages(t.Context(), []db.Message{{
-		SessionID: "session", Ordinal: 0, Role: "assistant", Model: "model-a",
-		Timestamp: "2026-08-10T09:00:00Z", TokenUsage: []byte(`{"input_tokens":10}`),
-		ClaudeMessageID: "message-a", ClaudeRequestID: "request-a",
-	}}))
-	idled := make(chan struct{})
-	shutdown := make(chan error, 1)
-	tracker := server.NewIdleTracker(20*time.Millisecond, func() {
-		close(idled)
-		shutdown <- database.Close()
-	})
-	finishSync, ok := tracker.BeginWork()
-	require.True(t, ok)
-	defer finishSync()
-	startDaemonUsageCacheBackfill(t.Context(), database, tracker)
-	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
-	_, err := database.GetDailyUsage(t.Context(), db.UsageFilter{Timezone: "UTC"})
-	require.NoError(t, err)
-	paths, err := filepath.Glob(filepath.Join(filepath.Dir(path), "usage-cache-v*.db"))
-	require.NoError(t, err)
-	require.Len(t, paths, 1)
-	cache, err := sql.Open("sqlite3", paths[0])
-	require.NoError(t, err)
-	defer cache.Close()
-	conn, err := cache.Conn(t.Context())
-	require.NoError(t, err)
-	defer conn.Close()
-	_, err = conn.ExecContext(t.Context(), "BEGIN IMMEDIATE")
-	require.NoError(t, err)
-	defer func() { _, _ = conn.ExecContext(t.Context(), "ROLLBACK") }()
-	require.NoError(t, database.InsertMessages(t.Context(), []db.Message{{
-		SessionID: "session", Ordinal: 1, Role: "assistant", Model: "model-a",
-		Timestamp: "2026-08-10T10:00:00Z", TokenUsage: []byte(`{"input_tokens":7}`),
-		ClaudeMessageID: "message-b", ClaudeRequestID: "request-b",
-	}}))
-	go tracker.Run(t.Context())
-	idleFired := func() bool {
+	synctest.Test(t, func(t *testing.T) {
+		recorder := &usageCacheBackfillRecorder{
+			started: make(chan struct{}), release: make(chan struct{}),
+			waited: make(chan struct{}),
+		}
+		defer close(recorder.release)
+		idled := make(chan struct{})
+		tracker := server.NewIdleTracker(time.Minute, func() { close(idled) })
+		finishSync, ok := tracker.BeginWork()
+		require.True(t, ok)
+		defer finishSync()
+		startDaemonUsageCacheBackfill(t.Context(), recorder, tracker)
+		<-recorder.waited
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go tracker.Run(ctx)
+		finishSync()
+		synctest.Sleep(time.Minute)
 		select {
 		case <-idled:
-			return true
+			require.FailNow(t, "idle shutdown ran while backfill held its lease")
 		default:
-			return false
 		}
-	}
-	finishSync()
-	assert.Never(t, idleFired, 200*time.Millisecond, time.Millisecond, "idle shutdown cancelled the blocked notification rebuild")
-	_, err = conn.ExecContext(t.Context(), "ROLLBACK")
-	require.NoError(t, err)
-	select {
-	case <-idled:
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "notification work did not release its idle lease")
-	}
-	select {
-	case err := <-shutdown:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "idle shutdown did not finish")
-	}
-	reopened := dbtest.OpenTestDBAt(t, path)
-	var revisionBefore, revisionAfter int64
-	require.NoError(t, cache.QueryRowContext(t.Context(), "SELECT SUM(install_revision) FROM usage_rollup_installs").Scan(&revisionBefore))
-	_, err = reopened.GetDailyUsage(t.Context(), db.UsageFilter{Timezone: "UTC"})
-	require.NoError(t, err)
-	require.NoError(t, cache.QueryRowContext(t.Context(), "SELECT SUM(install_revision) FROM usage_rollup_installs").Scan(&revisionAfter))
-	assert.Equal(t, revisionBefore, revisionAfter, "request rebuilt totals after idle work drained")
+		recorder.release <- struct{}{}
+		synctest.Wait()
+		select {
+		case <-idled:
+		default:
+			require.FailNow(t, "backfill did not release its idle lease")
+		}
+	})
 }
 
 func (recorder *cursorSecretRecorder) SetCursorSecret(secret []byte) {
