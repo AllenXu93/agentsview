@@ -163,7 +163,7 @@ func TestUsageLocalRequestsShareNamedZoneIdentity(t *testing.T) {
 		UsageFilter{Timezone: "UTC"}.Location(), nil).Name)
 }
 
-func TestUsageBackfillLocationsPrunesStaleLocalTimezones(t *testing.T) {
+func TestUsageCacheBackfillPrunesStaleLocalTimezones(t *testing.T) {
 	newYork, err := time.LoadLocation("America/New_York")
 	require.NoError(t, err)
 	anonymous := time.FixedZone("Local", -5*60*60)
@@ -219,6 +219,8 @@ func TestUsageBackfillLocationsPrunesStaleLocalTimezones(t *testing.T) {
 			require.Equal(t, 3, usageCacheCount(t, cache, "usage_rollup_installs"))
 			require.Equal(t, 3, usageCacheCount(t, cache, "usage_rollup_days"))
 
+			snapshot.location = tt.local
+			require.NoError(t, database.runUsageCacheBackfillPass(t.Context(), time.Now(), snapshot))
 			locations, err := usageBackfillLocations(t.Context(), cache, tt.local)
 			require.NoError(t, err)
 

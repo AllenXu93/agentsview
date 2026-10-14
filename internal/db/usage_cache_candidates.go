@@ -87,6 +87,15 @@ type usageQuerySessionRecord struct {
 func (db *DB) captureUsageQuery(
 	ctx context.Context, filter UsageFilter, kind usageQueryKind,
 ) (usageQuerySnapshot, error) {
+	return db.captureUsageSnapshot(ctx, filter, kind, nil)
+}
+
+func (db *DB) captureUsageSessions(ctx context.Context, ids []string) (usageQuerySnapshot, error) {
+	return db.captureUsageSnapshot(ctx, UsageFilter{}, usageQueryKindToken, ids)
+}
+
+func (db *DB) captureUsageSnapshot(ctx context.Context, filter UsageFilter, kind usageQueryKind, candidateIDs []string) (usageQuerySnapshot, error) {
+	queryCapture := candidateIDs == nil
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -120,36 +129,23 @@ func (db *DB) captureUsageQuery(
 	}
 	snapshot.PricingRows = pricingRows
 
-	bounds := usageCandidateBoundsForFilter(filter)
-	query, args := usageCandidateDiscoverySQL(bounds, kind)
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("discovering usage candidates: %w", err)
-	}
-	defer rows.Close()
-	var candidateIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return usageQuerySnapshot{}, fmt.Errorf("scanning usage candidate: %w", err)
+	if queryCapture {
+		candidateIDs, err = discoverUsageCandidates(ctx, tx, filter, kind)
+		if err != nil {
+			return usageQuerySnapshot{}, err
 		}
-		candidateIDs = append(candidateIDs, id)
-	}
-	if err := rows.Close(); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("closing usage candidate rows: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("iterating usage candidates: %w", err)
 	}
 
 	records, err := loadUsageQuerySessionRecords(ctx, tx, candidateIDs, filter)
 	if err != nil {
 		return usageQuerySnapshot{}, err
 	}
-	fingerprints, err := usageEventFingerprintsWithQuerier(ctx, tx, candidateIDs)
-	if err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("fingerprinting usage events: %w", err)
+	var fingerprints map[string]string
+	if queryCapture {
+		fingerprints, err = usageEventFingerprintsWithQuerier(ctx, tx, candidateIDs)
+		if err != nil {
+			return usageQuerySnapshot{}, fmt.Errorf("fingerprinting usage events: %w", err)
+		}
 	}
 	for i := range records {
 		records[i].version.UsageEventFingerprint = fingerprints[records[i].session.ID]
@@ -157,24 +153,53 @@ func (db *DB) captureUsageQuery(
 		snapshot.Versions = append(snapshot.Versions, records[i].version)
 	}
 	snapshot.Intervals = usageQueryIntervals(filter)
-	var hasCursorTable bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+	if queryCapture {
+		var hasCursorTable bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM sqlite_master
 		WHERE type = 'table' AND name = 'cursor_usage_events'
 	)`).Scan(&hasCursorTable); err != nil {
-		return usageQuerySnapshot{}, fmt.Errorf("checking Cursor usage table: %w", err)
-	}
-	if hasCursorTable {
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`,
-		).Scan(&snapshot.CursorHighWater); err != nil {
-			return usageQuerySnapshot{}, fmt.Errorf("reading Cursor usage high-water mark: %w", err)
+			return usageQuerySnapshot{}, fmt.Errorf("checking Cursor usage table: %w", err)
+		}
+		if hasCursorTable {
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`,
+			).Scan(&snapshot.CursorHighWater); err != nil {
+				return usageQuerySnapshot{}, fmt.Errorf("reading Cursor usage high-water mark: %w", err)
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return usageQuerySnapshot{}, fmt.Errorf("closing usage archive snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func discoverUsageCandidates(ctx context.Context, tx *sql.Tx, filter UsageFilter, kind usageQueryKind) ([]string, error) {
+	bounds := usageCandidateBoundsForFilter(filter)
+	query, args := usageCandidateDiscoverySQL(bounds, kind)
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("discovering usage candidates: %w", err)
+	}
+	defer rows.Close()
+	var candidateIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scanning usage candidate: %w", err)
+		}
+		candidateIDs = append(candidateIDs, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("closing usage candidate rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating usage candidates: %w", err)
+	}
+
+	return candidateIDs, nil
 }
 
 // usageCandidateBoundsForFilter converts local calendar-day filters to their

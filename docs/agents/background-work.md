@@ -65,6 +65,10 @@ recall extraction still own their timing; migrating them is separate work.
   transaction, so they are always paired correctly, and a session written
   during the pass is refilled by its own mutation notification. Do not
   reintroduce a restart loop over a moving source fingerprint.
+- After each notification batch, the daemon rebuilds filled sessions' daily
+  rollups and requeues invalidated dedup peers for the same timezones, in chunks
+  of 256. A failed rebuild is retried by the next write or usage request.
+  Cursor rollups stay with the request.
 - A scheduled pricing refresh calls `RewarmUsageCache` once it returns, when the
   stored catalog digest changed, including a partial refresh that also reports
   an error. It starts the same coverage pass, which rebuilds only rollups

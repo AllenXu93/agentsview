@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,4 +149,133 @@ func TestUsageCacheBackfillCompletesUnderConcurrentArchiveWrites(t *testing.T) {
 	// Every write the pass raced is still accounted for once the next
 	// request refills the session it touched.
 	assert.Equal(t, 4+written, liveWriteDailyInput(t, database, "project"))
+}
+
+func waitUsageNotification(t *testing.T, batches <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-batches:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "usage notification batch did not finish")
+	}
+}
+
+func TestUsageNotificationRefreshesWrittenSession(t *testing.T) {
+	for _, daemon := range []bool{false, true} {
+		t.Run(strconv.FormatBool(daemon), func(t *testing.T) {
+			database := testDB(t)
+			seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+			for _, zone := range []string{"UTC", "America/Chicago"} {
+				_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: zone})
+				require.NoError(t, err)
+			}
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+			require.NoError(t, err)
+			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+			require.NoError(t, err)
+			if daemon {
+				require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+				require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+			}
+			batches := make(chan struct{}, 16)
+			cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
+			var installs atomic.Int32
+			cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
+			appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
+			waitUsageNotification(t, batches)
+			background := installs.Load()
+			if daemon {
+				assert.Positive(t, background)
+			} else {
+				assert.Zero(t, background)
+			}
+			for _, zone := range []string{"UTC", "America/Chicago"} {
+				daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: zone})
+				require.NoError(t, err)
+				assert.Equal(t, 17, daily.Totals.InputTokens)
+			}
+			if daemon {
+				assert.Equal(t, background, installs.Load(), "requests rebuilt already warmed totals")
+			}
+		})
+	}
+}
+
+func TestUsageNotificationRefreshesDedupPeer(t *testing.T) {
+	database := testDB(t)
+	seedUsageSnapshotSession(t, database, "original", "project", "2026-08-10T09:00:00Z", 0, 10, "model-a")
+	_, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+	require.NoError(t, err)
+	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+	batches := make(chan struct{}, 16)
+	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
+	var installs atomic.Int32
+	cache.rollup.observer.beforeInstall = func([]usageRollupBuild) { installs.Add(1) }
+	seedUsageSnapshotSession(t, database, "sibling", "project", "2026-08-10T10:00:00Z", 0, 10, "model-a")
+	for {
+		waitUsageNotification(t, batches)
+		var warmed int
+		require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*)
+			FROM usage_rollup_installs i JOIN usage_rollup_timezones z ON z.id = i.timezone_id
+			WHERE z.timezone_name = 'UTC' AND i.session_id IN ('original', 'sibling')`).Scan(&warmed))
+		if warmed == 2 {
+			break
+		}
+	}
+	background := installs.Load()
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, 10, daily.Totals.OutputTokens)
+	assert.Equal(t, background, installs.Load(), "request rebuilt the invalidated peer")
+}
+
+func TestUsageNotificationLeavesCursorRollupForRequest(t *testing.T) {
+	database := testDB(t)
+	seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+	_, cache := usageCursorBatchFailureFixture(t, database)
+	database.usageBackfillMu.Lock()
+	database.usageBackfillEnabled = true
+	database.usageBackfillMu.Unlock()
+	cache.fill.processNotificationBatch(map[string]bool{"session": true}, true)
+	var cursorInstalls int
+	require.NoError(t, cache.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM usage_rollup_installs WHERE session_id = ?`, usageRollupCursorSessionID).Scan(&cursorInstalls))
+	assert.Zero(t, cursorInstalls, "session refresh stamped incomplete Cursor facts as current")
+	_, err := cache.db.ExecContext(t.Context(), `DROP TRIGGER reject_late_cursor_fact`)
+	require.NoError(t, err)
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, 1011, daily.Totals.InputTokens)
+}
+
+func TestUsageNotificationRefreshChunks(t *testing.T) {
+	database := testDB(t)
+	for index := range 600 {
+		seedLiveWriteSession(t, database, "session-"+strconv.Itoa(index), "project", "2026-08-10T09:00:00Z", 0, 1)
+	}
+	snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+	require.NoError(t, err)
+	cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+	require.NoError(t, err)
+	fills, err := cache.fill.Ensure(t.Context(), snapshot.Versions, 0)
+	require.NoError(t, err)
+	database.usageBackfillMu.Lock()
+	database.usageBackfillEnabled = true
+	database.usageBackfillMu.Unlock()
+	var sizes []int
+	cache.rollup.observer.beforeInstall = func(builds []usageRollupBuild) { sizes = append(sizes, len(builds)) }
+	database.refreshUsageRollups(t.Context(), cache, fills)
+	assert.Len(t, sizes, 3)
+	assert.Equal(t, 600, usageCacheCount(t, cache, "usage_rollup_installs"))
+	for _, size := range sizes {
+		assert.LessOrEqual(t, size, 256)
+	}
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, 600, daily.Totals.InputTokens)
+	assert.Len(t, sizes, 3, "request rebuilt warmed sessions")
 }

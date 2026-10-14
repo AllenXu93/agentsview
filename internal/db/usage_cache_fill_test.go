@@ -818,8 +818,8 @@ func TestUsageCursorFactsResumeAtRequestedHighWater(t *testing.T) {
 	assert.Equal(t, 2, usageCacheCount(t, cache, "cursor_usage_facts"))
 }
 
-func TestUsageCursorFactsRetainBoundedBatchProgress(t *testing.T) {
-	database := testDB(t)
+func usageCursorBatchFailureFixture(t *testing.T, database *DB) (usageQuerySnapshot, *usageCache) {
+	t.Helper()
 	const batchSize = usageCursorCopyBatchSize
 	events := make([]CursorUsageEvent, 0, batchSize+1)
 	for index := range batchSize + 1 {
@@ -843,7 +843,15 @@ func TestUsageCursorFactsRetainBoundedBatchProgress(t *testing.T) {
 		END`, batchSize))
 	require.NoError(t, err)
 
-	_, err = cache.fill.Ensure(t.Context(), nil, snapshot.CursorHighWater)
+	return snapshot, cache
+}
+
+func TestUsageCursorFactsRetainBoundedBatchProgress(t *testing.T) {
+	database := testDB(t)
+	snapshot, cache := usageCursorBatchFailureFixture(t, database)
+	const batchSize = usageCursorCopyBatchSize
+
+	_, err := cache.fill.Ensure(t.Context(), nil, snapshot.CursorHighWater)
 	require.Error(t, err)
 	assert.Equal(t, batchSize, usageCacheCount(t, cache, "cursor_usage_facts"))
 	assert.Equal(t, strconv.Itoa(batchSize), readUsageCacheMetadata(

@@ -51,10 +51,11 @@ type usageCursorFillCall struct {
 // usageFillObserver exposes lifecycle boundaries to deterministic tests. Its
 // callbacks must never be used for production work.
 type usageFillObserver struct {
-	beforeExtract    func([]usageSourceVersion)
-	afterExtract     func([]usageSourceVersion)
-	beforeInstall    func([]usageSourceVersion)
-	afterMaintenance func()
+	beforeExtract          func([]usageSourceVersion)
+	afterExtract           func([]usageSourceVersion)
+	beforeInstall          func([]usageSourceVersion)
+	afterNotificationBatch func()
+	afterMaintenance       func()
 }
 
 type usageFillCoordinator struct {
@@ -853,15 +854,17 @@ func (c *usageFillCoordinator) installSpoolBatch(
 		return nil, nil, err
 	}
 	maps.Copy(results, stableResults)
-	if err := c.invalidateChangedIdentitySharers(
+	sharers, err := c.invalidateChangedIdentitySharers(
 		ctx, conn, oldIdentities, eligibleStable, affected,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, nil, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return nil, nil, fmt.Errorf("committing usage cache fill: %w", err)
 	}
 	committed = true
+	c.requeueSessions(sharers)
 	return results, lost, nil
 }
 
@@ -888,9 +891,9 @@ func fillInstallExpectationMatches(
 func (c *usageFillCoordinator) invalidateChangedIdentitySharers(
 	ctx context.Context, conn *sql.Conn, oldIdentities usageDedupIdentitySet,
 	stable []usageSourceVersion, affected []string,
-) error {
+) ([]string, error) {
 	if len(affected) == 0 {
-		return nil
+		return nil, nil
 	}
 	stableIDs := make([]string, 0, len(stable))
 	for _, version := range stable {
@@ -898,7 +901,7 @@ func (c *usageFillCoordinator) invalidateChangedIdentitySharers(
 	}
 	newIdentities, err := usageSpoolIdentitiesForSessions(ctx, conn, stableIDs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	changed := newUsageDedupIdentitySet()
 	changed.mergeDifferences(oldIdentities, newIdentities)
@@ -1315,7 +1318,8 @@ func (c *usageFillCoordinator) installCursorBatch(
 	}
 	// A session usage key equal to a newly arrived Cursor key must fall back
 	// to the exception tier, so its finalized rollups are invalidated here.
-	if err := invalidateUsageDedupSharers(ctx, tx, arrived, nil); err != nil {
+	sharers, err := invalidateUsageDedupSharers(ctx, tx, arrived, nil)
+	if err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1325,7 +1329,11 @@ func (c *usageFillCoordinator) installCursorBatch(
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	c.requeueSessions(sharers)
+	return nil
 }
 
 func (m *usageCacheManager) NotifySessions(sessionIDs []string) {
@@ -1419,6 +1427,9 @@ func (c *usageFillCoordinator) runNotifications() {
 func (c *usageFillCoordinator) processNotificationBatch(
 	pending map[string]bool, cursorPending bool,
 ) {
+	if c.observer.afterNotificationBatch != nil {
+		defer c.observer.afterNotificationBatch()
+	}
 	if len(pending) > 0 {
 		ids := make([]string, 0, len(pending))
 		for id := range pending {
@@ -1451,9 +1462,11 @@ func (c *usageFillCoordinator) processNotificationBatch(
 				}
 			}
 			if len(current) > 0 {
-				if _, err := c.Ensure(c.ctx, current, 0); err != nil && c.ctx.Err() == nil {
+				fills, err := c.Ensure(c.ctx, current, 0)
+				if err != nil && c.ctx.Err() == nil {
 					log.Printf("usage cache notification fill: %v", err)
 				}
+				c.archive.refreshUsageRollups(c.ctx, c.cache, fills)
 			}
 		}
 	}
@@ -1509,12 +1522,28 @@ func (c *usageFillCoordinator) deleteNotificationSessions(ids []string) error {
 	}
 	// Rebuild the survivors' rollups so groups the deleted sessions kept
 	// irreducible can finalize again.
-	if err := invalidateUsageDedupSharers(c.ctx, conn, removed, excluded); err != nil {
+	sharers, err := invalidateUsageDedupSharers(c.ctx, conn, removed, excluded)
+	if err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(c.ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("committing usage cache session delete: %w", err)
 	}
 	committed = true
+	c.requeueSessions(sharers)
 	return nil
+}
+
+func (c *usageFillCoordinator) requeueSessions(ids []string) {
+	c.archive.usageBackfillMu.Lock()
+	enabled := c.archive.usageBackfillEnabled
+	c.archive.usageBackfillMu.Unlock()
+	if enabled {
+		for _, id := range ids {
+			select {
+			case c.notify <- usageFillNotification{sessionID: id}:
+			default:
+			}
+		}
+	}
 }
