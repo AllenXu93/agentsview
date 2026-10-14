@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -65,23 +66,141 @@ func TestSourceScanDefersMissingRootAndReconcilesDisappearance(t *testing.T) {
 	assert.Equal(t, []string{root}, batches[0].ReconcileRoots)
 }
 
-func TestSourceScanCacheCapacityDoesNotHideChanges(t *testing.T) {
+func TestSourceScanOverflowAuditsUncachedSources(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"one.jsonl", "two.jsonl"} {
 		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte("one"), 0o600))
 	}
 	scanner := newSourceScanner([]WatchRoot{{Path: root, SourceFileGlobs: []string{"*.jsonl"}}}, nil)
 	scanner.maxEntries = 1
-	emit := func(context.Context, WatchBatch) error { return nil }
-	require.NoError(t, scanner.scan(t.Context(), emit))
-	var paths []string
-	require.NoError(t, scanner.scan(t.Context(), func(_ context.Context, batch WatchBatch) error {
-		paths = append(paths, batch.Paths...)
-		return nil
-	}))
-	assert.Len(t, paths, 1, "uncached sources still reach archive freshness checks")
+	require.NoError(t, scanner.scan(t.Context(), func(context.Context, WatchBatch) error { return nil }))
+	uncached := filepath.Join(root, "one.jsonl")
+	if scanner.cached(uncached) {
+		uncached = filepath.Join(root, "two.jsonl")
+	}
+	require.False(t, scanner.cached(uncached))
+	require.NoError(t, os.WriteFile(uncached, []byte("changed"), 0o600))
+	var batches []WatchBatch
+	emit := func(_ context.Context, batch WatchBatch) error { batches = append(batches, batch); return nil }
+	for range sourceScanOverflowAuditPasses - 1 {
+		require.NoError(t, scanner.scan(t.Context(), emit))
+	}
+	assert.Empty(t, batches, "a full cache must not resubmit uncached sources every pass")
 	assert.Equal(t, uint64(1), scanner.stats().CachedFiles)
 	assert.True(t, scanner.stats().Saturated)
+	require.NoError(t, scanner.scan(t.Context(), emit))
+	require.Len(t, batches, 1)
+	assert.Equal(t, []string{root}, batches[0].ReconcileRoots, "the overflow audit covers uncached sources")
+}
+
+func TestSourceScanOverflowRecoversAfterCollectionShrinks(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"one.jsonl", "two.jsonl"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), nil, 0o600))
+	}
+	scanner := newSourceScanner([]WatchRoot{{Path: root, SourceFileGlobs: []string{"*.jsonl"}}}, nil)
+	scanner.maxEntries = 1
+	require.NoError(t, scanner.scan(t.Context(), func(context.Context, WatchBatch) error { return nil }))
+	require.True(t, scanner.stats().Saturated)
+	uncached := filepath.Join(root, "one.jsonl")
+	if scanner.cached(uncached) {
+		uncached = filepath.Join(root, "two.jsonl")
+	}
+	require.NoError(t, os.Remove(uncached))
+	var batches []WatchBatch
+	emit := func(_ context.Context, batch WatchBatch) error { batches = append(batches, batch); return nil }
+	require.NoError(t, scanner.scan(t.Context(), emit))
+	require.Len(t, batches, 1)
+	assert.Equal(t, []string{root}, batches[0].ReconcileRoots, "the uncached deletion needs provider reconciliation")
+	assert.False(t, scanner.stats().Saturated)
+	batches = nil
+	for range sourceScanOverflowAuditPasses {
+		require.NoError(t, scanner.scan(t.Context(), emit))
+	}
+	assert.Empty(t, batches, "a collection that fits needs no further overflow audits")
+}
+
+func TestSourceScanContinuesPastBrokenProjects(t *testing.T) {
+	tests := []struct {
+		name         string
+		breakProject func(t *testing.T, project string)
+		wantErr      bool
+		skipNote     string
+	}{
+		{
+			name: "dangling project link",
+			breakProject: func(t *testing.T, project string) {
+				t.Helper()
+				require.NoError(t, os.RemoveAll(project))
+			},
+		},
+		{
+			name: "unreadable project",
+			breakProject: func(t *testing.T, project string) {
+				t.Helper()
+				require.NoError(t, os.Chmod(project, 0))
+				t.Cleanup(func() { assert.NoError(t, os.Chmod(project, 0o700)) })
+			},
+			wantErr:  true,
+			skipNote: "permission bits do not deny this user",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.skipNote != "" && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+				t.Skip(tt.skipNote)
+			}
+			root := t.TempDir()
+			broken := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(broken, "session.jsonl"), nil, 0o600))
+			require.NoError(t, os.Symlink(broken, filepath.Join(root, "broken")))
+			var healthy []string
+			for i := range 8 {
+				project := filepath.Join(root, fmt.Sprintf("project-%d", i))
+				require.NoError(t, os.Mkdir(project, 0o700))
+				path := filepath.Join(project, "session.jsonl")
+				require.NoError(t, os.WriteFile(path, nil, 0o600))
+				healthy = append(healthy, path)
+			}
+			scanner := newSourceScanner([]WatchRoot{{Path: root, Recursive: true, FollowChildDirectorySymlinks: true, SourceFileGlobs: []string{"*.jsonl"}}}, nil)
+			require.NoError(t, scanner.scan(t.Context(), func(context.Context, WatchBatch) error { return nil }))
+			tt.breakProject(t, broken)
+			for _, path := range healthy {
+				require.NoError(t, os.WriteFile(path, []byte("appended"), 0o600))
+			}
+			var paths, roots []string
+			err := scanner.scan(t.Context(), func(_ context.Context, batch WatchBatch) error {
+				paths = append(paths, batch.Paths...)
+				roots = append(roots, batch.ReconcileRoots...)
+				return nil
+			})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, roots, "an unread project is not disappearance evidence")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, []string{root}, roots, "the dangling link's former sources need provider reconciliation")
+			}
+			assert.ElementsMatch(t, healthy, paths, "healthy sibling projects keep coverage")
+		})
+	}
+}
+
+func TestSourceScanDetectsOpenWriterAppend(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	writer, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, writer.Close()) })
+	_, err = writer.WriteString("one\n")
+	require.NoError(t, err)
+	scanner := newSourceScanner([]WatchRoot{{Path: root, SourceFileGlobs: []string{"*.jsonl"}}}, nil)
+	require.NoError(t, scanner.scan(t.Context(), func(context.Context, WatchBatch) error { return nil }))
+	_, err = writer.WriteString("two\n")
+	require.NoError(t, err)
+	var paths []string
+	require.NoError(t, scanner.scan(t.Context(), func(_ context.Context, batch WatchBatch) error { paths = append(paths, batch.Paths...); return nil }))
+	assert.Equal(t, []string{path}, paths, "an append through a still-open writer must be dispatched")
 }
 
 func TestWatcherSourceScanRetryAndCancellation(t *testing.T) {
@@ -142,23 +261,6 @@ func TestSourceScanFollowsDeclaredProjectSymlinks(t *testing.T) {
 	var paths []string
 	require.NoError(t, scanner.scan(t.Context(), func(_ context.Context, batch WatchBatch) error { paths = append(paths, batch.Paths...); return nil }))
 	assert.Equal(t, []string{filepath.Join(root, "linked-project", "session.jsonl")}, paths)
-}
-
-func TestSourceScanSaturationStillReconcilesUncachedDeletion(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"one.jsonl", "two.jsonl"} {
-		require.NoError(t, os.WriteFile(filepath.Join(root, name), nil, 0o600))
-	}
-	scanner := newSourceScanner([]WatchRoot{{Path: root, SourceFileGlobs: []string{"*.jsonl"}}}, nil)
-	scanner.maxEntries = 1
-	require.NoError(t, scanner.scan(t.Context(), func(context.Context, WatchBatch) error { return nil }))
-	require.NoError(t, os.Remove(filepath.Join(root, "two.jsonl")))
-	var roots []string
-	require.NoError(t, scanner.scan(t.Context(), func(_ context.Context, batch WatchBatch) error {
-		roots = append(roots, batch.ReconcileRoots...)
-		return nil
-	}))
-	assert.Equal(t, []string{root}, roots)
 }
 
 func TestSourceScanSidecarDoesNotReconcileMissingTranscriptScope(t *testing.T) {

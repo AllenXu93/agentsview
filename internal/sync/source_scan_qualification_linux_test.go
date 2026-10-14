@@ -68,9 +68,15 @@ func TestSourceScanQualification(t *testing.T) {
 		probe = fixture.uncachedSource(scanner)
 		require.GreaterOrEqual(t, probe, 0)
 	}
-	for _, root := range scanner.roots {
-		_, cached := root.directories[filepath.Dir(fixture.paths[probe])][filepath.Base(fixture.paths[probe])]
-		report.ProbeSourceCached = report.ProbeSourceCached || cached
+	report.ProbeSourceCached = scanner.cached(fixture.paths[probe])
+	// An overflowed scanner reaches uncached sources only through its audit.
+	scanUncached := scan
+	if report.ScannerStats.Saturated {
+		scanUncached = func() {
+			for range sourceScanOverflowAuditPasses {
+				scan()
+			}
+		}
 	}
 	// Alternate order to avoid always giving one path the warmer filesystem.
 	for i := range 5 {
@@ -157,7 +163,7 @@ func TestSourceScanQualification(t *testing.T) {
 	// path is uncached. Use the source selected from actual cache membership.
 	tail := probe
 	fixture.append(t, tail, "tail-change")
-	report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "tail-change", "scan", scan), qualifySourceScanMeasure(t, "tail-change", "poll", poll))
+	report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "tail-change", "scan", scanUncached), qualifySourceScanMeasure(t, "tail-change", "poll", poll))
 	tailMessages := 2
 	if tail < burst {
 		tailMessages++
@@ -166,7 +172,7 @@ func TestSourceScanQualification(t *testing.T) {
 		fixture.verify(t, engine.db, tail, tailMessages, "tail-change")
 	}
 	require.NoError(t, os.Remove(fixture.paths[tail]))
-	report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "tail-delete", "scan", scan), qualifySourceScanMeasure(t, "tail-delete", "poll", poll))
+	report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "tail-delete", "scan", scanUncached), qualifySourceScanMeasure(t, "tail-delete", "poll", poll))
 	for _, engine := range []*Engine{baseline, candidate} {
 		session, err := engine.db.GetSessionFull(t.Context(), fixture.ids[tail])
 		require.NoError(t, err)
@@ -211,8 +217,9 @@ func TestSourceScanQualification(t *testing.T) {
 	writeSourceScanQualificationReport(t, report)
 }
 
-// The capacity override belongs only to this experiment. It tests whether
-// saturation, rather than the larger collection itself, causes repeated work.
+// The capacity override belongs only to this experiment. It forces one scanner
+// past its limit so the overflow audit policy can be compared with a scanner
+// that holds every source and with prior provider polling.
 func TestSourceScanCapacityControl(t *testing.T) {
 	if os.Getenv("AGENTSVIEW_SOURCE_SCAN_CAPACITY_CONTROL") != "1" {
 		t.Skip("opt-in source-scan capacity control")
@@ -232,59 +239,55 @@ func TestSourceScanCapacityControl(t *testing.T) {
 		require.Zero(t, stats.Failed)
 		require.Equal(t, count, stats.Synced)
 	}))
+	emit := func(ctx context.Context, batch WatchBatch) error { return ApplyWatchBatch(ctx, engine, batch, nil) }
 	var scanners []*sourceScanner
-	methods := []string{"production-capacity", "expanded-capacity-control"}
+	methods := []string{"overflow", "production-capacity"}
 	for i, method := range methods {
 		scanner := newSourceScanner(fixture.roots, nil)
-		if i == 1 {
-			scanner.maxEntries = max(scanner.maxEntries, count)
+		if i == 0 {
+			scanner.maxEntries = count * 9 / 10
 		}
 		scanners = append(scanners, scanner)
 		report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "scanner-startup-extra", method, func() {
-			require.NoError(t, scanner.scan(t.Context(), func(ctx context.Context, batch WatchBatch) error {
-				return ApplyWatchBatch(ctx, engine, batch, nil)
-			}))
+			require.NoError(t, scanner.scan(t.Context(), emit))
 		}))
 		require.Equal(t, count > scanner.maxEntries, scanner.stats().Saturated)
 	}
-	for cycle := range 5 {
+	// One sample per scanner spans a full audit cycle of completion-based
+	// passes, so the overflow audit is amortized like production scheduling.
+	cycle := func(scanner *sourceScanner) func() {
+		return func() {
+			for range sourceScanOverflowAuditPasses {
+				require.NoError(t, scanner.scan(t.Context(), emit))
+			}
+		}
+	}
+	poll := func() { require.NoError(t, engine.ReconcileProviderRootsGrouped(t.Context(), fixture.groups)) }
+	for round := range 3 {
 		order := []int{0, 1}
-		if cycle%2 != 0 {
+		if round%2 != 0 {
 			order = []int{1, 0}
 		}
 		for _, i := range order {
-			report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "idle", methods[i], func() {
-				require.NoError(t, scanners[i].scan(t.Context(), func(ctx context.Context, batch WatchBatch) error {
-					return ApplyWatchBatch(ctx, engine, batch, nil)
-				}))
-			}))
+			report.Samples = append(report.Samples, qualifySourceScanCycle(t, "idle", methods[i], sourceScanOverflowAuditPasses, cycle(scanners[i])))
 		}
+		report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "idle", "poll", poll))
 	}
 	fixture.verify(t, engine.db, count-1, 1, "initial")
-	report.ScannerStats = scanners[1].stats()
-	require.Equal(t, uint64(count), report.ScannerStats.CachedFiles)
-	if scanners[0].stats().Saturated {
-		probe := fixture.uncachedSource(scanners[0])
-		require.GreaterOrEqual(t, probe, 0)
-		fixture.append(t, probe, "uncached-change")
-		report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "uncached-change", methods[0], func() {
-			require.NoError(t, scanners[0].scan(t.Context(), func(ctx context.Context, batch WatchBatch) error {
-				return ApplyWatchBatch(ctx, engine, batch, nil)
-			}))
-		}))
-		fixture.verify(t, engine.db, probe, 2, "uncached-change")
-		require.NoError(t, os.Remove(fixture.paths[probe]))
-		report.Samples = append(report.Samples, qualifySourceScanMeasure(t, "uncached-delete", methods[0], func() {
-			require.NoError(t, scanners[0].scan(t.Context(), func(ctx context.Context, batch WatchBatch) error {
-				return ApplyWatchBatch(ctx, engine, batch, nil)
-			}))
-		}))
-		session, err := engine.db.GetSessionFull(t.Context(), fixture.ids[probe])
-		require.NoError(t, err)
-		require.NotNil(t, session)
-		require.NotNil(t, session.SourceMissingAt)
-		report.UncachedSourceChecksPassed = true
-	}
+	report.ScannerStats = scanners[0].stats()
+	require.Equal(t, uint64(count), scanners[1].stats().CachedFiles)
+	probe := fixture.uncachedSource(scanners[0])
+	require.GreaterOrEqual(t, probe, 0)
+	fixture.append(t, probe, "uncached-change")
+	report.Samples = append(report.Samples, qualifySourceScanCycle(t, "uncached-change", methods[0], sourceScanOverflowAuditPasses, cycle(scanners[0])))
+	fixture.verify(t, engine.db, probe, 2, "uncached-change")
+	require.NoError(t, os.Remove(fixture.paths[probe]))
+	report.Samples = append(report.Samples, qualifySourceScanCycle(t, "uncached-delete", methods[0], sourceScanOverflowAuditPasses, cycle(scanners[0])))
+	session, err := engine.db.GetSessionFull(t.Context(), fixture.ids[probe])
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	require.NotNil(t, session.SourceMissingAt)
+	report.UncachedSourceChecksPassed = true
 	report.CorrectnessChecksPassed = true
 	writeSourceScanQualificationReport(t, report)
 }
@@ -320,9 +323,17 @@ type sourceScanQualificationReport struct {
 type sourceScanQualificationSample struct {
 	Scenario       string
 	Method         string
+	Passes         int
 	WallMS         float64
 	CPUMS          float64
 	AllocatedBytes uint64
+}
+
+func qualifySourceScanCycle(t *testing.T, scenario, method string, passes int, work func()) sourceScanQualificationSample {
+	t.Helper()
+	sample := qualifySourceScanMeasure(t, scenario, method, work)
+	sample.Passes = passes
+	return sample
 }
 
 func qualifySourceScanMeasure(t *testing.T, scenario, method string, work func()) sourceScanQualificationSample {
@@ -337,7 +348,7 @@ func qualifySourceScanMeasure(t *testing.T, scenario, method string, work func()
 	runtime.ReadMemStats(&after)
 	require.NoError(t, syscall.Getrusage(syscall.RUSAGE_SELF, &cpuAfter))
 	cpuUS := (cpuAfter.Utime.Sec-cpuBefore.Utime.Sec+cpuAfter.Stime.Sec-cpuBefore.Stime.Sec)*1000000 + cpuAfter.Utime.Usec - cpuBefore.Utime.Usec + cpuAfter.Stime.Usec - cpuBefore.Stime.Usec
-	sample := sourceScanQualificationSample{Scenario: scenario, Method: method, WallMS: float64(elapsed.Microseconds()) / 1000, CPUMS: float64(cpuUS) / 1000, AllocatedBytes: after.TotalAlloc - before.TotalAlloc}
+	sample := sourceScanQualificationSample{Scenario: scenario, Method: method, Passes: 1, WallMS: float64(elapsed.Microseconds()) / 1000, CPUMS: float64(cpuUS) / 1000, AllocatedBytes: after.TotalAlloc - before.TotalAlloc}
 	t.Logf("phase=%s method=%s wall_ms=%.3f cpu_ms=%.3f allocated_bytes=%d", scenario, method, sample.WallMS, sample.CPUMS, sample.AllocatedBytes)
 	return sample
 }
@@ -395,12 +406,7 @@ func (f *sourceScanQualificationFixture) uncachedSource(scanner *sourceScanner) 
 		if i < 512 {
 			continue // Keep burst and retention sources available for later checks.
 		}
-		cached := false
-		for _, root := range scanner.roots {
-			_, exists := root.directories[filepath.Dir(path)][filepath.Base(path)]
-			cached = cached || exists
-		}
-		if !cached {
+		if !scanner.cached(path) {
 			return i
 		}
 	}

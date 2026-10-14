@@ -36,6 +36,7 @@ func BenchmarkSourceScan50K(b *testing.B) {
 		require.NoError(b, scanner.scan(b.Context(), emit))
 	}
 	b.ReportMetric(float64(retained.HeapAlloc-before.HeapAlloc), "retained-bytes")
-	b.ReportMetric(float64(scanner.stats().CachedNameBytes), "name-bytes")
+	b.ReportMetric(float64(retained.HeapAlloc-before.HeapAlloc)/50000, "retained-bytes/file")
+	b.ReportMetric(float64(scanner.stats().CachedDirectoryBytes), "directory-bytes")
 	runtime.KeepAlive(scanner)
 }
