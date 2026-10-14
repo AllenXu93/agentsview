@@ -52,7 +52,7 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 	anyRecent := false
 	cache.fill.mu.Lock()
 	for _, version := range snapshot.Versions {
-		if state, ok := cache.fill.stale[version.SessionID]; ok && !state.since.IsZero() {
+		if state, ok := cache.fill.stale[version.SessionID]; ok {
 			if !state.source.Equal(version) && now.Sub(state.since) >= usageRollupStaleServeWindow {
 				cache.fill.mu.Unlock()
 				return nil, nil, nil
@@ -86,6 +86,20 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 		if fill.Deleted {
 			return nil, nil, nil
 		}
+	}
+	installs, stale, err := readUsageRollupInstalls(ctx, conn, usageTimezoneIdentityFor(snapshot.location, snapshot.Intervals), snapshot, fills, newUsagePricingIdentities(resolver))
+	if err != nil || len(stale) > 0 || installs[usageRollupCursorSessionID].FactRevision < snapshot.CursorHighWater {
+		return nil, nil, err
+	}
+	// Release the pinned connection before checking revisions against the live cache.
+	if _, err := conn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		return nil, nil, err
+	}
+	if err := conn.Close(); err != nil {
+		return nil, nil, err
+	}
+	for _, version := range snapshot.Versions {
+		fill := fills[version.SessionID]
 		eligible := cache.fill.staleSourceEligible(version, fill)
 		if !fill.source.Equal(version) {
 			if !eligible {
@@ -94,17 +108,12 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 			behind = append(behind, version.SessionID)
 		}
 	}
-	installs, stale, err := readUsageRollupInstalls(ctx, conn, usageTimezoneIdentityFor(snapshot.location, snapshot.Intervals), snapshot, fills, newUsagePricingIdentities(resolver))
-	if err != nil || len(stale) > 0 || installs[usageRollupCursorSessionID].FactRevision < snapshot.CursorHighWater {
-		return nil, nil, err
-	}
 	return installs, behind, nil
 }
 
 func (c *usageFillCoordinator) observeStaleFillLocked(id string, fill usageFillResult) {
 	if state, ok := c.stale[id]; ok && (fill.InstallRevision > state.InstallRevision || fill.InstallRevision == state.InstallRevision && fill.Deleted) {
-		// Retain the revision fence so pinned readers cannot restart a cleared deadline.
-		c.stale[id] = usageStaleSource{usageFillResult: fill}
+		delete(c.stale, id)
 	}
 }
 
@@ -112,14 +121,24 @@ func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, f
 	if !c.archive.isUsageBackfillEnabled() {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.observeStaleFillLocked(version.SessionID, fill)
-	state, exists := c.stale[version.SessionID]
-	if exists && (fill.InstallRevision < state.InstallRevision || state.Deleted) {
+	conn, err := c.cache.db.Conn(c.ctx)
+	if err != nil {
 		return false
 	}
-	if fill.Deleted || fill.source.SyncMarker == "" || fill.source.Equal(version) {
+	defer conn.Close()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// The installed revision fences pinned observations without retaining completed windows.
+	current, err := readCurrentUsageFillResult(c.ctx, conn, version.SessionID)
+	if err != nil || current.Deleted || fill.Deleted || current.InstallRevision != fill.InstallRevision {
+		return false
+	}
+	c.observeStaleFillLocked(version.SessionID, fill)
+	state, exists := c.stale[version.SessionID]
+	if exists && fill.InstallRevision < state.InstallRevision {
+		return false
+	}
+	if fill.source.SyncMarker == "" || fill.source.Equal(version) {
 		return false
 	}
 	now := c.now()
@@ -128,12 +147,12 @@ func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, f
 	if err != nil || installedErr != nil || installed.After(now) || changed.After(now) {
 		return false
 	}
-	if !exists || state.since.IsZero() {
+	if !exists {
 		if now.Sub(changed) > usageRollupStaleServeWindow {
 			return false
 		}
 		// Keep expired versions until refill so later appends cannot restart their window.
-		if !exists && len(c.stale) >= usageFillNotificationCapacity {
+		if len(c.stale) >= usageFillNotificationCapacity {
 			return false
 		}
 		state = usageStaleSource{usageFillResult: fill, since: now}

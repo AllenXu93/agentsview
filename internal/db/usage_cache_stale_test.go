@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -256,6 +257,49 @@ func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 				assert.Equal(t, 24, daily.Totals.InputTokens)
 			})
 		}
+	}
+}
+
+func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
+	for _, completion := range []string{"refill", "delete"} {
+		t.Run(completion, func(t *testing.T) {
+			database := testDB(t)
+			for i := range 1280 {
+				seedLiveWriteSession(t, database, fmt.Sprintf("turnover-%04d", i), "turnover", "2026-08-10T09:00:00Z", 0, 10)
+			}
+			require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
+			require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
+			_, _, cache := prepareUsageRollupTest(t, database)
+			now := time.Now().Add(time.Hour)
+			cache.fill.now = func() time.Time { return now }
+			filter := UsageFilter{Timezone: "UTC", Project: "turnover"}
+			snapshot, err := database.captureUsageQuery(t.Context(), filter, usageQueryKindToken)
+			require.NoError(t, err)
+			require.Len(t, snapshot.Versions, 1280)
+			fills, err := cache.fill.FillBackground(t.Context(), snapshot.Versions, 0)
+			require.NoError(t, err)
+			_, err = database.getWriter().Exec(t.Context(), `UPDATE sessions SET transcript_revision = 'changed', created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE project = 'turnover'`, cache.fill.now().Add(-time.Second).UTC().Format(time.RFC3339Nano))
+			require.NoError(t, err)
+			snapshot, err = database.captureUsageQuery(t.Context(), filter, usageQueryKindToken)
+			require.NoError(t, err)
+			for start := 0; start < len(snapshot.Versions); start += 256 {
+				batch := snapshot.Versions[start : start+256]
+				ids := make([]string, 0, len(batch))
+				for _, version := range batch {
+					require.True(t, cache.fill.staleSourceEligible(version, fills[version.SessionID]), "session %s must get a window after earlier batches complete", version.SessionID)
+					ids = append(ids, version.SessionID)
+				}
+				if completion == "refill" {
+					_, err = cache.fill.FillBackground(t.Context(), batch, 0)
+				} else {
+					err = cache.fill.deleteNotificationSessions(ids)
+				}
+				require.NoError(t, err)
+				for _, version := range batch {
+					assert.False(t, cache.fill.staleSourceEligible(version, fills[version.SessionID]), "completed windows must reject older observations")
+				}
+			}
+		})
 	}
 }
 
