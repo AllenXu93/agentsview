@@ -222,7 +222,8 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 			filepath.Join(root, "history.jsonl"), id,
 		)
 	}
-	messages = append(messages,
+	messages = append(
+		messages,
 		collectAntigravityBrainMessages(
 			filepath.Join(root, "brain", id),
 		)...,
@@ -898,7 +899,7 @@ func antigravityCLICombinedFileInfo(
 // antigravityCompanionCounts drops a frame-less WAL companion: reading the
 // database creates and deletes one, which must not look like a change.
 func antigravityCompanionCounts(path string, info os.FileInfo) bool {
-	return !strings.HasSuffix(path, "-wal") || sqliteWALInfoHasFrames(info)
+	return !strings.HasSuffix(path, "-wal") || SQLiteWALInfoHasFrames(info)
 }
 
 func antigravityCompositeHash(path string, companions ...string) (string, error) {

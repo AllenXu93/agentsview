@@ -23,10 +23,7 @@ func WriteArchive(ctx context.Context, w io.Writer, targets TargetSet) error {
 		}
 	}
 	writtenSnapshots := make(map[string]struct{})
-	writePath := func(path string, optional bool) error {
-		if forbidden.within(path) {
-			return nil
-		}
+	writeFile := func(path string, info os.FileInfo) error {
 		clean := filepath.Clean(path)
 		if stateDB, ok := snapshotSQLite[clean]; ok {
 			if _, written := writtenSnapshots[stateDB]; written {
@@ -35,10 +32,19 @@ func WriteArchive(ctx context.Context, w io.Writer, targets TargetSet) error {
 			writtenSnapshots[stateDB] = struct{}{}
 			return writeSQLiteStateDBSnapshot(ctx, tw, stateDB)
 		}
+		return writeArchiveFile(tw, path, info)
+	}
+	writePath := func(path string, optional bool) error {
+		if forbidden.within(path) {
+			return nil
+		}
+		if _, snapshot := snapshotSQLite[filepath.Clean(path)]; snapshot {
+			return writeFile(path, nil)
+		}
 		if optional {
 			return writeOptionalArchiveFile(tw, path)
 		}
-		return writeArchivePath(tw, path, forbidden)
+		return writeArchivePath(tw, path, forbidden, writeFile)
 	}
 	for agent, dirs := range targets.Dirs {
 		if parser.RemoteSyncExcludedAgent(agent) {
@@ -213,7 +219,7 @@ func writeOptionalArchiveFile(tw *tar.Writer, path string) error {
 }
 
 func writeArchivePath(
-	tw *tar.Writer, root string, forbidden forbiddenRootMatcher,
+	tw *tar.Writer, root string, forbidden forbiddenRootMatcher, writeFile func(string, os.FileInfo) error,
 ) error {
 	if forbidden.within(root) {
 		return nil
@@ -226,7 +232,7 @@ func writeArchivePath(
 		return nil
 	}
 	if !info.IsDir() {
-		return writeArchiveFile(tw, root, info)
+		return writeFile(root, info)
 	}
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -254,7 +260,7 @@ func writeArchivePath(
 		if info.IsDir() {
 			return writeArchiveHeader(tw, path, info, nil)
 		}
-		return writeArchiveFile(tw, path, info)
+		return writeFile(path, info)
 	})
 }
 

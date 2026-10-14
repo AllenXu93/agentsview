@@ -421,6 +421,10 @@ Each session item shows:
 - **Relative time** — "2h ago", "Mon", "Dec 1"
 - **User prompt count** — number of user messages in the session
 
+Antigravity sessions show the conversation title Antigravity saves in
+`conversation_summaries.db`. Renames appear shortly after that file changes,
+or on the next `agentsview sync`. Names set in AgentsView still win.
+
 When a session has a native resume target, the sidebar also exposes a direct
 native session link so supported agents can reopen their own session instead of
 only navigating inside AgentsView.

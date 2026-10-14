@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/testjsonl"
 )
 
 // antigravityBrainTranscriptFixture is a four-entry plaintext brain
@@ -28,17 +29,6 @@ const antigravityBrainTranscriptFixture = `{"step_index":0,"source":"USER_EXPLIC
 const antigravityBrainTranscriptShort = `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-05-20T22:10:00Z","content":"same conversation, other tree"}
 {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-05-20T22:10:01Z","content":"answered"}
 `
-
-// writeAntigravityBrainTranscript writes body to the path Antigravity's agent
-// brain uses for a conversation's plaintext transcript and returns it.
-func writeAntigravityBrainTranscript(t *testing.T, root, id, body string) string {
-	t.Helper()
-	dir := filepath.Join(root, "brain", id, ".system_generated", "logs")
-	mustMkdir(t, dir)
-	path := filepath.Join(dir, "transcript.jsonl")
-	mustWrite(t, path, []byte(body))
-	return path
-}
 
 func newAntigravityProviderForRoots(t *testing.T, roots ...string) Provider {
 	t.Helper()
@@ -76,7 +66,7 @@ func parseAntigravitySources(
 func TestAntigravityBrainTranscriptIsItsOwnSession(t *testing.T) {
 	root := t.TempDir()
 	id := "04385df3-99c4-4772-81a9-24fb6508046a"
-	path := writeAntigravityBrainTranscript(
+	path := testjsonl.WriteAntigravityBrainTranscript(
 		t, root, id, antigravityBrainTranscriptFixture,
 	)
 	provider := newAntigravityProviderForRoots(t, root)
@@ -153,7 +143,7 @@ func TestAntigravityBrainTranscriptFoldsIntoItsDBSession(t *testing.T) {
 
 	both := t.TempDir()
 	writeAntigravityIDEProviderFixture(t, both, id)
-	writeAntigravityBrainTranscript(
+	testjsonl.WriteAntigravityBrainTranscript(
 		t, both, id, antigravityBrainTranscriptFixture,
 	)
 	provider := newAntigravityProviderForRoots(t, both)
@@ -192,7 +182,7 @@ func TestAntigravityBrainTranscriptDiscoveryStreams(t *testing.T) {
 		t.Run(fmt.Sprintf("%d sessions", sessions), func(t *testing.T) {
 			root := t.TempDir()
 			for i := range sessions {
-				writeAntigravityBrainTranscript(t, root,
+				testjsonl.WriteAntigravityBrainTranscript(t, root,
 					fmt.Sprintf("00000000-0000-0000-0000-%012x", i), "{}\n")
 			}
 			provider := newAntigravityProviderForRoots(t, root)
@@ -225,7 +215,7 @@ func TestAntigravityBrainChangedPathRouting(t *testing.T) {
 		root := t.TempDir()
 		id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 		writeAntigravityIDEProviderFixture(t, root, id)
-		transcript := writeAntigravityBrainTranscript(
+		transcript := testjsonl.WriteAntigravityBrainTranscript(
 			t, root, id, antigravityBrainTranscriptFixture,
 		)
 		dbPath := filepath.Join(root, "conversations", id+".db")
@@ -247,7 +237,7 @@ func TestAntigravityBrainChangedPathRouting(t *testing.T) {
 	t.Run("a transcript with no database routes to itself", func(t *testing.T) {
 		root := t.TempDir()
 		id := "68b6d305-c8a9-45b4-96c8-fbaff15fa2f3"
-		transcript := writeAntigravityBrainTranscript(
+		transcript := testjsonl.WriteAntigravityBrainTranscript(
 			t, root, id, antigravityBrainTranscriptFixture,
 		)
 		provider := newAntigravityProviderForRoots(t, root)
@@ -262,7 +252,7 @@ func TestAntigravityBrainChangedPathRouting(t *testing.T) {
 	t.Run("a deleted transcript still routes to itself", func(t *testing.T) {
 		root := t.TempDir()
 		id := "68b6d305-c8a9-45b4-96c8-fbaff15fa2f3"
-		transcript := writeAntigravityBrainTranscript(
+		transcript := testjsonl.WriteAntigravityBrainTranscript(
 			t, root, id, antigravityBrainTranscriptFixture,
 		)
 		require.NoError(t, os.Remove(transcript), "remove the transcript")
@@ -304,10 +294,10 @@ func TestAntigravityTwoRootsShareConversationID(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
 	id := "68b6d305-c8a9-45b4-96c8-fbaff15fa2f3"
-	firstPath := writeAntigravityBrainTranscript(
+	firstPath := testjsonl.WriteAntigravityBrainTranscript(
 		t, first, id, antigravityBrainTranscriptFixture,
 	)
-	secondPath := writeAntigravityBrainTranscript(
+	secondPath := testjsonl.WriteAntigravityBrainTranscript(
 		t, second, id, antigravityBrainTranscriptShort,
 	)
 
@@ -362,7 +352,7 @@ func TestAntigravityEncryptedStreamsStayUnstored(t *testing.T) {
 		[]byte("encrypted-conversation-stream"))
 	mustWrite(t, filepath.Join(root, "implicit", implicitID+".pb"),
 		[]byte("encrypted-implicit-conversation"))
-	transcript := writeAntigravityBrainTranscript(
+	transcript := testjsonl.WriteAntigravityBrainTranscript(
 		t, root, transcriptID, antigravityBrainTranscriptFixture,
 	)
 

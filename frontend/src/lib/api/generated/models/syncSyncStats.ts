@@ -15,6 +15,7 @@ export interface SyncSyncStats {
   rebuild_phases?: SyncRebuildPhaseStats[];
   skipped: number;
   synced: number;
+  titles_updated?: number;
   tombstoned?: number;
   total_sessions: number;
   warnings?: string[];

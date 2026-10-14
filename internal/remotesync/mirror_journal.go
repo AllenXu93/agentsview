@@ -77,6 +77,10 @@ func mirrorJournalPath(mirrorRoot string) string {
 	return filepath.Clean(mirrorRoot) + ".changes.json"
 }
 
+func mirrorAntigravityTitlesPath(mirrorRoot string) string {
+	return filepath.Clean(mirrorRoot) + ".antigravity-titles.json"
+}
+
 func mirrorRelativeRemoteChangePath(
 	mirrorRoot, remotePath string,
 ) (string, error) {

@@ -49,8 +49,7 @@ func ConvertSessionContext(
 		session.FirstMessage = &parsed.FirstMessage
 	}
 	session.SessionName = db.ParsedSessionName(parsed)
-	session.PreserveSessionName = parsed.Agent == parser.AgentCodex &&
-		!parsed.SessionNamePresent
+	session.PreserveSessionName = parser.PreservesStoredSessionName(parsed)
 	if !parsed.StartedAt.IsZero() {
 		session.StartedAt = timeutil.Ptr(parsed.StartedAt)
 	}

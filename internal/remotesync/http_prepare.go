@@ -2,9 +2,11 @@ package remotesync
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/parser"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
+	"go.kenn.io/kit/atomicfile"
 )
 
 var (
@@ -437,6 +440,9 @@ func (p *PreparedHTTP) ImportActive(ctx context.Context) (SyncStats, error) {
 		return stats, ctxErr
 	}
 	retireStart := time.Now()
+	if err := p.persistAntigravityTitleStates(); err != nil {
+		log.Printf("Antigravity title verification: %v", err)
+	}
 	if err := p.retireJournal(p.mirrorImport.journalPath); err != nil {
 		stats.RetirementDuration = time.Since(retireStart)
 		stats.JournalOutcome = JournalRetirementFailed
@@ -537,6 +543,7 @@ func (p *PreparedHTTP) RebuildContributor(ctx context.Context) (syncpkg.RebuildC
 		); err != nil {
 			return &rebuildCachePersistError{err: err}
 		}
+		p.mirrorImport.pending.antigravityTitleStates = engine.SnapshotAntigravityTitleStates()
 		return nil
 	}
 	forceParse := p.sync.forceParseRequested()
@@ -601,6 +608,9 @@ func (p *PreparedHTTP) Commit() error {
 		return errors.New("prepared HTTP journal is not ready to commit")
 	}
 	start := time.Now()
+	if err := p.persistAntigravityTitleStates(); err != nil {
+		log.Printf("Antigravity title verification: %v", err)
+	}
 	if err := p.retireJournal(p.mirrorImport.journalPath); err != nil {
 		p.mirrorImport.pending.Stats.RetirementDuration = time.Since(start)
 		p.mirrorImport.outcome = JournalRetirementFailed
@@ -980,7 +990,11 @@ func (hs HTTPSync) prepareMirror(
 	}
 	hasPending := journal.FullImport || journal.RequiredDataVersion != 0 ||
 		len(journal.Entries) > 0 || fullReason != "" || hs.Full
-	if !mutatesMirror && !hasPending {
+	pendingTitles, err := prepared.antigravityTitlesPending()
+	if err != nil {
+		return nil, err
+	}
+	if !mutatesMirror && !hasPending && !pendingTitles {
 		return nil, nil
 	}
 	if err := prepared.replaceJournal(journalPath, journal); err != nil {
@@ -1065,6 +1079,67 @@ func (hs HTTPSync) prepareMirror(
 		mergeStats: mergeStats, fullReason: fullReason,
 		outcome: JournalAbortedBeforeProcessing, pending: pending,
 	}, nil
+}
+
+type antigravityTitleVerification struct {
+	Version int                                    `json:"version"`
+	States  map[string]parser.SQLiteContainerState `json:"states"`
+}
+
+func loadAntigravityTitleVerification(root string) antigravityTitleVerification {
+	data, err := os.ReadFile(mirrorAntigravityTitlesPath(root))
+	if err != nil {
+		return antigravityTitleVerification{}
+	}
+	var applied antigravityTitleVerification
+	if json.Unmarshal(data, &applied) != nil || applied.Version != 1 {
+		return antigravityTitleVerification{}
+	}
+	return applied
+}
+
+func (p *PreparedHTTP) antigravityTitlesPending() (bool, error) {
+	if len(p.targets.Dirs[parser.AgentAntigravity]) == 0 || p.sync.DB.ArchiveContent().UsageOnly() {
+		return false, nil
+	}
+	current := make(map[string]parser.SQLiteContainerState)
+	for _, remoteRoot := range p.targets.Dirs[parser.AgentAntigravity] {
+		root, err := safeRemappedRemotePath(p.root, remoteRoot)
+		if err != nil {
+			return false, err
+		}
+		store := filepath.Join(root, parser.AntigravitySummariesDBName)
+		if state, ok := parser.StatSQLiteContainerState(store); ok {
+			current[store] = state
+		}
+	}
+	applied := loadAntigravityTitleVerification(p.root)
+	if applied.Version != 1 {
+		return true, nil
+	}
+	return !maps.Equal(current, applied.States), nil
+}
+
+func (p *PreparedHTTP) persistAntigravityTitleStates() error {
+	if len(p.targets.Dirs[parser.AgentAntigravity]) == 0 || p.sync.DB.ArchiveContent().UsageOnly() {
+		return nil
+	}
+	if data, err := os.ReadFile(mirrorAntigravityTitlesPath(p.root)); err == nil {
+		var applied struct {
+			Version int `json:"version"`
+		}
+		if json.Unmarshal(data, &applied) == nil && applied.Version > 1 {
+			return nil
+		}
+	}
+	data, err := json.Marshal(antigravityTitleVerification{Version: 1, States: p.mirrorImport.pending.antigravityTitleStates})
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.WriteFile(mirrorAntigravityTitlesPath(p.root), data, atomicfile.WithPrivate()); err != nil {
+		return fmt.Errorf("persist applied Antigravity title states: %w", err)
+	}
+	return nil
 }
 
 func requireMirrorDataVersionImport(

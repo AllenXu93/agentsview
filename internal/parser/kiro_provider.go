@@ -1186,7 +1186,7 @@ func (s kiroSourceSet) sourceRefForChangedPath(root, path string) (SourceRef, bo
 		}
 		return s.newSourceRef(root, path, dbPath, sessionID, kiroSourceSQLiteSession), true
 	}
-	if dbPath, ok := sqliteContainerPathForEvent(root, path, kiroSQLiteDBName, true); ok {
+	if dbPath, ok := SQLiteContainerPathForEvent(root, path, kiroSQLiteDBName, true); ok {
 		if !kiroDBUnderRoot(root, dbPath, false) {
 			return SourceRef{}, false
 		}

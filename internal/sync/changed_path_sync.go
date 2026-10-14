@@ -112,10 +112,24 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 	))
 	result.FilesDiscovered = len(files)
 	if len(files) == 0 {
+		// A title store change alone plans no session files.
+		e.syncMu.Lock()
+		for path := range plan.attribution {
+			e.invalidateAntigravityTitleCache([]string{path})
+		}
+		e.reconcileAntigravityTitlesLocked(ctx, &result.Stats)
+		e.recordAntigravityTitleUpdates(result.Stats)
+		e.syncMu.Unlock()
+		if result.Stats.TitlesUpdated > 0 {
+			e.emit("sessions")
+		}
 		return result, ctx.Err()
 	}
 
 	e.syncMu.Lock()
+	for path := range plan.attribution {
+		e.invalidateAntigravityTitleCache([]string{path})
+	}
 	var stats SyncStats
 	defer func() {
 		if stats.hasSessionChanges() {
@@ -186,6 +200,8 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 	if !e.ephemeral {
 		e.persistSkipCache(ctx)
 	}
+	processingComplete := stats.ProcessingComplete()
+	e.reconcileAntigravityTitlesLocked(ctx, &stats)
 	e.mu.Lock()
 	e.lastSync = time.Now()
 	e.lastSyncStats = stats
@@ -198,7 +214,7 @@ func (e *Engine) SyncChangedPathPlanWithOptionsContext(
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if !stats.ProcessingComplete() {
+	if !processingComplete {
 		return result, errors.Join(processErr, fmt.Errorf(
 			"changed-path plan sync incomplete: %d source or archive failures",
 			stats.Failed,

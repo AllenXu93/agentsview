@@ -576,6 +576,10 @@ type Engine struct {
 	sourceClaimsMu    gosync.Mutex
 	sourceClaims      map[string]string
 	deferredSourceCwd *sourceCwdReconciliationBatch
+	// deferredAntigravityTitles holds rebuild title changes for archived
+	// sessions that reach the replacement only through the orphan copy.
+	deferredAntigravityTitles map[string]*string
+	appliedAntigravityTitles  map[string]appliedAntigravityTitles
 	// sourceSet holds the provider set and session roots this engine
 	// discovers from. ReconfigureSources replaces it as one snapshot.
 	sourceSet atomic.Pointer[engineSources]
@@ -1813,9 +1817,19 @@ func (e *Engine) syncChangedPathsLocked(
 	})
 	ctx = parser.WithProjectRootMemo(ctx)
 	ctx = parser.WithCodexParentInventoryBatch(ctx)
-	return e.applyChangedPathSyncLocked(
+	e.invalidateAntigravityTitleCache(paths)
+	stats, tombstoned, err := e.applyChangedPathSyncLocked(
 		ctx, e.prepareChangedPathSync(ctx, paths),
 	)
+	// Title store events carry no session files, so this also handles them.
+	if err == nil && !stats.Aborted {
+		var titleStats SyncStats
+		e.reconcileAntigravityTitlesLocked(ctx, &titleStats)
+		e.recordAntigravityTitleUpdates(titleStats)
+		stats.TitlesUpdated += titleStats.TitlesUpdated
+		stats.Failed += titleStats.Failed
+	}
+	return stats, tombstoned, err
 }
 
 func (e *Engine) applyChangedPathSyncLocked(
@@ -3383,6 +3397,9 @@ func (e *Engine) resyncBuildLocked(
 	deferredSourceCwd := newSourceCwdReconciliationBatch()
 	e.deferredSourceCwd = deferredSourceCwd
 	defer func() { e.deferredSourceCwd = nil }()
+	deferredTitles := make(map[string]*string)
+	e.deferredAntigravityTitles = deferredTitles
+	defer func() { e.deferredAntigravityTitles = nil }()
 	e.db = newDB
 	reportResyncPhase(
 		PhaseDiscovering,
@@ -3431,6 +3448,7 @@ func (e *Engine) resyncBuildLocked(
 		contributorEngine.archiveStore = origDB
 		contributorEngine.archiveRebuildIndex = archiveIndex
 		contributorEngine.deferredSourceCwd = deferredSourceCwd
+		contributorEngine.deferredAntigravityTitles = deferredTitles
 		contributorEngine.forceFullParse = contributor.ForceParse ||
 			contributor.ForceFullParseAfterCache
 		contributorEngine.forceFullParseAllowsCache =
@@ -3694,6 +3712,19 @@ func (e *Engine) resyncBuildLocked(
 	}
 	stats.OrphanedCopied = len(orphaned)
 	copiedSessionIDs = append(copiedSessionIDs, orphaned...)
+	for id, name := range deferredTitles {
+		if err := newDB.RefreshNativeSessionName(ctx, id, name); err != nil {
+			stats.RecordFailed()
+			stats.Aborted = true
+			newDB.Close()
+			removeTempDB(tempPath)
+			restoreSkipCache()
+			e.mu.Lock()
+			e.lastSyncStats = stats
+			e.mu.Unlock()
+			return stats, fmt.Errorf("apply deferred antigravity title: %w", err)
+		}
+	}
 	deferredCwdUpdated, err := e.applyDeferredSourceCwd(ctx,
 		newDB, deferredSourceCwd,
 	)
@@ -5258,6 +5289,10 @@ func (e *Engine) ReconcileProviderRootsGrouped(
 		} else if len(errs) > 0 {
 			e.flushFailureCache(ctx)
 		}
+		var titleStats SyncStats
+		e.reconcileAntigravityTitlesLocked(ctx, &titleStats)
+		e.recordAntigravityTitleUpdates(titleStats)
+		changed = changed || titleStats.TitlesUpdated > 0
 	}()
 	if changed {
 		e.emit("sessions")
@@ -5331,6 +5366,13 @@ func (e *Engine) reconcileScopedWatchRootsLocked(
 		ProviderFailures: stats.providerFailures,
 		Metrics:          metrics,
 	})
+	if !passEpilogueDeferred(ctx) {
+		var titleStats SyncStats
+		e.reconcileAntigravityTitlesLocked(ctx, &titleStats)
+		e.recordAntigravityTitleUpdates(titleStats)
+		stats.TitlesUpdated += titleStats.TitlesUpdated
+		stats.Failed += titleStats.Failed
+	}
 	return stats, tombstoned, eligibility, err
 }
 
@@ -7073,6 +7115,7 @@ func mergeReconciliationSyncStats(dst *SyncStats, src SyncStats) {
 	dst.cwdFilteredSessions += src.cwdFilteredSessions
 	dst.cwdFilteredFiles += src.cwdFilteredFiles
 	dst.CwdUpdated += src.CwdUpdated
+	dst.TitlesUpdated += src.TitlesUpdated
 	dst.LinksUpdated += src.LinksUpdated
 	dst.Aborted = dst.Aborted || src.Aborted
 	if !dst.deferredRetryOverflow {
@@ -8020,6 +8063,7 @@ func (e *Engine) syncAllLocked(
 	if ctx.Err() != nil {
 		return SyncStats{Aborted: true}
 	}
+	e.invalidateAntigravityTitleCache(nil)
 	ctx = e.parsePolicyContext(ctx)
 	ctx = parser.WithProjectRootMemo(ctx)
 	ctx = parser.WithCodexParentInventoryBatch(ctx)
@@ -8314,6 +8358,7 @@ func (e *Engine) syncAllLocked(
 	} else {
 		stats.RecordLinksUpdated(linked)
 	}
+	e.reconcileAntigravityTitlesLocked(ctx, &stats)
 
 	e.reportFinalizingProgress(
 		onProgress, writeMode, finalizingSkipCacheDetail,
@@ -17719,11 +17764,9 @@ func (e *Engine) normalizePendingWriteMachines(
 				batch[i].sess.Machine = stored.Machine
 				// A rebuild writes into a fresh database, so the upsert cannot
 				// preserve a title from the destination row. Carry the archived
-				// nullable title into index-less Codex parses; an explicitly
+				// nullable title into parses with no title signal; an explicitly
 				// present blank remains authoritative and bypasses this path.
-				if e.archiveStore != nil &&
-					batch[i].sess.Agent == parser.AgentCodex &&
-					!batch[i].sess.SessionNamePresent {
+				if e.archiveStore != nil && parser.PreservesStoredSessionName(batch[i].sess) {
 					batch[i].sess.SessionName = ""
 					if stored.SessionName != nil {
 						batch[i].sess.SessionName = *stored.SessionName

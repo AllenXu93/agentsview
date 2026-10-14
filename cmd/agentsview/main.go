@@ -3177,7 +3177,7 @@ func workerResultHasSessionChanges(result workerResult) bool {
 	if result.Synced > 0 || result.Tombstoned > 0 {
 		return true
 	}
-	return result.Stats != nil && (result.Stats.CwdUpdated > 0 || result.Stats.LinksUpdated > 0)
+	return result.Stats != nil && (result.Stats.CwdUpdated > 0 || result.Stats.TitlesUpdated > 0 || result.Stats.LinksUpdated > 0)
 }
 
 // scheduledSyncEngine is the reconciliation surface the scheduled pass needs.

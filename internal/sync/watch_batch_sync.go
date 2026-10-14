@@ -393,8 +393,13 @@ func (e *Engine) SyncWatchBatchThenRun(
 		return SyncStats{}, err
 	}
 	changed := false
+	var titleRetry WatchBatch
+	ctx = context.WithValue(ctx, antigravityTitleRetryContextKey{}, &titleRetry)
 	e.syncMu.Lock()
 	defer func() {
+		if len(titleRetry.Paths) > 0 {
+			err = composeWatchBatchErrors(err, &watchBatchApplyError{cause: errors.New("antigravity title reconciliation failed"), retry: titleRetry})
+		}
 		e.clearCurrentProgress()
 		e.syncMu.Unlock()
 		if changed {

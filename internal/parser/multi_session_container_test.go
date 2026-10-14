@@ -298,7 +298,7 @@ func TestSQLiteContainerPathForEventIgnoresFramelessWAL(t *testing.T) {
 			if tt.wal != nil {
 				require.NoError(t, os.WriteFile(dbPath+"-wal", tt.wal, 0o644))
 			}
-			got, ok := sqliteContainerPathForEvent(
+			got, ok := SQLiteContainerPathForEvent(
 				root, dbPath+tt.event, "threads/threads.db", true,
 			)
 			assert.Equal(t, tt.wantOK, ok)

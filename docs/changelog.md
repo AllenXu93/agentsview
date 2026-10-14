@@ -51,6 +51,9 @@ The latest release is
   `agentsview import --type claude-ai --sync` with no AgentsView tab open. See
   [Claude.ai Sync](https://agentsview.io/docs/chat-import/#sync-claudeai-chats)
   for setup, branch updates, Trash copies, and failure handling.
+- Antigravity sessions show the conversation title Antigravity saves in
+  `conversation_summaries.db`, and follow renames there, including for
+  conversations whose transcript is gone. Names set in AgentsView still win.
 - See costs for each Hermes cron job in the `hermes-cron` Usage drill-down.
   Renamed runs and continuations stay together through recorded parent links.
   Each job shows its latest recorded name in the selected range, including on

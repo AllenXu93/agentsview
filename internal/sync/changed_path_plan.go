@@ -120,6 +120,11 @@ func (e *Engine) planOneChangedPath(
 			)
 			continue
 		}
+		if agent == parser.AgentAntigravity &&
+			strings.TrimSuffix(filepath.Base(path), "-wal") == parser.AntigravitySummariesDBName {
+			// The title store holds no transcripts; titles reconcile after the plan runs.
+			continue
+		}
 		matchingWatchRoots := matchingChangedPathRoots(path, watchRoots)
 		if len(matchingWatchRoots) == 0 {
 			matchingWatchRoots = matchingChangedPathRoots(path, roots)

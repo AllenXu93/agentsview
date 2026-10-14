@@ -114,6 +114,7 @@ func (p *antigravityProvider) Parse(
 			SkipReason:        SkipNoSession,
 		}, nil
 	}
+	applyAntigravityTitle(ctx, sess, src)
 	if req.Fingerprint.Hash != "" {
 		sess.File.Hash = req.Fingerprint.Hash
 	}
@@ -255,7 +256,7 @@ func (s antigravitySourceSet) findSourceFile(root, id string) string {
 }
 
 func (s antigravitySourceSet) WatchPlan(context.Context) (WatchPlan, error) {
-	roots := make([]WatchRoot, 0, len(s.roots)*3)
+	roots := make([]WatchRoot, 0, len(s.roots)*4)
 	for _, root := range s.roots {
 		roots = append(roots,
 			WatchRoot{
@@ -288,6 +289,12 @@ func (s antigravitySourceSet) WatchPlan(context.Context) (WatchPlan, error) {
 				Recursive:    false,
 				IncludeGlobs: []string{"*.db", "*.db-wal", "*.trajectory.json"},
 				DebounceKey:  string(AgentAntigravity) + ":conversations:" + root,
+			},
+			WatchRoot{
+				Path:         root,
+				Recursive:    false,
+				IncludeGlobs: []string{AntigravitySummariesDBName, AntigravitySummariesDBName + "-wal"},
+				DebounceKey:  string(AgentAntigravity) + ":titles:" + root,
 			},
 		)
 	}
@@ -578,6 +585,7 @@ func antigravityProviderCapabilities() Capabilities {
 		Source: source,
 		Content: ContentCapabilities{
 			FirstMessage:         CapabilitySupported,
+			SessionName:          CapabilitySupported,
 			Thinking:             CapabilitySupported,
 			ToolCalls:            CapabilitySupported,
 			ToolResults:          CapabilitySupported,

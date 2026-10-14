@@ -52,7 +52,7 @@ func (im Importer) ImportExtracted(
 	} else {
 		engineStats = engine.SyncAll(ctx, hostProgress(im.Host, im.Progress))
 	}
-	stats.SessionsSynced = engineStats.Synced
+	stats.SessionsSynced = engineStats.Synced + engineStats.TitlesUpdated
 	stats.SessionsTotal = engineStats.TotalSessions
 	stats.Skipped = engineStats.Skipped
 	stats.Failed = engineStats.Failed

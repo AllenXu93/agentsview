@@ -53,6 +53,9 @@ func BuildManifest(ctx context.Context, targets TargetSet) (Manifest, error) {
 		}
 	}
 	add := func(path string, info os.FileInfo) {
+		if _, snapshot := snapshotPaths[filepath.Clean(path)]; snapshot {
+			return
+		}
 		m.Files = append(m.Files, ManifestEntry{
 			Path:    path,
 			Size:    info.Size(),

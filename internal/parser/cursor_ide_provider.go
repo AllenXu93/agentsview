@@ -188,7 +188,7 @@ func cursorIDESQLiteStateHash(dbPath string) (string, error) {
 	}
 	_, _ = h.Write(header[:n])
 	walPath := dbPath + "-wal"
-	if info, err := os.Stat(walPath); err == nil && sqliteWALInfoHasFrames(info) {
+	if info, err := os.Stat(walPath); err == nil && SQLiteWALInfoHasFrames(info) {
 		_, _ = fmt.Fprintf(h, "|wal:%d|", info.Size())
 		if wal, err := os.Open(walPath); err == nil {
 			walHeader := make([]byte, 32)

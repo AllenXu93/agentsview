@@ -85,6 +85,9 @@ type SyncStats struct {
 	// serialized because worker-process passes marshal SyncStats back to the
 	// daemon, which must still emit "sessions" for cwd-only changes.
 	CwdUpdated int `json:"cwd_updated,omitempty"`
+	// TitlesUpdated counts native title changes copied onto stored sessions
+	// without a reparse; workers carry it back so the daemon notifies clients.
+	TitlesUpdated int `json:"titles_updated,omitempty"`
 	// LinksUpdated counts global, scoped, and queued parent-link repairs.
 	// A pending retry can update parent_session_id while the poll's
 	// sync stats and tombstone count stay zero. Workers carry the count back
@@ -143,7 +146,7 @@ func (s *SyncStats) shouldEmitSync() bool {
 }
 
 func (s *SyncStats) hasSessionChanges() bool {
-	return s.Synced > 0 || s.CwdUpdated > 0 || s.Tombstoned > 0 || s.LinksUpdated > 0
+	return s.Synced > 0 || s.CwdUpdated > 0 || s.TitlesUpdated > 0 || s.Tombstoned > 0 || s.LinksUpdated > 0
 }
 
 // AnomalyStats aggregates parser-output anomaly signals observed during a

@@ -32,7 +32,7 @@ var openCodeFamilySQLiteAgents = []parser.AgentType{
 var statSQLiteContainerState = parser.StatSQLiteContainerState
 
 var (
-	openCodeContainerDigestVerifyInterval = 5 * time.Minute
+	openCodeContainerDigestVerifyInterval = parser.SQLiteContainerDigestVerifyInterval
 	openCodeContainerDigestVerifyNow      = time.Now
 )
 

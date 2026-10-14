@@ -1217,7 +1217,8 @@ func hermesStateDBHasSession(ctx context.Context, stateDB string, rawID string) 
 	defer conn.Close()
 
 	var found int
-	err = conn.QueryRowContext(ctx,
+	err = conn.QueryRowContext(
+		ctx,
 		"SELECT 1 FROM sessions WHERE id = ? LIMIT 1",
 		rawID,
 	).Scan(&found)
@@ -1565,7 +1566,7 @@ func hermesArchiveFingerprint(source SourceRef, stateDB string) (SourceFingerpri
 		// mtime into the fingerprint would make the identity computed before a
 		// parse never match the one computed after it, so every subsequent
 		// sync re-parses an unchanged archive. Any real commit adds frames.
-		if sqliteWALInfoHasFrames(walInfo) {
+		if SQLiteWALInfoHasFrames(walInfo) {
 			fingerprint.Size += walInfo.Size()
 			if mtime := walInfo.ModTime().UnixNano(); mtime > fingerprint.MTimeNS {
 				fingerprint.MTimeNS = mtime
@@ -1621,7 +1622,8 @@ func hermesStateMemberFingerprint(
 		return SourceFingerprint{}, hermesStateLookupError{err: fmt.Errorf("open hermes state db: %w", err)}
 	}
 	defer conn.Close()
-	ss, messages, selectedPath, err := readHermesStateSessionSourceConn(ctx,
+	ss, messages, selectedPath, err := readHermesStateSessionSourceConn(
+		ctx,
 		conn, src.StateDB, src.SessionID,
 	)
 	if err != nil {
@@ -1741,7 +1743,8 @@ func seedHermesMemberCoresLocked(ctx context.Context, stateDB string) error {
 func cacheHermesMemberCore(
 	ctx context.Context, conn *sql.DB, stateDB, id, fingerprintKey string,
 ) error {
-	ss, messages, selectedPath, err := readHermesStateSessionSourceConn(ctx,
+	ss, messages, selectedPath, err := readHermesStateSessionSourceConn(
+		ctx,
 		conn, stateDB, id,
 	)
 	if err != nil {
@@ -1853,7 +1856,7 @@ func hermesArchiveEffectiveFileInfo(stateDB string) (int64, int64) {
 	// carries no committed frames; hermesArchiveFingerprint ignores it for the
 	// same reason, and the two aggregations must agree.
 	if walInfo, err := os.Stat(stateDB + "-wal"); err == nil &&
-		sqliteWALInfoHasFrames(walInfo) {
+		SQLiteWALInfoHasFrames(walInfo) {
 		size += walInfo.Size()
 		if walMtime := walInfo.ModTime().UnixNano(); walMtime > mtime {
 			mtime = walMtime

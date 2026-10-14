@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/testjsonl"
 )
 
 func TestAntigravityProviderSourceMethods(t *testing.T) {
@@ -27,7 +28,7 @@ func TestAntigravityProviderSourceMethods(t *testing.T) {
 
 	plan, err := provider.WatchPlan(t.Context())
 	require.NoError(t, err)
-	require.Len(t, plan.Roots, 3)
+	require.Len(t, plan.Roots, 4)
 	assert.Equal(t, filepath.Join(root, "annotations"), plan.Roots[0].Path)
 	assert.False(t, plan.Roots[0].Recursive)
 	assert.Equal(t, filepath.Join(root, "brain"), plan.Roots[1].Path)
@@ -38,6 +39,9 @@ func TestAntigravityProviderSourceMethods(t *testing.T) {
 		"the plaintext transcript directory stays watched")
 	assert.Equal(t, filepath.Join(root, "conversations"), plan.Roots[2].Path)
 	assert.False(t, plan.Roots[2].Recursive)
+	assert.Equal(t, filepath.Clean(root), filepath.Clean(plan.Roots[3].Path))
+	assert.False(t, plan.Roots[3].Recursive)
+	assert.Equal(t, []string{"conversation_summaries.db", "conversation_summaries.db-wal"}, plan.Roots[3].IncludeGlobs)
 
 	discovered, err := provider.Discover(t.Context())
 	require.NoError(t, err)
@@ -72,6 +76,13 @@ func TestAntigravityProviderFingerprintAndParse(t *testing.T) {
 	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	dbPath := filepath.Join(root, "conversations", id+".db")
 	writeAntigravityIDEProviderFixture(t, root, id)
+	titles, err := sql.Open("sqlite3", filepath.Join(root, AntigravitySummariesDBName))
+	require.NoError(t, err)
+	_, err = titles.ExecContext(t.Context(), testjsonl.AntigravityTitleSchema)
+	require.NoError(t, err)
+	_, err = titles.ExecContext(t.Context(), `INSERT INTO conversation_summaries VALUES (?, 'Database conversation')`, id)
+	require.NoError(t, err)
+	require.NoError(t, titles.Close())
 
 	provider, ok := NewProvider(AgentAntigravity, ProviderConfig{
 		Roots:   []string{root},
@@ -111,6 +122,8 @@ func TestAntigravityProviderFingerprintAndParse(t *testing.T) {
 	assert.Equal(t, "devbox", result.Result.Session.Machine)
 	assert.Equal(t, after.Hash, result.Result.Session.File.Hash)
 	assert.Len(t, result.Result.Messages, 3)
+	assert.Equal(t, "Database conversation", result.Result.Session.SessionName)
+	assert.True(t, result.Result.Session.SessionNamePresent)
 }
 
 func TestAntigravityProviderStoredPathFreshness(t *testing.T) {
@@ -208,7 +221,7 @@ func TestAntigravityCLIProviderSourceMethods(t *testing.T) {
 		"the CLI brain root does not read the IDE transcript directory")
 	assert.Equal(t, filepath.Join(root, "conversations"), plan.Roots[1].Path)
 	assert.False(t, plan.Roots[1].Recursive)
-	assert.Equal(t, root, plan.Roots[2].Path)
+	assert.Equal(t, filepath.Clean(root), filepath.Clean(plan.Roots[2].Path))
 	assert.False(t, plan.Roots[2].Recursive)
 	assert.Equal(t, []string{"history.jsonl"}, plan.Roots[2].IncludeGlobs)
 	assert.Equal(t, filepath.Join(root, "cache"), plan.Roots[3].Path)
@@ -987,7 +1000,7 @@ func TestAntigravityProviderRoutesTrajectorySidecar(t *testing.T) {
 
 	plan, err := provider.WatchPlan(t.Context())
 	require.NoError(t, err)
-	require.Len(t, plan.Roots, 3)
+	require.Len(t, plan.Roots, 4)
 	assert.Equal(t, filepath.Join(root, "conversations"), plan.Roots[2].Path)
 	assert.Contains(t, plan.Roots[2].IncludeGlobs, "*.trajectory.json",
 		"conversations watch must include the trajectory sidecar")

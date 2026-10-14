@@ -20,9 +20,8 @@ func TestAntigravityBrainReadFailurePreservesArchive(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-			path := filepath.Join(root, "brain", id, ".system_generated", "logs", "transcript.jsonl")
-			dbtest.WriteTestFile(t, path, []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"keep this archived message"}`+"\n"))
+			const id = dbtest.AntigravityTitleID
+			path := dbtest.WriteAntigravityTitleTranscript(t, root, "keep this archived message")
 			if withDatabase {
 				dbPath := filepath.Join(root, "conversations", id+".db")
 				require.NoError(t, os.MkdirAll(filepath.Dir(dbPath), 0o755))
@@ -61,10 +60,9 @@ func TestAntigravityBrainReadFailurePreservesArchive(t *testing.T) {
 
 func TestAntigravityBrainDatabaseTransitionsKeepOneSession(t *testing.T) {
 	root := t.TempDir()
-	const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	const id = dbtest.AntigravityTitleID
 	const sessionID = "antigravity:" + id
-	path := filepath.Join(root, "brain", id, ".system_generated", "logs", "transcript.jsonl")
-	dbtest.WriteTestFile(t, path, []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"one conversation"}`+"\n"))
+	path := dbtest.WriteAntigravityTitleTranscript(t, root, "one conversation")
 	archive := dbtest.OpenTestDB(t)
 	engine := sync.NewEngine(t.Context(), archive, sync.EngineConfig{
 		AgentDirs: map[parser.AgentType][]string{parser.AgentAntigravity: {root}}, Machine: "host-a",
