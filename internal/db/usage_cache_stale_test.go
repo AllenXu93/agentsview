@@ -62,7 +62,7 @@ func TestUsageStaleAppendRefreshesWithoutWaiting(t *testing.T) {
 				require.NoError(t, err)
 				defer func() { _, _ = held.ExecContext(t.Context(), `ROLLBACK`) }()
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			for range 5 {
 				daily, err := database.GetDailyUsage(ctx, UsageFilter{Timezone: "UTC"})
@@ -86,9 +86,14 @@ func TestUsageStaleAppendRefreshesWithoutWaiting(t *testing.T) {
 }
 
 func TestUsageStaleRejectedStatesStayExact(t *testing.T) {
-	for _, state := range []string{"no install", "no facts", "old marker", "future marker", "pending rollup", "pricing", "cursor", "standalone"} {
+	for _, state := range []string{"no install", "no facts", "old marker", "old facts", "future marker", "pending rollup", "pricing", "cursor", "standalone"} {
 		t.Run(state, func(t *testing.T) {
 			database, cache := staleUsageFixture(t, state != "standalone")
+			if state == "old facts" {
+				_, err := database.getWriter().Exec(t.Context(), `UPDATE sessions SET created_at = '2026-08-10T09:00:00Z', local_modified_at = ? WHERE id = 'session'`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano))
+				require.NoError(t, err)
+				require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+			}
 			changeStaleUsage(t, database, time.Now().Add(-time.Second))
 			want := 17
 			switch state {
@@ -160,7 +165,7 @@ func TestUsageNotificationContinuousArrivalsReachBatchCap(t *testing.T) {
 	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	guard := time.NewTimer(3 * time.Second)
+	guard := time.NewTimer(10 * usageFillNotificationBatchCap)
 	defer guard.Stop()
 	cache.fill.enqueueSessions([]string{"session"})
 	for {

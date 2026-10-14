@@ -22,6 +22,7 @@ const (
 	usageFillInstallBatchSize     = 256
 	usageCursorCopyBatchSize      = 1_000
 	usageFillNotificationDebounce = 100 * time.Millisecond
+	usageFillNotificationBatchCap = time.Second
 	usageFillNotificationCapacity = 1024
 )
 
@@ -1460,7 +1461,7 @@ func (c *usageFillCoordinator) runNotifications() {
 		}
 		c.mu.Unlock()
 		if len(pending) > 0 && timerC == nil {
-			deadline = time.Now().Add(time.Second)
+			deadline = time.Now().Add(usageFillNotificationBatchCap)
 			if timer == nil {
 				timer = time.NewTimer(usageFillNotificationDebounce)
 			} else {
@@ -1476,7 +1477,7 @@ func (c *usageFillCoordinator) runNotifications() {
 			return
 		case notification := <-c.notify:
 			if timerC == nil {
-				deadline = time.Now().Add(time.Second)
+				deadline = time.Now().Add(usageFillNotificationBatchCap)
 			}
 			if notification.cursor {
 				cursorPending = true

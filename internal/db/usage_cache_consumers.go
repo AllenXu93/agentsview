@@ -22,7 +22,6 @@ type usageRollupRequestTimings struct {
 	capture, sweep, fill, read time.Duration
 	rollup                     usageRollupMetrics
 	candidates                 int
-	servedStale                int
 }
 
 func (timings usageRollupRequestTimings) logIfSlow(started time.Time) {
@@ -35,11 +34,11 @@ func (timings usageRollupRequestTimings) logIfSlow(started time.Time) {
 	}
 	log.Printf("usage rollup read took %s: capture %s, deletion sweep %s, "+
 		"fact fill %s, rollup build %s, rollup install %s, cache read %s "+
-		"(%d candidate sessions; served stale %d; built %d daily rows, %d exception rows in %d groups)",
+		"(%d candidate sessions; built %d daily rows, %d exception rows in %d groups)",
 		round(total), round(timings.capture), round(timings.sweep),
 		round(timings.fill), round(timings.rollup.BuildDuration),
 		round(timings.rollup.InstallDuration), round(timings.read),
-		timings.candidates, timings.servedStale, timings.rollup.DailyRows,
+		timings.candidates, timings.rollup.DailyRows,
 		timings.rollup.ExceptionRows, timings.rollup.ExceptionGroups)
 }
 
@@ -73,10 +72,15 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 	var behind []string
 	for _, version := range snapshot.Versions {
 		fill := fills[version.SessionID]
-		if fill.Deleted || !fill.source.Equal(version) && !recent(version.SyncMarker) {
+		if fill.Deleted {
 			return nil, nil, nil
 		}
 		if !fill.source.Equal(version) {
+			installed, err := time.Parse(extractTimeLayout, fill.source.SyncMarker)
+			changed, changedErr := time.Parse(extractTimeLayout, version.SyncMarker)
+			if err != nil || changedErr != nil || !recent(version.SyncMarker) || changed.Sub(installed) > usageRollupStaleServeWindow {
+				return nil, nil, nil
+			}
 			behind = append(behind, version.SessionID)
 		}
 	}
@@ -188,7 +192,6 @@ func (db *DB) queryUsageRollups(
 		}
 		timings.read = time.Since(readStarted)
 		if queryErr == nil {
-			timings.servedStale = len(behind)
 			cache.fill.enqueueSessions(behind)
 			release()
 			timings.logIfSlow(started)

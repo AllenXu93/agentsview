@@ -509,8 +509,10 @@ incompatible, use the same schema and query path in a process-owned temporary
 file and warn that the cache will rebuild after restart.
 
 Standalone usage reads are exact. Daemon-served reads, including the CLI through
-a daemon, may serve the last complete totals and counts when every lagging
-session's marker is within 10 seconds of now. Future markers are ineligible.
+a daemon, may serve totals and counts from the same installed set when every
+lagging session's archive marker is within 10 seconds of now and within 10 seconds
+of its cached facts' marker. Future markers are ineligible. A brand-new session
+with no cached facts takes the exact path.
 Every install must match current cached facts, baked metadata, pricing and Cursor
 coverage; otherwise the whole request takes the exact path. The request queues
 lagging sessions in the existing worker. Ten seconds is an eligibility window,

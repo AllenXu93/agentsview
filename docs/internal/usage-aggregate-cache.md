@@ -104,8 +104,9 @@ An aggregate request:
    high-water mark, and requested timezone;
 1. closes the archive snapshot before acquiring cache write locks;
 1. opens the generation named by cache format and archive database ID;
-1. serves complete installed totals and counts for daemon reads when installs
-   match cached facts and only sessions changed within 10 seconds await refresh,
+1. serves totals and counts from the same installed set for daemon reads when
+   installs match cached facts and every lagging session's archive marker is
+   within 10 seconds of now and within 10 seconds of its cached facts' marker,
    then queues those sessions; otherwise fills facts and builds timezone rollups;
 1. rechecks source fingerprints and baked metadata before installing; and
 1. verifies all required installs inside one pinned cache read transaction
@@ -122,7 +123,8 @@ complete source fingerprint after extraction rather than ordering marker values.
 A hard-deleted session is dropped as newer state. Other moving-source or
 archive-busy races retry at most three times, then fail instead of returning
 stale usage on the exact path. Standalone CLI reads stay exact; CLI reads through
-a daemon share its eligibility window. Ten seconds is not a freshness bound.
+a daemon share its eligibility window. A brand-new session with no cached facts
+takes the exact path. Ten seconds is not a freshness bound.
 
 Request cancellation detaches the waiter from shared fill work. The fill keeps
 running so retry storms converge. `cached_at` is diagnostic only.
