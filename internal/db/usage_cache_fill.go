@@ -1453,6 +1453,18 @@ func (c *usageFillCoordinator) processNotificationBatch(
 	if c.observer.afterNotificationBatch != nil {
 		defer c.observer.afterNotificationBatch()
 	}
+	if cursorPending {
+		var target int64
+		err := c.archive.getReader().QueryRowContext(c.ctx,
+			`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`,
+		).Scan(&target)
+		if err == nil && target > 0 {
+			_, err = c.Ensure(c.ctx, nil, target)
+		}
+		if err != nil && c.ctx.Err() == nil {
+			log.Printf("usage cache Cursor notification fill: %v", err)
+		}
+	}
 	if len(pending) > 0 {
 		ids := make([]string, 0, len(pending))
 		for id := range pending {
@@ -1491,18 +1503,6 @@ func (c *usageFillCoordinator) processNotificationBatch(
 				}
 				c.archive.refreshUsageRollups(c.ctx, c.cache, fills)
 			}
-		}
-	}
-	if cursorPending {
-		var target int64
-		err := c.archive.getReader().QueryRowContext(c.ctx,
-			`SELECT COALESCE(MAX(id), 0) FROM cursor_usage_events`,
-		).Scan(&target)
-		if err == nil && target > 0 {
-			_, err = c.Ensure(c.ctx, nil, target)
-		}
-		if err != nil && c.ctx.Err() == nil {
-			log.Printf("usage cache Cursor notification fill: %v", err)
 		}
 	}
 }

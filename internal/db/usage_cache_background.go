@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"runtime"
 	"slices"
 	"sort"
@@ -580,10 +581,16 @@ func (db *DB) refreshUsageRollups(ctx context.Context, cache *usageCache, fills 
 			if err != nil {
 				return err
 			}
-			_, err = ensureUsageRollupsAcross(ctx, cache, snapshot, fills, export.NewPricingResolver(snapshot.PricingRows), locations)
+			chunkFills := make(map[string]usageFillResult, len(chunk))
+			for _, id := range chunk {
+				chunkFills[id] = fills[id]
+			}
+			_, err = ensureUsageRollupsAcross(ctx, cache, snapshot, chunkFills, export.NewPricingResolver(snapshot.PricingRows), locations)
 			return err
 		}()
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errUsageCacheSourceChanged) {
+		if errors.Is(err, errUsageCacheSourceChanged) {
+			slog.DebugContext(ctx, "usage cache notification rollups", "error", err)
+		} else if err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("usage cache notification rollups: %v", err)
 		}
 	}

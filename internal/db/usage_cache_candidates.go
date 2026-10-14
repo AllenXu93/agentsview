@@ -122,6 +122,7 @@ func (db *DB) captureUsageQuery(
 }
 
 func (db *DB) captureUsageSessions(ctx context.Context, ids []string) (usageQuerySnapshot, error) {
+	// Rollups use committed fills' source versions, so metadata capture skips usage-event fingerprints.
 	return db.captureUsageSnapshot(ctx, UsageFilter{}, func(ctx context.Context, tx *sql.Tx, snapshot *usageQuerySnapshot) error {
 		return loadUsageSnapshotSessions(ctx, tx, ids, UsageFilter{}, snapshot)
 	})

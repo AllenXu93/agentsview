@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -202,6 +203,7 @@ type usageRollupCall struct {
 
 type usageRollupObserver struct {
 	beforeEnsure  func()
+	beforeAttempt func(map[string]usageFillResult)
 	beforeInstall func([]usageRollupBuild)
 }
 
@@ -286,12 +288,7 @@ func (c *usageRollupCoordinator) ensureNow(
 	}
 	defer conn.Close()
 	var metrics usageRollupMetrics
-	currentFills := make(map[string]usageFillResult, len(snapshot.Versions))
-	for _, version := range snapshot.Versions {
-		if fill, ok := fills[version.SessionID]; ok {
-			currentFills[version.SessionID] = fill
-		}
-	}
+	currentFills := maps.Clone(fills)
 	// A concurrent fill can replace a session's facts or add a sibling to a
 	// dedup identity this build finalized. The install transaction rejects
 	// both races. Refresh committed facts before the next attempt instead of
@@ -328,6 +325,9 @@ func (c *usageRollupCoordinator) ensureAttempt(
 	snapshot usageQuerySnapshot, fills map[string]usageFillResult,
 	pricing *usagePricingIdentities,
 ) (map[string]usageRollupInstall, bool, usageRollupMetrics, error) {
+	if c.observer.beforeAttempt != nil {
+		c.observer.beforeAttempt(fills)
+	}
 	installs, stale, err := readUsageRollupInstalls(
 		ctx, conn, identity, snapshot, fills, pricing)
 	if err != nil || len(stale) == 0 {
