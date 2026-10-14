@@ -56,9 +56,8 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 			if !state.source.Equal(version) && now.Sub(state.since) >= usageRollupStaleServeWindow {
 				cache.fill.mu.Unlock()
 				return nil, nil, nil
-			} else {
-				anyRecent = true
 			}
+			anyRecent = true
 		}
 		anyRecent = anyRecent || recent(version.SyncMarker)
 	}

@@ -131,11 +131,14 @@ func (c *usageFillCoordinator) Ensure(
 		if err != nil {
 			return nil, err
 		}
-		c.staleSourceEligible(ctx, version, cached)
 		if ok && cached.source.Equal(version) {
+			c.mu.Lock()
+			c.observeStaleFillLocked(version.SessionID, cached)
+			c.mu.Unlock()
 			results[version.SessionID] = cached
 			continue
 		}
+		c.staleSourceEligible(ctx, version, cached)
 
 		c.mu.Lock()
 		key := usageFillCallKey(version)
@@ -341,11 +344,14 @@ func (c *usageFillCoordinator) FillBackground(
 		if err != nil {
 			return nil, err
 		}
-		c.staleSourceEligible(ctx, version, cached)
 		if ok && cached.source.Equal(version) {
+			c.mu.Lock()
+			c.observeStaleFillLocked(version.SessionID, cached)
+			c.mu.Unlock()
 			results[version.SessionID] = cached
 			continue
 		}
+		c.staleSourceEligible(ctx, version, cached)
 		pending = append(pending, version)
 	}
 	installed, err := c.fillSessionsDetached(ctx, pending)
