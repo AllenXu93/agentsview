@@ -331,3 +331,46 @@ func TestUsageNotificationRefreshChunks(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageNotificationLargeBurstBoundsOverflow(t *testing.T) {
+	for _, count := range []int{4096, 20000} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			database := testDB(t)
+			seedLiveWriteSession(t, database, "session", "project", "2026-08-10T09:00:00Z", 0, 10)
+			require.Equal(t, 10, liveWriteDailyInput(t, database, "project"))
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{}, usageQueryKindToken)
+			require.NoError(t, err)
+			cache, err := database.usageCache.Generation(t.Context(), snapshot.DatabaseID)
+			require.NoError(t, err)
+			blocked, release, drained := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			defer close(release)
+			var leases atomic.Int32
+			database.SetUsageCacheNotificationWork(func() (func(), bool) {
+				leases.Add(1)
+				return func() { close(drained) }, true
+			})
+			var paused atomic.Bool
+			cache.fill.observer.afterNotificationBatch = func() {
+				if !paused.Swap(true) {
+					close(blocked)
+					<-release
+				}
+			}
+			database.usageCache.NotifySessions([]string{"missing"})
+			waitUsageNotification(t, blocked)
+			ids := make([]string, count)
+			for i := range ids {
+				ids[i] = "missing-" + strconv.Itoa(i)
+			}
+			database.usageCache.NotifySessions(ids)
+			appendLiveWriteMessage(t, database, "session", "2026-08-10T10:00:00Z", 1, 7)
+			cache.fill.mu.Lock()
+			assert.Len(t, cache.fill.overflow, 1024, "burst retained an unbounded overflow")
+			cache.fill.mu.Unlock()
+			assert.EqualValues(t, 1, leases.Load(), "overflow acquired a second lease while a batch was in flight")
+			release <- struct{}{}
+			waitUsageNotification(t, drained)
+			assert.Equal(t, 17, liveWriteDailyInput(t, database, "project"), "request lost usage dropped beyond the overflow cap")
+		})
+	}
+}

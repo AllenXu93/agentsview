@@ -22,6 +22,7 @@ const (
 	usageFillInstallBatchSize     = 256
 	usageCursorCopyBatchSize      = 1_000
 	usageFillNotificationDebounce = 100 * time.Millisecond
+	usageFillNotificationCapacity = 1024
 )
 
 var errUsageCacheSourceChanged = errors.New("usage cache source archive changed")
@@ -72,6 +73,8 @@ type usageFillCoordinator struct {
 	notify       chan usageFillNotification
 	overflow     map[string]bool
 	done         chan struct{}
+
+	notificationDone func()
 }
 
 type usageFillNotification struct {
@@ -86,7 +89,7 @@ func newUsageFillCoordinator(
 	c := &usageFillCoordinator{
 		archive: archive, cache: cache, ctx: ctx, cancel: cancel,
 		calls:  make(map[string]*usageFillCall),
-		notify: make(chan usageFillNotification, 1024),
+		notify: make(chan usageFillNotification, usageFillNotificationCapacity),
 		done:   make(chan struct{}),
 	}
 	go c.runNotifications()
@@ -1355,15 +1358,42 @@ func (c *usageFillCoordinator) enqueueSessions(ids []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, id := range ids {
+		if id == "" || !c.beginNotificationWork() {
+			continue
+		}
 		select {
 		case c.notify <- usageFillNotification{sessionID: id}:
 		default:
+			if len(c.overflow) >= usageFillNotificationCapacity {
+				continue
+			}
 			if c.overflow == nil {
 				c.overflow = make(map[string]bool)
 			}
 			c.overflow[id] = true
 		}
 	}
+}
+
+// Called with c.mu held so enqueue and drain cannot split a work lease.
+func (c *usageFillCoordinator) beginNotificationWork() bool {
+	if c.ctx.Err() != nil {
+		return false
+	}
+	if c.notificationDone != nil {
+		return true
+	}
+	c.archive.usageBackfillMu.Lock()
+	begin := c.archive.usageNotifyWork
+	c.archive.usageBackfillMu.Unlock()
+	if begin == nil {
+		return true
+	}
+	done, ok := begin()
+	if ok {
+		c.notificationDone = done
+	}
+	return ok
 }
 
 func (m *usageCacheManager) NotifyCursorUsage() {
@@ -1376,10 +1406,16 @@ func (m *usageCacheManager) NotifyCursorUsage() {
 	}
 	m.mu.Unlock()
 	for _, coordinator := range coordinators {
+		coordinator.mu.Lock()
+		if !coordinator.beginNotificationWork() {
+			coordinator.mu.Unlock()
+			continue
+		}
 		select {
 		case coordinator.notify <- usageFillNotification{cursor: true}:
 		default:
 		}
+		coordinator.mu.Unlock()
 	}
 }
 
@@ -1397,14 +1433,30 @@ func (db *DB) notifyCursorUsage() {
 
 func (c *usageFillCoordinator) runNotifications() {
 	defer close(c.done)
+	defer func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.notificationDone != nil {
+			c.notificationDone()
+			c.notificationDone = nil
+		}
+	}()
 	pending := make(map[string]bool)
 	var cursorPending bool
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
 		c.mu.Lock()
-		maps.Copy(pending, c.overflow)
+		for id := range c.overflow {
+			if len(pending) < 2*usageFillNotificationCapacity {
+				pending[id] = true
+			}
+		}
 		clear(c.overflow)
+		if len(pending) == 0 && !cursorPending && len(c.notify) == 0 && c.notificationDone != nil {
+			c.notificationDone()
+			c.notificationDone = nil
+		}
 		c.mu.Unlock()
 		if len(pending) > 0 && timerC == nil {
 			if timer == nil {
@@ -1423,7 +1475,7 @@ func (c *usageFillCoordinator) runNotifications() {
 		case notification := <-c.notify:
 			if notification.cursor {
 				cursorPending = true
-			} else if notification.sessionID != "" {
+			} else if notification.sessionID != "" && len(pending) < 2*usageFillNotificationCapacity {
 				pending[notification.sessionID] = true
 			}
 			if timer == nil {

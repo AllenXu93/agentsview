@@ -716,12 +716,14 @@ type usageCacheBackfiller interface {
 	StartUsageCacheBackfill(context.Context) error
 	WaitUsageCacheBackfill(context.Context) error
 	SetUsageCacheBackfillStarted(func())
+	SetUsageCacheNotificationWork(func() (func(), bool))
 }
 
 func startDaemonUsageCacheBackfill(
 	ctx context.Context, backfiller usageCacheBackfiller,
 	idleTracker *server.IdleTracker,
 ) {
+	backfiller.SetUsageCacheNotificationWork(idleTracker.BeginWork)
 	backfiller.SetUsageCacheBackfillStarted(func() {
 		done, ok := idleTracker.BeginWork()
 		if !ok {

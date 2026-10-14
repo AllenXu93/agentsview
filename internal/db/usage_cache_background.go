@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"log/slog"
 	"runtime"
 	"slices"
 	"sort"
@@ -99,6 +98,13 @@ func (db *DB) SetUsageCacheBackfillStarted(started func()) {
 	if active && started != nil {
 		started()
 	}
+}
+
+// SetUsageCacheNotificationWork connects queued rebuilds to daemon idle tracking.
+func (db *DB) SetUsageCacheNotificationWork(begin func() (func(), bool)) {
+	db.usageBackfillMu.Lock()
+	db.usageNotifyWork = begin
+	db.usageBackfillMu.Unlock()
 }
 
 // WaitUsageCacheBackfill waits for the current pass, if any.
@@ -588,9 +594,7 @@ func (db *DB) refreshUsageRollups(ctx context.Context, cache *usageCache, fills 
 			_, err = ensureUsageRollupsAcross(ctx, cache, snapshot, chunkFills, export.NewPricingResolver(snapshot.PricingRows), locations)
 			return err
 		}()
-		if errors.Is(err, errUsageCacheSourceChanged) {
-			slog.DebugContext(ctx, "usage cache notification rollups", "error", err)
-		} else if err != nil && !errors.Is(err, context.Canceled) {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("usage cache notification rollups: %v", err)
 		}
 	}
