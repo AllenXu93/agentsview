@@ -363,13 +363,14 @@ query.
 
 On large archives, aggregate usage reads are served from a local cache of daily
 totals. Daemon-served reads, including CLI reads through a daemon, may return
-totals and counts from the same installed set while only sessions changed within
-10 seconds await fact refresh. Each lagging session's archive marker must also be
-within 10 seconds of its cached facts' marker. A brand-new session with no cached
-facts takes the exact path. Ten seconds is an eligibility window, not a freshness
-bound. A standalone CLI run stays exact. The first query after an install,
-upgrade, or cache deletion is slower while that cache builds; subsequent queries
-are fast.
+totals and counts from the same installed set for up to 10 seconds after the
+daemon first observes those cached facts becoming stale. A recent change starts
+the window, including when a session resumes after a long idle period. Further
+changes leave the deadline unchanged until the facts refresh. A slow or failed
+refresh forces the next request to refresh after that window. A brand-new session
+with no cached facts takes the exact path. A standalone CLI run stays exact.
+The first query after an install, upgrade, or cache deletion is slower while
+that cache builds; subsequent queries are fast.
 
 ## How Costs Are Computed
 

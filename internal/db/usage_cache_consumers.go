@@ -43,16 +43,28 @@ func (timings usageRollupRequestTimings) logIfSlow(started time.Time) {
 }
 
 func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usageQuerySnapshot, resolver *export.PricingResolver) (map[string]usageRollupInstall, []string, error) {
-	now := time.Now()
+	now := cache.fill.now()
 	recent := func(marker string) bool {
 		changed, err := time.Parse(extractTimeLayout, marker)
 		age := now.Sub(changed)
 		return err == nil && age >= 0 && age <= usageRollupStaleServeWindow
 	}
 	anyRecent := false
+	cache.fill.mu.Lock()
 	for _, version := range snapshot.Versions {
+		if state, ok := cache.fill.stale[version.SessionID]; ok {
+			if state.source.Equal(version) {
+				delete(cache.fill.stale, version.SessionID)
+			} else if now.Sub(state.since) >= usageRollupStaleServeWindow {
+				cache.fill.mu.Unlock()
+				return nil, nil, nil
+			} else {
+				anyRecent = true
+			}
+		}
 		anyRecent = anyRecent || recent(version.SyncMarker)
 	}
+	cache.fill.mu.Unlock()
 	if !anyRecent {
 		return nil, nil, nil
 	}
@@ -65,21 +77,20 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 		return nil, nil, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
-	fills, err := readCurrentUsageFillResults(ctx, conn, snapshot.Versions)
-	if err != nil {
-		return nil, nil, err
-	}
+	fills := make(map[string]usageFillResult, len(snapshot.Versions))
 	var behind []string
 	for _, version := range snapshot.Versions {
-		fill := fills[version.SessionID]
+		fill, err := readCurrentUsageFillResult(ctx, conn, version.SessionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		fills[version.SessionID] = fill
 		if fill.Deleted {
 			return nil, nil, nil
 		}
+		eligible := cache.fill.staleSourceEligible(version, fill)
 		if !fill.source.Equal(version) {
-			installed, err := time.Parse(extractTimeLayout, fill.source.SyncMarker)
-			changed, changedErr := time.Parse(extractTimeLayout, version.SyncMarker)
-			gap := changed.Sub(installed)
-			if err != nil || changedErr != nil || !recent(version.SyncMarker) || installed.After(now) || gap < -usageRollupStaleServeWindow || gap > usageRollupStaleServeWindow {
+			if !eligible {
 				return nil, nil, nil
 			}
 			behind = append(behind, version.SessionID)
@@ -90,6 +101,36 @@ func (cache *usageCache) installedUsageRollups(ctx context.Context, snapshot usa
 		return nil, nil, err
 	}
 	return installs, behind, nil
+}
+
+func (c *usageFillCoordinator) staleSourceEligible(version usageSourceVersion, fill usageFillResult) bool {
+	if !c.archive.isUsageBackfillEnabled() {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if fill.Deleted || fill.source.SyncMarker == "" || fill.source.Equal(version) {
+		delete(c.stale, version.SessionID)
+		return false
+	}
+	now := c.now()
+	state, exists := c.stale[version.SessionID]
+	if !exists || !state.source.Equal(fill.source) {
+		delete(c.stale, version.SessionID)
+		changed, err := time.Parse(extractTimeLayout, version.SyncMarker)
+		installed, installedErr := time.Parse(extractTimeLayout, fill.source.SyncMarker)
+		age := now.Sub(changed)
+		if err != nil || installedErr != nil || installed.After(now) || age < 0 || age > usageRollupStaleServeWindow {
+			return false
+		}
+		// Keep expired versions until refill so later appends cannot restart their window.
+		if len(c.stale) >= usageFillNotificationCapacity {
+			return false
+		}
+		state = usageStaleSource{source: fill.source, since: now}
+		c.stale[version.SessionID] = state
+	}
+	return now.Sub(state.since) < usageRollupStaleServeWindow
 }
 
 func (db *DB) queryUsageRollups(
@@ -140,7 +181,7 @@ func (db *DB) queryUsageRollups(
 		resolver := export.NewPricingResolver(snapshot.PricingRows)
 		var installs map[string]usageRollupInstall
 		var behind []string
-		if db.isUsageBackfillEnabled() {
+		if db.isUsageBackfillEnabled() && !filter.RequireFresh {
 			var staleErr error
 			installs, behind, staleErr = cache.installedUsageRollups(ctx, snapshot, resolver)
 			if staleErr != nil {

@@ -453,6 +453,7 @@ func (s *Server) buildCannedPayload(
 		ActiveSince:     filters.ActiveSince,
 		Termination:     filters.Termination,
 		Breakdowns:      false,
+		RequireFresh:    true,
 	}
 	usageResult, err := s.db.GetDailyUsage(ctx, usageFilter)
 	if err != nil {

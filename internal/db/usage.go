@@ -99,6 +99,7 @@ type UsageFilter struct {
 	Termination        string // "", "clean", "unclean", "active", or "stale"
 	Breakdowns         bool   // populate Project/AgentBreakdowns per day
 	SkipSessionCounts  bool   // skip distinct session counts when callers do not need them
+	RequireFresh       bool   // refresh changed facts before serving daemon reads
 	TopSessionsByGroup bool   // merge runs by project and group before ranking
 	// TopSessionsSort ranks GetTopSessionsByCost results: ""/"cost"
 	// (default) or "tokens". Ignored by other usage queries.

@@ -176,6 +176,8 @@ func staleUsageFixture(t *testing.T, daemon bool) (*DB, *usageCache) {
 		require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
 	}
 	_, _, cache := prepareUsageRollupTest(t, database)
+	now := time.Now().Add(time.Hour)
+	cache.fill.now = func() time.Time { return now }
 	return database, cache
 }
 
@@ -187,7 +189,7 @@ func changeStaleUsage(t *testing.T, database *DB, marker time.Time) {
 
 func TestUsageNotificationContinuousArrivalsReachBatchCap(t *testing.T) {
 	database, cache := staleUsageFixture(t, true)
-	changeStaleUsage(t, database, time.Now().Add(-time.Second))
+	changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
 	batches := make(chan struct{}, 16)
 	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 	ticker := time.NewTicker(10 * time.Millisecond)

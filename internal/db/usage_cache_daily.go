@@ -20,7 +20,7 @@ type usageDailyFactsSessionCost struct {
 	authoritative *money.Money
 }
 
-// GetDailyUsage serves exact daily usage from timezone rollups. Archive state
+// GetDailyUsage serves daily usage from timezone rollups. Archive state
 // is captured first, missing facts and rollups are built without holding that
 // snapshot, and one cache read transaction verifies the installed rows.
 func (db *DB) GetDailyUsage(

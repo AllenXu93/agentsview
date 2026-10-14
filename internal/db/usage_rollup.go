@@ -421,23 +421,27 @@ func readCurrentUsageFillResults(
 ) (map[string]usageFillResult, error) {
 	results := make(map[string]usageFillResult, len(versions))
 	for _, version := range versions {
-		var result usageFillResult
-		err := conn.QueryRowContext(ctx, `SELECT source_sync_marker,
-			source_transcript_rev, usage_event_fingerprint, install_revision
-			FROM usage_cached_sessions WHERE session_id = ?`, version.SessionID).Scan(
-			&result.source.SyncMarker, &result.source.TranscriptRevision,
-			&result.source.UsageEventFingerprint, &result.InstallRevision)
-		if errors.Is(err, sql.ErrNoRows) {
-			results[version.SessionID] = usageFillResult{Deleted: true}
-			continue
-		}
+		result, err := readCurrentUsageFillResult(ctx, conn, version.SessionID)
 		if err != nil {
 			return nil, err
 		}
-		result.source.SessionID = version.SessionID
 		results[version.SessionID] = result
 	}
 	return results, nil
+}
+
+func readCurrentUsageFillResult(ctx context.Context, conn *sql.Conn, sessionID string) (usageFillResult, error) {
+	var result usageFillResult
+	err := conn.QueryRowContext(ctx, `SELECT source_sync_marker,
+		source_transcript_rev, usage_event_fingerprint, install_revision
+		FROM usage_cached_sessions WHERE session_id = ?`, sessionID).Scan(
+		&result.source.SyncMarker, &result.source.TranscriptRevision,
+		&result.source.UsageEventFingerprint, &result.InstallRevision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return usageFillResult{Deleted: true}, nil
+	}
+	result.source.SessionID = sessionID
+	return result, err
 }
 
 func readUsageRollupInstalls(

@@ -74,8 +74,15 @@ type usageFillCoordinator struct {
 	notify       chan usageFillNotification
 	overflow     map[string]bool
 	done         chan struct{}
+	now          func() time.Time
+	stale        map[string]usageStaleSource
 
 	notificationDone func()
+}
+
+type usageStaleSource struct {
+	source usageSourceVersion
+	since  time.Time
 }
 
 type usageFillNotification struct {
@@ -92,6 +99,8 @@ func newUsageFillCoordinator(
 		calls:  make(map[string]*usageFillCall),
 		notify: make(chan usageFillNotification, usageFillNotificationCapacity),
 		done:   make(chan struct{}),
+		now:    time.Now,
+		stale:  make(map[string]usageStaleSource),
 	}
 	go c.runNotifications()
 	return c
@@ -119,6 +128,7 @@ func (c *usageFillCoordinator) Ensure(
 		if err != nil {
 			return nil, err
 		}
+		c.staleSourceEligible(version, cached)
 		if ok && cached.source.Equal(version) {
 			results[version.SessionID] = cached
 			continue
@@ -328,6 +338,7 @@ func (c *usageFillCoordinator) FillBackground(
 		if err != nil {
 			return nil, err
 		}
+		c.staleSourceEligible(version, cached)
 		if ok && cached.source.Equal(version) {
 			results[version.SessionID] = cached
 			continue
@@ -869,6 +880,13 @@ func (c *usageFillCoordinator) installSpoolBatch(
 		return nil, nil, fmt.Errorf("committing usage cache fill: %w", err)
 	}
 	committed = true
+	c.mu.Lock()
+	for id, result := range results {
+		if state, ok := c.stale[id]; ok && (result.Deleted || !state.source.Equal(result.source)) {
+			delete(c.stale, id)
+		}
+	}
+	c.mu.Unlock()
 	c.requeueSessions(sharers)
 	return results, lost, nil
 }
@@ -1611,6 +1629,11 @@ func (c *usageFillCoordinator) deleteNotificationSessions(ids []string) error {
 		return fmt.Errorf("committing usage cache session delete: %w", err)
 	}
 	committed = true
+	c.mu.Lock()
+	for _, id := range ids {
+		delete(c.stale, id)
+	}
+	c.mu.Unlock()
 	c.requeueSessions(sharers)
 	return nil
 }

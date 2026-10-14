@@ -509,16 +509,19 @@ incompatible, use the same schema and query path in a process-owned temporary
 file and warn that the cache will rebuild after restart.
 
 Standalone usage reads are exact. Daemon-served reads, including the CLI through
-a daemon, may serve totals and counts from the same installed set when every
-lagging session's archive marker is within 10 seconds of now and within 10 seconds
-of its cached facts' marker. Future markers are ineligible. A brand-new session
-with no cached facts takes the exact path.
+a daemon, may serve totals and counts from the same installed set for 10 seconds
+after the daemon first observes an installed source version becoming stale.
+A recent archive marker starts the window, even after a long idle period.
+Further appends leave its deadline unchanged; a refill clears the tracked version.
+Future markers are ineligible. A brand-new session with no cached facts takes
+the exact path.
 Every install must match current cached facts, baked metadata, pricing and Cursor
 coverage; otherwise the whole request takes the exact path. The request queues
-lagging sessions in the existing worker. Ten seconds is an eligibility window,
-not a freshness bound. A cold aggregate request fills facts, builds the required
-timezone rollups, then reads them in one pinned cache transaction. Verify every
-candidate session's facts fingerprint, exact baked metadata, per-session pricing
+lagging sessions in the existing worker. An expired window forces a foreground
+refresh, including when the worker is slow or fails. A cold aggregate request
+fills facts, builds the required timezone rollups, then reads them in one pinned
+cache transaction. Verify every candidate session's facts fingerprint, exact
+baked metadata, per-session pricing
 identity, resolved rate hashes, and Cursor high-water mark. An exact result is no older
 than the archive snapshot captured when the read began, and may be newer for a
 session whose facts were refilled meanwhile. A session confirmed deleted during
