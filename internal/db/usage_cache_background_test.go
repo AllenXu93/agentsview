@@ -147,8 +147,6 @@ func TestUsageCacheBackfillPublishesStableCoverageWhileNewestSessionChanges(
 	require.NoError(t, err)
 	var mutations atomic.Int32
 	var mutationErr atomic.Value
-	batches := make(chan struct{}, 16)
-	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 	cache.rollup.observer.beforeEnsure = func() {
 		mutation := mutations.Add(1)
 		usage := fmt.Sprintf(`{"input_tokens":%d}`, 1+mutation)
@@ -179,16 +177,10 @@ func TestUsageCacheBackfillPublishesStableCoverageWhileNewestSessionChanges(
 	assert.NotEmpty(t, metadata[usageCacheMetadataBackfillCompletedAt])
 	filter := UsageFilter{
 		From: "2026-08-01", To: "2026-08-01", Timezone: "UTC",
-		SkipSessionCounts: true,
+		SkipSessionCounts: true, RequireFresh: true,
 	}
 	want := usageCacheBackfillBatchSize + int(mutations.Load()) + 1
 	daily, err := database.GetDailyUsage(t.Context(), filter)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, daily.Totals.InputTokens, usageCacheBackfillBatchSize+1)
-	assert.LessOrEqual(t, daily.Totals.InputTokens, want)
-	cache.fill.enqueueSessions([]string{newestID})
-	waitUsageNotification(t, batches)
-	daily, err = database.GetDailyUsage(t.Context(), filter)
 	require.NoError(t, err)
 	assert.Equal(t, want, daily.Totals.InputTokens)
 }

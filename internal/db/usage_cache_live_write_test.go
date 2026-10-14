@@ -137,8 +137,6 @@ func TestUsageCacheBackfillCompletesUnderConcurrentArchiveWrites(t *testing.T) {
 	}
 	cache.fill.observer.afterExtract = func([]usageSourceVersion) { churn() }
 	cache.rollup.observer.beforeEnsure = churn
-	batches := make(chan struct{}, 16)
-	cache.fill.observer.afterNotificationBatch = func() { batches <- struct{}{} }
 
 	require.NoError(t, database.StartUsageCacheBackfill(t.Context()))
 	require.NoError(t, database.WaitUsageCacheBackfill(t.Context()))
@@ -149,12 +147,12 @@ func TestUsageCacheBackfillCompletesUnderConcurrentArchiveWrites(t *testing.T) {
 
 	cache.fill.observer.afterExtract = nil
 	cache.rollup.observer.beforeEnsure = nil
-	initial := liveWriteDailyInput(t, database, "project")
-	assert.GreaterOrEqual(t, initial, 4)
-	assert.LessOrEqual(t, initial, 4+written)
-	cache.fill.enqueueSessions([]string{"churn-0"})
-	waitUsageNotification(t, batches)
-	assert.Equal(t, 4+written, liveWriteDailyInput(t, database, "project"))
+	daily, err := database.GetDailyUsage(t.Context(), UsageFilter{
+		From: "2026-08-10", To: "2026-08-10", Timezone: "UTC",
+		Project: "project", SkipSessionCounts: true, RequireFresh: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4+written, daily.Totals.InputTokens)
 }
 
 func waitUsageNotification(t *testing.T, batches <-chan struct{}) {
