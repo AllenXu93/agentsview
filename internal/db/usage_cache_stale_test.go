@@ -470,8 +470,11 @@ func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	_, err = cache.db.ExecContext(t.Context(), `DELETE FROM usage_rollup_installs WHERE session_id = 'b'`)
 	require.NoError(t, err)
 	cache.fill.processNotificationBatch(map[string]bool{"b": true}, false)
-	release := make(chan struct{})
-	cache.fill.observer.beforeExtract = func([]usageSourceVersion) { <-release }
+	started, release := make(chan struct{}, 16), make(chan struct{})
+	cache.fill.observer.beforeExtract = func([]usageSourceVersion) {
+		started <- struct{}{}
+		<-release
+	}
 	t.Cleanup(func() {
 		select {
 		case <-release:
@@ -485,6 +488,7 @@ func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	cache.rollup.observer.beforeEnsure = func() { builds.Add(1) }
 	daily, err = database.GetDailyUsage(t.Context(), filter)
 	require.NoError(t, err)
+	waitUsageNotification(t, started)
 	assert.Equal(t, 20, daily.Totals.OutputTokens)
 	assert.Zero(t, builds.Load())
 	close(release)
