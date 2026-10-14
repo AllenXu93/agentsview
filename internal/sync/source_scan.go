@@ -479,7 +479,7 @@ func (s *sourceScanner) compact(root *sourceScanRoot, prune bool) {
 			rows = slices.Clone(rows)
 		}
 		records.rows = rows
-		records.added = nil
+		records.added = []sourceScanRow{}
 		records.seen = make([]uint64, (len(rows)+63)/64)
 	}
 }
