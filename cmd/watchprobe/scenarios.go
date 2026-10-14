@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"go.kenn.io/kit/atomicfile"
 )
 
 // lifecycle uses explicit source notices; native delivery is measured separately.
@@ -25,7 +27,7 @@ func (p *probe) lifecycle(ctx context.Context, unit int, target string, checks m
 	if err = os.Chtimes(replacement, stamp, stamp); err != nil {
 		return total, err
 	}
-	if err = os.Rename(replacement, target); err != nil {
+	if err = atomicfile.Replace(replacement, target); err != nil {
 		return total, err
 	}
 	after, err := freshSignature(target)
@@ -39,7 +41,7 @@ func (p *probe) lifecycle(ctx context.Context, unit int, target string, checks m
 	}
 	checks["replacement_identity"] = before.IdentityKnown && after.IdentityKnown && before.Identity != after.Identity && before.Size == after.Size && p.lastHash == sha256.Sum256(content)
 	renamed := filepath.Join(filepath.Dir(target), "renamed.jsonl")
-	if err = os.Rename(target, renamed); err != nil {
+	if err = atomicfile.RenameNoReplace(target, renamed); err != nil {
 		return total, err
 	}
 	s, err = p.check(ctx, unit, target)
