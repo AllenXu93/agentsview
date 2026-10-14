@@ -117,11 +117,11 @@ func (c *usageFillCoordinator) observeStaleFillLocked(id string, fill usageFillR
 	}
 }
 
-func (c *usageFillCoordinator) reconcileStaleDeletions(ctx context.Context, revision int64) error {
+func (c *usageFillCoordinator) reconcileStaleDeletions(ctx context.Context, revision int64) {
 	c.mu.Lock()
 	if revision <= c.staleDeletionRevision {
 		c.mu.Unlock()
-		return nil
+		return
 	}
 	ids := make([]string, 0, len(c.stale))
 	fills := make(map[string]usageFillResult, len(c.stale))
@@ -151,7 +151,8 @@ func (c *usageFillCoordinator) reconcileStaleDeletions(ctx context.Context, revi
 		}
 		return rows.Err()
 	}); err != nil {
-		return err
+		log.Printf("reconciling stale usage windows: %v", err)
+		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -160,7 +161,6 @@ func (c *usageFillCoordinator) reconcileStaleDeletions(ctx context.Context, revi
 	}
 	// Keep the pre-snapshot watermark so later deletions trigger another reconciliation.
 	c.staleDeletionRevision = max(c.staleDeletionRevision, revision)
-	return nil
 }
 
 func (c *usageFillCoordinator) staleSourceEligible(ctx context.Context, version usageSourceVersion, fill usageFillResult) bool {

@@ -421,6 +421,38 @@ func TestUsageStaleDeletionReconciliation(t *testing.T) {
 	}
 }
 
+func TestUsageStaleDeletionReconciliationReleasesConnection(t *testing.T) {
+	for _, cancelRead := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel reconciliation=%v", cancelRead), func(t *testing.T) {
+			database, cache := staleUsageFixture(t, true)
+			_, fills, _ := prepareUsageRollupTest(t, database)
+			changeStaleUsage(t, database, cache.fill.now().Add(-time.Second))
+			snapshot, err := database.captureUsageQuery(t.Context(), UsageFilter{Timezone: "UTC"}, usageQueryKindToken)
+			require.NoError(t, err)
+			require.True(t, cache.fill.staleSourceEligible(t.Context(), snapshot.Versions[0], fills["session"]))
+			cache.db.SetMaxOpenConns(1)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			if cancelRead {
+				cache.fill.observer.afterStaleSnapshot = cancel
+			}
+			require.NoError(t, database.DeleteSession(t.Context(), "session"))
+			require.NoError(t, cache.sweepDeletionJournal(ctx, database))
+			cache.fill.observer.afterStaleSnapshot = nil
+			if cancelRead {
+				cache.fill.mu.Lock()
+				assert.Zero(t, cache.fill.staleDeletionRevision, "a failed reconciliation must be retried")
+				assert.Contains(t, cache.fill.stale, "session")
+				cache.fill.mu.Unlock()
+				require.NoError(t, cache.sweepDeletionJournal(t.Context(), database))
+			}
+			cache.fill.mu.Lock()
+			assert.NotContains(t, cache.fill.stale, "session", "reconciliation must acquire the pool's sole connection after the sweep releases it")
+			cache.fill.mu.Unlock()
+		})
+	}
+}
+
 func TestUsageStaleDedupUsesCompatibleFacts(t *testing.T) {
 	t.Run("facts pending with narrower read", func(t *testing.T) {
 		database := testDB(t)

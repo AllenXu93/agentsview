@@ -447,7 +447,8 @@ func (cache *usageCache) sweepDeletionJournal(ctx context.Context, archive *DB) 
 		return err
 	}
 	if through == after {
-		return cache.fill.reconcileStaleDeletions(ctx, after)
+		cache.fill.reconcileStaleDeletions(ctx, after)
+		return nil
 	}
 	tombstones, err := archive.LoadSessionDeletionDelta(
 		ctx, after, through, nil, nil)
@@ -512,8 +513,10 @@ func (cache *usageCache) sweepDeletionJournal(ctx context.Context, archive *DB) 
 		return fmt.Errorf("committing usage cache deletion sweep: %w", err)
 	}
 	committed = true
+	_ = conn.Close()
 	cache.fill.requeueSessions(sharers)
-	return cache.fill.reconcileStaleDeletions(ctx, through)
+	cache.fill.reconcileStaleDeletions(ctx, through)
+	return nil
 }
 
 func (cache *usageCache) incrementalVacuum(
