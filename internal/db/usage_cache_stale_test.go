@@ -298,7 +298,7 @@ func TestUsageStaleOverlappingCacheSnapshotsAcrossRefill(t *testing.T) {
 }
 
 func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
-	for _, completion := range []string{"refill", "delete"} {
+	for _, completion := range []string{"refill", "delete", "sweep before notification"} {
 		t.Run(completion, func(t *testing.T) {
 			database := testDB(t)
 			for i := range 1280 {
@@ -328,6 +328,11 @@ func TestUsageStaleWindowsTurnOverAfterRefresh(t *testing.T) {
 				}
 				if completion == "refill" {
 					_, err = cache.fill.FillBackground(t.Context(), batch, 0)
+				} else if completion == "sweep before notification" {
+					_, err = database.getWriter().Exec(t.Context(), `DELETE FROM sessions WHERE id >= ? AND id <= ?`, ids[0], ids[len(ids)-1])
+					require.NoError(t, err)
+					require.NoError(t, cache.sweepDeletionJournal(t.Context(), database))
+					err = cache.fill.deleteNotificationSessions(ids)
 				} else {
 					err = cache.fill.deleteNotificationSessions(ids)
 				}

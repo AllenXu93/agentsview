@@ -477,7 +477,14 @@ func (cache *usageCache) sweepDeletionJournal(ctx context.Context, archive *DB) 
 		return err
 	}
 	excluded := make(map[string]bool, len(tombstoneIDs))
+	deleted := make(map[string]usageFillResult, len(tombstoneIDs))
 	for _, sessionID := range tombstoneIDs {
+		result, err := readCurrentUsageFillResult(ctx, conn, sessionID)
+		if err != nil {
+			return err
+		}
+		result.Deleted = true
+		deleted[sessionID] = result
 		excluded[sessionID] = true
 		if _, err := conn.ExecContext(ctx,
 			`DELETE FROM usage_rollup_installs WHERE session_id = ?`,
@@ -509,6 +516,11 @@ func (cache *usageCache) sweepDeletionJournal(ctx context.Context, archive *DB) 
 		return fmt.Errorf("committing usage cache deletion sweep: %w", err)
 	}
 	committed = true
+	cache.fill.mu.Lock()
+	for id, result := range deleted {
+		cache.fill.observeStaleFillLocked(id, result)
+	}
+	cache.fill.mu.Unlock()
 	cache.fill.requeueSessions(sharers)
 	return nil
 }
