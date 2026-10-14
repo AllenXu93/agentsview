@@ -1149,6 +1149,8 @@ type IncrementalRequest struct {
 	// still-empty stored name, and on an appended custom-title only when it
 	// differs from the stored name. nil keeps the append incremental.
 	StoredSessionName *string
+	// StoredPRLinks lets repeated PR URLs stay incremental; nil reparses any appended valid pr-link.
+	StoredPRLinks map[string]struct{}
 	// StoredPendingUsageOrdinal is the last assistant message without token
 	// usage in the current turn, as resolved from the committed transcript.
 	// Codex uses it to attach a token_count that follows a late tool result

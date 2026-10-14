@@ -571,7 +571,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // codex:<thread>. Re-parse unchanged Codex sources so every file gets its own
 // session; the resync's orphan copy drops a stale codex:<thread> row whose
 // file now belongs to a page session.)
-const dataVersion = 131
+// (132: Claude pr-link records populate sessions.pr_links. Re-parse unchanged
+// Claude sources in place so existing session IDs gain their pull request links.)
+const dataVersion = 132
 
 const archiveOnlyVersionBase = 1 << 20
 
@@ -1880,6 +1882,8 @@ var readOnlyRequiredTables = []string{
 	"excluded_sessions",
 	"worktree_project_mappings",
 	"session_project_assignments",
+	"session_labels",
+	"session_external_parents",
 	"archive_metadata",
 	"background_migrations",
 	"project_identity_observations",
@@ -2266,6 +2270,10 @@ func legacySchemaColumnMigrations() []schemaColumnMigration {
 
 func schemaColumnMigrations() []schemaColumnMigration {
 	return []schemaColumnMigration{
+		{
+			"sessions", "pr_links",
+			"ALTER TABLE sessions ADD COLUMN pr_links TEXT NOT NULL DEFAULT ''",
+		},
 		{"excluded_sessions", "file_path", "ALTER TABLE excluded_sessions ADD COLUMN file_path TEXT"},
 		{
 			"sessions", "trash_includes_codex_pages",
@@ -2338,6 +2346,10 @@ func schemaColumnMigrations() []schemaColumnMigration {
 			"sessions", "parser_parent_session_id",
 			"ALTER TABLE sessions ADD COLUMN parser_parent_session_id TEXT;" +
 				" UPDATE sessions SET parser_parent_session_id = parent_session_id",
+		},
+		{
+			"sessions", "parser_relationship_type",
+			"ALTER TABLE sessions ADD COLUMN parser_relationship_type TEXT",
 		},
 		{
 			"sessions", "session_name",
@@ -2993,6 +3005,7 @@ WHEN (
     OLD.data_version IS NOT NEW.data_version OR
     OLD.cwd IS NOT NEW.cwd OR
     OLD.git_branch IS NOT NEW.git_branch OR
+    OLD.pr_links IS NOT NEW.pr_links OR
     OLD.source_session_id IS NOT NEW.source_session_id OR
     OLD.source_version IS NOT NEW.source_version OR
     OLD.group_key IS NOT NEW.group_key OR
@@ -3547,6 +3560,7 @@ func (db *DB) RequeueAllArtifactExports(ctx context.Context) error {
 // semantics; a full rebuild still covers it.
 // AFTER UPDATE OF only fires on the five source columns, and the trigger
 // body writes only sync_marker, so it cannot recurse.
+// Annotation writes advance sync_marker directly and leave these signals alone.
 //
 // This lives here rather than in schema.sql because schema.sql runs
 // unconditionally on every Open() (via db.init) before

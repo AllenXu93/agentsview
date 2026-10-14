@@ -1902,3 +1902,17 @@ func TestListSessionsIncludesBrowserLink(t *testing.T) {
 	require.Len(t, out.Sessions, 1)
 	assert.Equal(t, server.URL+"/sessions/codex/session-42", out.Sessions[0].WebURL)
 }
+
+func TestListSessionsAnnotationsPreserveAutomatedPresence(t *testing.T) {
+	ts, d := newTestToolset(t)
+	dbtest.SeedSession(t, d, "worker", "proj", func(s *db.Session) {
+		s.MessageCount, s.UserMessageCount, s.IsAutomated = 4, 2, true
+	})
+	_, err := d.SetSessionLabels(t.Context(), "worker", []string{"nightly"})
+	require.NoError(t, err)
+	in := listSessionsIn{Labels: []string{"nightly"}}
+	require.NoError(t, json.Unmarshal([]byte(`{"include_automated":false}`), &in))
+	_, out, err := ts.listSessions(t.Context(), nil, in)
+	require.NoError(t, err)
+	assert.Empty(t, out.Sessions)
+}

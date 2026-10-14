@@ -309,7 +309,8 @@ const duckSessionCols = `id, project, project_assigned, machine, agent,
 	cwd, git_branch, source_session_id, source_version, group_key, transcript_fidelity,
 	parser_malformed_lines, is_truncated,
 	secret_leak_count, secrets_rules_version,
-	deleted_at, deletion_cause, termination_status, transcript_revision`
+	deleted_at, deletion_cause, termination_status, transcript_revision,
+	pr_links, labels`
 
 func scanSession(rs interface{ Scan(...any) error }) (db.Session, error) {
 	return scanSessionWithSource(rs, false)
@@ -350,6 +351,8 @@ func scanSessionWithSource(
 		&s.ParserMalformedLines, &s.IsTruncated,
 		&s.SecretLeakCount, &s.SecretsRulesVersion,
 		&deletedAt, &s.DeletionCause, &s.TerminationStatus, &s.TranscriptRevision,
+		db.PRLinksScanner(&s.PRLinks),
+		duckLabelsColumn{&s.Labels},
 	}
 	if includeSource {
 		targets = append(targets, &s.FilePath, &s.FileSize, &localModifiedAt)
@@ -372,6 +375,32 @@ func scanSessionWithSource(
 		s.DeletedAt = &v
 	}
 	return s, nil
+}
+
+// duckLabelsColumn scans the mirrored labels VARCHAR[] column, which the
+// DuckDB driver returns as []any, into a slice. NULL and an empty list
+// both decode to nil, matching the SQLite archive's session reads.
+type duckLabelsColumn struct{ dst *[]string }
+
+func (c duckLabelsColumn) Scan(src any) error {
+	*c.dst = nil
+	if src == nil {
+		return nil
+	}
+	items, ok := src.([]any)
+	if !ok {
+		return fmt.Errorf("scanning duckdb labels: unsupported type %T", src)
+	}
+	for _, item := range items {
+		label, ok := item.(string)
+		if !ok {
+			return fmt.Errorf(
+				"scanning duckdb labels: unsupported element type %T", item,
+			)
+		}
+		*c.dst = append(*c.dst, label)
+	}
+	return nil
 }
 
 func scanSessionRows(rows *sql.Rows) ([]db.Session, error) {
@@ -764,12 +793,14 @@ func (s *Store) GetSessionVersion(ctx context.Context, id string) (int, int64, b
 	var fileMtime sql.NullInt64
 	var fileHash sql.NullString
 	var updated any
+	var fingerprint string
 	err := s.queryRowContext(ctx,
 		`SELECT message_count, file_mtime, file_hash,
-		        COALESCE(local_modified_at, ended_at, started_at, created_at)
+		        COALESCE(local_modified_at, ended_at, started_at, created_at),
+		        COALESCE(agentsview_push_fingerprint, '')
 		 FROM sessions WHERE id = ?`,
 		id,
-	).Scan(&count, &fileMtime, &fileHash, &updated)
+	).Scan(&count, &fileMtime, &fileHash, &updated, &fingerprint)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -785,6 +816,7 @@ func (s *Store) GetSessionVersion(ctx context.Context, id string) (int, int64, b
 		fileMtimePart,
 		fileHashPart,
 		formatDBTime(updated),
+		fingerprint,
 	), true
 }
 

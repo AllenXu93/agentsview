@@ -83,6 +83,12 @@ client will see these tools:
 | `get_quality_signals`  | Show health grades, outcomes, failures, and example sessions             |
 | `search_docs`          | Search the AgentsView guides bundled with this version                   |
 
+`list_sessions` accepts `labels` (every listed label must match) and `pr`
+(`owner/repo`, `owner/repo#123`, or `github.com::owner/repo#123`). Its rows include each
+session's labels, pull request links, and parent session. See
+[labels](/docs/session-api/#agentsview-session-label) and
+[pull request links](/docs/session-api/#pull-request-links).
+
 ### Focused memory profile
 
 Clients that use AgentsView only for conversation memory can select the focused
