@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +68,7 @@ func (s *Sync) PushWithOptions(
 		s.archiveKey(usageSnapshotReadyKeyBase),
 		s.archiveKey(storedCountRepairKeyBase),
 		s.archiveKey(databaseIDKeyBase),
+		s.archiveKey(fullPushRunKeyBase),
 	)
 	if err != nil {
 		return result, err
@@ -120,6 +120,34 @@ func (s *Sync) PushWithOptions(
 	if !full && storedDeletion > localDeletion {
 		full, reason = true, "local deletion journal was reset"
 	}
+	// An unfinished full push stays full until one finishes. Resuming keeps
+	// the sessions it already wrote, so restarts converge.
+	run, pending, resumed := s.pendingFullPushRun(meta[s.archiveKey(fullPushRunKeyBase)], databaseID)
+	if pending && run.Errored && !full {
+		// Before runs were recorded, the push after one that ended with
+		// session errors was incremental unless a trigger above persisted.
+		log.Printf("clickhouse push: dropping the unfinished full push (%s); it ended with session errors and nothing else requires a full push",
+			run.Reason)
+		if err := writeMetadata(ctx, conn, map[string]string{s.archiveKey(fullPushRunKeyBase): ""}); err != nil {
+			return result, err
+		}
+		pending, resumed = false, false
+	}
+	if resumed && opts.Full {
+		// --full asks for every session to be rewritten, including ones the
+		// unfinished run wrote; its fingerprints cannot see in-place edits.
+		log.Printf("clickhouse push: full push requested; starting over instead of resuming the unfinished full push (%s)", run.Reason)
+		resumed = false
+	}
+	switch {
+	case resumed:
+		full, reason = true, "resuming an unfinished full push, started because: "+run.Reason
+	case pending:
+		full = true
+		if reason == "" {
+			reason = run.Reason
+		}
+	}
 	result.Full, result.FullReason = full, reason
 	if full {
 		log.Printf("clickhouse push: full push (%s)", reason)
@@ -134,8 +162,19 @@ func (s *Sync) PushWithOptions(
 	if err := s.syncCursorUsageEvents(ctx); err != nil {
 		return result, err
 	}
-	if s.pricer, err = s.syncUsagePrices(ctx, full); err != nil {
+	// The run that wrote the record already priced the whole mirror.
+	if s.pricer, err = s.syncUsagePrices(ctx, full && !resumed); err != nil {
 		return result, err
+	}
+	if full && !resumed {
+		run = s.newFullPushRun(version, databaseID, reason)
+		encoded, err := run.encode()
+		if err != nil {
+			return result, err
+		}
+		if err := writeMetadata(ctx, conn, map[string]string{s.archiveKey(fullPushRunKeyBase): encoded}); err != nil {
+			return result, err
+		}
 	}
 	if !full {
 		if err := s.applyDeletionDelta(ctx, storedDeletion, localDeletion, &result); err != nil {
@@ -154,7 +193,7 @@ func (s *Sync) PushWithOptions(
 	if err != nil {
 		return result, fmt.Errorf("listing sessions for clickhouse push: %w", err)
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	db.SortSessionsNewestFirst(candidates)
 	inScope, outOfScope := s.partitionPushScope(candidates)
 	if err := s.deleteResidentSessions(ctx, sessionIDs(outOfScope), &result); err != nil {
 		return result, err
@@ -165,11 +204,21 @@ func (s *Sync) PushWithOptions(
 		return result, err
 	}
 	changed := inScope
-	if !full {
-		changed, err = s.selectChangedSessions(ctx, inScope, fingerprints, &result)
+	if !full || resumed {
+		var stored map[string]string
+		if resumed {
+			stored, err = s.readRunFingerprints(ctx, run.Version)
+		} else {
+			stored, err = s.readMirrorFingerprints(ctx, sessionIDs(inScope))
+		}
 		if err != nil {
 			return result, err
 		}
+		skipped := &result.SkippedUnchanged
+		if resumed {
+			skipped = &result.SkippedResumed
+		}
+		changed = changedSessions(inScope, fingerprints, stored, skipped)
 	}
 
 	failed := map[string]struct{}{}
@@ -194,12 +243,21 @@ func (s *Sync) PushWithOptions(
 		return result, err
 	}
 
+	// A full push re-checks every session's vectors: a resumed one must
+	// still cover sessions the unfinished run wrote before it stopped.
 	var vectorScope []string
-	if opts.ScopeVectorsToChangedSessions && !opts.FullVectors {
+	if opts.ScopeVectorsToChangedSessions && !full && !opts.FullVectors {
 		vectorScope = sessionIDs(changed)
 	}
+	var vectorsFullSince uint64
+	switch {
+	case full:
+		vectorsFullSince = run.Version
+	case opts.FullVectors:
+		vectorsFullSince = version
+	}
 	result.Vectors, err = s.pushVectors(
-		ctx, full || opts.FullVectors, opts.FullVectorSessions, vectorScope,
+		ctx, vectorsFullSince, opts.FullVectorSessions, vectorScope,
 		failed, onProgress,
 	)
 	if err != nil {
@@ -249,6 +307,9 @@ func (s *Sync) PushWithOptions(
 		if repairing {
 			pushed[s.archiveKey(storedCountRepairKeyBase)] = ""
 		}
+		if full {
+			pushed[s.archiveKey(fullPushRunKeyBase)] = ""
+		}
 		if err := writeMetadata(ctx, conn, pushed); err != nil {
 			return result, err
 		}
@@ -258,6 +319,16 @@ func (s *Sync) PushWithOptions(
 		// still covers a failed trigger; elsewhere the next push retries.
 		if err := refreshPreparedUsage(ctx, conn); err != nil {
 			log.Printf("clickhouse push: prepared usage is behind; usage reads stay correct but slower: %v", err)
+		}
+	}
+	if full && result.Errors > 0 {
+		run.Errored = true
+		encoded, err := run.encode()
+		if err != nil {
+			return result, err
+		}
+		if err := writeMetadata(ctx, conn, map[string]string{s.archiveKey(fullPushRunKeyBase): encoded}); err != nil {
+			return result, err
 		}
 	}
 	result.Duration = time.Since(start)
@@ -305,27 +376,22 @@ func sessionIDs(sessions []db.Session) []string {
 	return ids
 }
 
-// selectChangedSessions keeps the candidates whose local fingerprint
-// differs from the mirror's. A session missing from the mirror reads back
-// as "" and is therefore always pushed, which repairs rows lost to a
-// failed earlier push without a separate repair pass.
-func (s *Sync) selectChangedSessions(
-	ctx context.Context, candidates []db.Session, fingerprints map[string]string,
-	result *storage.PushResult,
-) ([]db.Session, error) {
-	stored, err := s.readMirrorFingerprints(ctx, sessionIDs(candidates))
-	if err != nil {
-		return nil, err
-	}
+// changedSessions keeps the candidates whose local fingerprint differs from
+// the stored one. A session missing from stored reads back as "" and is
+// therefore always pushed, which repairs rows lost to a failed earlier push
+// without a separate repair pass.
+func changedSessions(
+	candidates []db.Session, fingerprints, stored map[string]string, skipped *int,
+) []db.Session {
 	changed := make([]db.Session, 0, len(candidates))
 	for _, sess := range candidates {
 		if fingerprints[sess.ID] != stored[sess.ID] {
 			changed = append(changed, sess)
 		} else {
-			result.SkippedUnchanged++
+			*skipped++
 		}
 	}
-	return changed, nil
+	return changed
 }
 
 func (s *Sync) readMirrorFingerprints(ctx context.Context, ids []string) (map[string]string, error) {

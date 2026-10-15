@@ -109,6 +109,11 @@ The latest release is
   `[clickhouse]` target. Each batch of sessions makes ClickHouse rewrite its
   session tables, so larger batches mean fewer rewrites, at the cost of more
   memory during the push. The default stays at 100 sessions.
+- A full push to ClickHouse or PostgreSQL, or a DuckDB mirror rebuild,
+  interrupted by a restart continues where it stopped on the next push instead
+  of starting over. Pushes to all three now send the most recently active
+  sessions first, so a push that stops early has already delivered your newest
+  work. `--full` still starts over from scratch.
 
 **Bug fixes**
 
