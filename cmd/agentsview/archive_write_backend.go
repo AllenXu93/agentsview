@@ -853,6 +853,9 @@ func (b *localArchiveWriteBackend) ReplicaPush(
 	if err != nil {
 		return storage.PushResult{}, err
 	}
+	if storage.StoresFriction(backend) {
+		backfillFrictionBeforePush(ctx, b.appCfg, b.database)
+	}
 	if err := ctx.Err(); err != nil {
 		return storage.PushResult{}, err
 	}
@@ -1054,6 +1057,7 @@ func (b *localArchiveWriteBackend) DuckDBPushWatch(
 		Machine:                 b.appCfg.InstallationID,
 		BlockedResultCategories: b.appCfg.ResultContentBlockedCategories,
 		ArchiveContent:          b.appCfg.ArchiveContent,
+		FrictionEnabled:         b.appCfg.Friction.Enabled,
 	})
 	defer engine.Close()
 
@@ -1206,6 +1210,7 @@ func (b *localArchiveWriteBackend) ReplicaPushWatch(
 		Machine:                 b.appCfg.InstallationID,
 		BlockedResultCategories: b.appCfg.ResultContentBlockedCategories,
 		ArchiveContent:          b.appCfg.ArchiveContent,
+		FrictionEnabled:         b.appCfg.Friction.Enabled,
 	})
 	defer engine.Close()
 
@@ -1243,9 +1248,12 @@ func (b *localArchiveWriteBackend) ReplicaPushWatch(
 					return errors.New("local sync processing incomplete")
 				}
 				// The push scans SQLite rows right after this returns;
-				// flush deferred signal recomputes so pushed sessions
-				// carry current signal/secret fields.
+				// flush deferred signal recomputes and stale friction so
+				// pushed sessions carry current derived fields.
 				engine.FlushSignals()
+				if storage.StoresFriction(backend) {
+					drainStaleFriction(c, engine)
+				}
 				return nil
 			},
 			func(c context.Context) (storage.Pusher, error) {
@@ -1263,7 +1271,14 @@ func (b *localArchiveWriteBackend) ReplicaPushWatch(
 		recovery *syncpkg.WatchRecoveryScope,
 		work func() error,
 	) error {
-		_, err := engine.SyncWatchBatchThenRun(c, batch, recovery, work)
+		_, err := engine.SyncWatchBatchThenRun(c, batch, recovery, func() error {
+			if storage.StoresFriction(backend) {
+				if err := engine.DrainStaleFrictionLocked(c); err != nil {
+					return err
+				}
+			}
+			return work()
+		})
 		return err
 	}
 	pusher.fullVectorsPending = cfg.Full
