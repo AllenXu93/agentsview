@@ -5880,3 +5880,89 @@ func TestGroupTopSessions(t *testing.T) {
 		})
 	}
 }
+
+func TestSortedUsageEventFingerprints(t *testing.T) {
+	record := func(inputTokens int, occurredAt string) string {
+		return fmt.Sprintf(
+			"false|0|7:session|5:model|0:|%d|0|0|0|0|false|0|0:|0:|%d:%s|0:;",
+			inputTokens, len(occurredAt), occurredAt,
+		)
+	}
+	dropZeroFraction := func(value string) string {
+		return strings.Replace(value, ".000Z", "Z", 1)
+	}
+	tests := []struct {
+		name       string
+		events     []UsageEvent
+		normalize  func(string) string
+		wantRaw    string
+		wantSorted string
+	}{
+		{
+			name: "normalizes the comparison timestamp",
+			events: []UsageEvent{
+				{InputTokens: 10, OccurredAt: "2026-07-01T12:00:00.123456789Z"},
+			},
+			normalize: func(string) string {
+				return "2026-07-01T12:00:00.123456Z"
+			},
+			wantRaw:    record(10, "2026-07-01T12:00:00.123456789Z"),
+			wantSorted: record(10, "2026-07-01T12:00:00.123456Z"),
+		},
+		{
+			name: "sorts normalized records",
+			events: []UsageEvent{
+				{InputTokens: 10, OccurredAt: "2026-07-01T12:00:00Z"},
+				{InputTokens: 20, OccurredAt: "2026-07-01T12:00:00.5Z"},
+				{InputTokens: 5, OccurredAt: "2026-07-01T12:00:00.000Z"},
+			},
+			normalize: dropZeroFraction,
+			wantRaw: record(5, "2026-07-01T12:00:00.000Z") +
+				record(20, "2026-07-01T12:00:00.5Z") +
+				record(10, "2026-07-01T12:00:00Z"),
+			wantSorted: record(10, "2026-07-01T12:00:00Z") +
+				record(20, "2026-07-01T12:00:00.5Z") +
+				record(5, "2026-07-01T12:00:00Z"),
+		},
+		{
+			name: "sorts records without a normalizer",
+			events: []UsageEvent{
+				{InputTokens: 9, OccurredAt: "2026-07-01T12:00:00.1Z"},
+				{InputTokens: 1, OccurredAt: "2026-07-01T12:00:00.2Z"},
+			},
+			wantRaw: record(9, "2026-07-01T12:00:00.1Z") +
+				record(1, "2026-07-01T12:00:00.2Z"),
+			wantSorted: record(1, "2026-07-01T12:00:00.2Z") +
+				record(9, "2026-07-01T12:00:00.1Z"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := testDB(t)
+			ctx := t.Context()
+			const id = "hermes:usage"
+			insertSession(t, database, id, "project")
+			for i := range tt.events {
+				tt.events[i].SessionID = id
+				tt.events[i].Source = "session"
+				tt.events[i].Model = "model"
+			}
+			require.NoError(t, database.ReplaceSessionUsageEvents(ctx, id, tt.events))
+			ids := []string{id, "missing"}
+
+			sorted, err := database.SortedUsageEventFingerprints(
+				ctx, ids, tt.normalize,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{
+				id: tt.wantSorted, "missing": "",
+			}, sorted)
+
+			raw, err := database.UsageEventFingerprints(ids)
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{
+				id: tt.wantRaw, "missing": "",
+			}, raw)
+		})
+	}
+}

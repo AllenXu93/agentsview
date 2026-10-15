@@ -6853,7 +6853,7 @@ func (db *DB) loadSessionMirrorSnapshot(ctx context.Context, id string, afterSes
 		return nil, err
 	}
 	usage := make(map[string]string, 1)
-	if err := appendUsageEventFingerprints(ctx, tx, usage, []string{id}); err != nil {
+	if err := appendUsageEventFingerprints(ctx, tx, usage, []string{id}, nil, false); err != nil {
 		return nil, err
 	}
 	result.UsageFingerprint = usage[id]

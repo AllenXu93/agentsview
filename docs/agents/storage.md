@@ -688,6 +688,22 @@ must compare the same fields so incremental and resync paths agree. A no-op
 message replacement preserves existing secret findings; changed transcript
 content clears them for a fresh scan.
 
+### PostgreSQL usage comparisons
+
+PostgreSQL stores usage timestamps in UTC with microsecond precision, while
+SQLite keeps the timestamp text that the parser produced. Before PostgreSQL push
+compares usage events, it converts local timestamps to the same UTC microsecond
+form, as it already does for messages and tool results. Both sides then sort the
+encoded usage records, so the comparison does not depend on timestamp text or
+row IDs. The SQLite archive and the usage cache keep the original text and
+order.
+
+A metadata-only push therefore leaves unchanged messages, tool calls and usage
+events in place. A change to any accounting field still replaces the session's
+mirrored rows. A malformed local timestamp keeps its original text in the
+comparison, so it never matches PostgreSQL and the push reports the session as
+an error.
+
 ### Tool result summaries
 
 `tool_calls.result_content` is a display summary derived from the call's

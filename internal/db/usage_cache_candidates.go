@@ -95,7 +95,7 @@ func (db *DB) captureUsageQuery(
 		if err := loadUsageSnapshotSessions(ctx, tx, ids, filter, snapshot); err != nil {
 			return err
 		}
-		fingerprints, err := usageEventFingerprintsWithQuerier(ctx, tx, ids)
+		fingerprints, err := usageEventFingerprintsWithQuerier(ctx, tx, ids, nil, false)
 		if err != nil {
 			return fmt.Errorf("fingerprinting usage events: %w", err)
 		}
