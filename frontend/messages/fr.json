@@ -2995,5 +2995,6 @@
   "status_bar_codex_cloud_last_success": "Dernière synchronisation réussie\u202f: {time}",
   "status_bar_codex_cloud_homes": "Dossiers Codex\u202f: {homes}",
   "usage_unattributed": "Sans attribution",
+  "usage_branch_breakdowns_unsupported": "Le regroupement par branche n'est pas disponible pour cette source de données.",
   "shared_branch_clear_search": "Effacer la recherche de branches"
 }

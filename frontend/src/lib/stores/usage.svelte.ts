@@ -442,6 +442,9 @@ class UsageStore {
   isTimeRangeSummaryProvisional = $state(false);
   pairwiseComparison = $state<ServiceUsagePairwiseComparisonResponse | null>(null);
   private summaryHasBranchBreakdowns = $state(false);
+  // Set when loading branch breakdowns fails, so Branch grouping shows the
+  // failure instead of charting every cost as Unattributed.
+  branchBreakdownError = $state<string | null>(null);
   // The full-window chart summary is fetched separately while a range is
   // brushed, so it tracks its own branch breakdown availability.
   private contextHasBranchBreakdowns = false;
@@ -1552,6 +1555,7 @@ class UsageStore {
     )
       return;
     this.branchBreakdownRequestVersion = summaryVersion;
+    this.branchBreakdownError = null;
     try {
       const params: UsageParams = { ...this.baseParams(), branch_breakdowns: true };
       const [data, contextData] = await Promise.all([
@@ -1580,8 +1584,13 @@ class UsageStore {
         this.branchBreakdownContextVersion = summaryVersion;
       }
     } catch (e) {
-      if (this.versions.summary === summaryVersion) {
-        console.warn("usage.ensureBranchBreakdowns failed:", e);
+      if (this.versions.summary === summaryVersion && !isAbortError(e)) {
+        this.branchBreakdownError =
+          e instanceof ApiError && e.code === "branch_breakdowns_unsupported"
+            ? m.usage_branch_breakdowns_unsupported()
+            : e instanceof Error
+              ? e.message
+              : m.shared_failed_to_load();
       }
     } finally {
       if (this.branchBreakdownRequestVersion === summaryVersion) {

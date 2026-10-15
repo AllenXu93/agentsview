@@ -377,6 +377,8 @@
   </div>
   {#if zoomedProject && usage.errors.zoom}
     <div class="empty" {@attach errorTelemetry("analytics")}>{usage.errors.zoom}</div>
+  {:else if !zoomedProject && groupBy === "branch" && usage.branchBreakdownError}
+    <div class="empty">{usage.branchBreakdownError}</div>
   {:else if zoomedProject && usage.loading.zoom && usage.zoomRows === null}
     <div class="empty">{m.usage_loading()}</div>
   {:else if rows.length === 0}
