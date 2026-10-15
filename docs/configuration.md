@@ -1742,13 +1742,31 @@ against the budget. The Antigravity IDE watcher also watches
 This cap applies to the Linux and Windows watcher. The macOS FSEvents watcher
 has no per-directory budget.
 
+Runtime folder watch failures keep healthy folders on native watches. Claude
+polling covers the affected project folder. Other providers poll the root's
+configured scopes so changes to companion files reach their owning sessions.
+Retries start after 10 seconds and back off to two minutes. The next shared poll
+pass batches recovered folders and reconciles their original provider root
+scopes before releasing polling. A failed reconciliation keeps polling active
+for the next retry. A deferred folder keeps polling until its whole subtree is
+watched or the directory disappears.
+New native events sync on the normal interval, apart from failed discovery,
+which keeps backing off up to two minutes.
+A regular file replacing the directory or an ancestor releases polling.
+A directory symlink keeps polling. Removing a root from the watch plan releases
+its polling obligations. Budget or native watch resource exhaustion keeps
+root-level polling. Event-buffer overflow puts every recursive root on polling.
+
 Roots that fall back to polling are picked up by:
 
 - the existing 15-minute periodic full sync, plus
 - a new 2-minute fallback sync loop that runs whenever any roots are unwatched
-    (it re-syncs all configured roots, not just the unwatched ones)
+    (it reconciles the affected scopes)
 
-Startup logs make degradation explicit. Per-root and summary lines look like:
+The startup polling summary counts roots handed to fallback polling. It excludes
+folders already covered by separate polling obligations. Runtime
+`polling N unwatched root(s)` logs count distinct polling scopes, including
+Claude project folders. Per-root and startup summary lines look like:
 
 ```
 Couldn't watch 12500 directories under /home/me/.claude/projects, will poll every 2m0s
