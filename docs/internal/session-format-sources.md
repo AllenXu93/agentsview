@@ -692,7 +692,26 @@ fixtures retain this field; missing identities remain source-local.
   rebuilds keep metadata scoped to each file. Activity hints still find the
   newest surviving page without an original thread row. Reverified these
   archive and activity paths on 2026-10-02. Other Codex versions may differ.
-  Tests: `TestCodexRevertPageSessionsThroughAPI`,
+  Earlier builds, `0.148.0-alpha.15` through `0.154.0-alpha.6.2`, wrote the
+  header the other way round: the page's own rollout id in `session_meta.id`
+  and the thread id in `session_meta.session_id`. The writer at
+  [recorder.rs](https://github.com/openai/codex/blob/rust-v0.148.0-alpha.15/codex-rs/rollout/src/recorder.rs#L818-L820)
+  (rust-v0.148.0-alpha.15, checked 2026-10-04) only writes the thread id as
+  `conversation_id`. It does not produce this reversed header, so the reversed
+  shape and its version range come from local files and are `no-public-source`.
+  The `id` rule in the
+  entry above describes rust-v0.154.0 and later. AgentsView accepts the
+  older header only when the file name is `<session_id>_<id>`, and stores the page under the
+  file-name key like any other revert page. Data version 134 rebuilds archives
+  that stored such pages as `codex:<rollout>`, moving curation, trash, and
+  deletions to the canonical page whether its file is present or gone.
+  Tests: `TestCodexOlderHeaderRevertPageUpgradeMovesCuration`,
+  `TestCodexOlderHeaderRevertPageSecondSyncReparsesNothing`,
+  `TestCodexOlderHeaderRevertPageTitleAndSubagent`,
+  `TestCodexLegacyHeaderPageMovesToCanonicalPostgresRow`,
+  `TestCodexPurgedRolloutExclusionBlocksCanonicalPage`,
+  `TestPGSessionTombstoneIDsIncludeRetiredCodexRollout`,
+  `TestCodexRevertPageSessionsThroughAPI`,
   `TestCodexRevertPagesFormATree`, `TestCodexRevertPagesRetainDailyUsage`,
   `TestCodexRevertPageUpgradeReplacesStaleThreadRow`,
   `TestCopySessionMetadataFrom_CodexPagePins`,
