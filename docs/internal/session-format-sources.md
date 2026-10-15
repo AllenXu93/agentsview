@@ -297,6 +297,24 @@ fixtures retain this field; missing identities remain source-local.
   check did not independently reproduce those replies. The completed-empty
   rule above is separate analyzer policy.
 
+- **Persisted tool output cleanup (2026-10-14):** The
+  [`.claude` directory documentation](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically),
+  section "Cleaned up automatically", checked 2026-10-14, lists
+  `projects/<project>/<session>/tool-results/` among the paths Claude Code
+  deletes once they are older than `cleanupPeriodDays` (30 days by default),
+  beside the session transcript itself. The cutoff applies to each file's own
+  age, so a transcript that is still being written can outlive the side files
+  its placeholders name. Evidence for the cleanup is `documentation`; the page
+  does not describe the placeholder text. Agentsview marks a tool_result only
+  when it genuinely tried and failed to resolve a `persistedOutputPath` side
+  file, never from the placeholder text's own shape
+  (`parser.ParsedToolResult.PersistedOutputUnresolved`,
+  `TestParseClaudeSession_PersistedOutputUnresolvedOnlyOnUnresolvedOccurrence`).
+  Claude fingerprints hash only the transcript, so a deleted side file shows
+  only on a full parse; `ingest.ReconcileProviderHistory` then restores the
+  archived result instead of storing the placeholder over it, for both Claude
+  Code and iCodeMate CLI.
+
 - **Usage and cost:** Assistant messages persist input, output, cache-creation,
   and cache-read tokens. Model IDs are present. No authoritative persisted USD
   cost field is consumed; Agentsview prices the tokens from its catalog.

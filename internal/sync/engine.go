@@ -18548,6 +18548,20 @@ func (e *Engine) prepareSessionNormalizedContext(
 	return prepared, sessionWriteOK, ctx.Err()
 }
 
+// hasUnresolvedPersistedToolResult reports whether any parsed Claude or
+// iCodeMate tool_result could not resolve a persisted-output side file,
+// over the cheap parser-level carriers, before any store read.
+func hasUnresolvedPersistedToolResult(messages []parser.ParsedMessage) bool {
+	for _, message := range messages {
+		for _, toolResult := range message.ToolResults {
+			if toolResult.PersistedOutputUnresolved {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (e *Engine) historyStore() db.Store {
 	if e.archiveStore != nil {
 		return e.archiveStore
@@ -18564,13 +18578,6 @@ func (e *Engine) reconcileProviderHistoryContext(
 		ToolResultImages:        e.toolResultImages,
 		ArchiveContent:          e.db.ArchiveContent(),
 	}
-	if ingest.IsClaudeFormatTranscript(
-		agent, candidate.Parsed.Session.File.Path,
-	) {
-		return ingest.ReconcileProviderHistory(
-			ctx, candidate, nil, options,
-		)
-	}
 	var prior *ingest.PriorSession
 	if candidate.Parsed.Session.KeepStoredGroupKey {
 		store := e.historyStore()
@@ -18582,65 +18589,91 @@ func (e *Engine) reconcileProviderHistoryContext(
 			prior = &ingest.PriorSession{Session: *stored}
 		}
 	}
-	switch agent {
-	case parser.AgentOpenClaw:
-		path := candidate.Parsed.Session.File.Path
-		_, _, sqliteMember := parser.ParseVirtualSourcePathForBase(path, "openclaw-agent.sqlite")
-		if sqliteMember || !parser.IsOpenClawSessionFile(filepath.Base(path)) || candidate.Session.FilePath == nil {
-			break
-		}
-		store := e.historyStore()
-		stored, err := store.GetSessionFull(ctx, candidate.Session.ID)
-		if err != nil {
-			return ingest.HistoryResult{}, err
-		}
-		if stored != nil && stored.FilePath != nil &&
-			sameReconciliationSourcePath(*candidate.Session.FilePath, *stored.FilePath) &&
-			len(candidate.Messages) < stored.MessageCount {
-			// A shortened copy of the same legacy file is incomplete history.
-			// Different sources and SQLite members remain authoritative.
-			return ingest.HistoryResult{Action: ingest.HistoryPreserve}, nil
-		}
-	case parser.AgentRooCode, parser.AgentKiloLegacy, parser.AgentCline:
-		if len(candidate.Messages) > 0 {
-			break
-		}
-		store := e.historyStore()
-		messages, err := store.GetAllMessages(
-			context.Background(), candidate.Session.ID,
-		)
-		if err == nil && len(messages) > 0 {
-			prior = &ingest.PriorSession{
-				Session: candidate.Session, Messages: messages,
+	if ingest.IsClaudeFormatTranscript(
+		agent, candidate.Parsed.Session.File.Path,
+	) {
+		if (prior == nil || len(prior.Messages) == 0) &&
+			hasUnresolvedPersistedToolResult(candidate.Parsed.Messages) {
+			store := e.historyStore()
+			stored, err := store.GetSessionFull(ctx, candidate.Session.ID)
+			if err != nil {
+				return ingest.HistoryResult{}, err
 			}
-		}
-	case parser.AgentVSCopilot:
-		stored, err := e.db.GetSessionFull(
-			context.Background(), candidate.Session.ID,
-		)
-		if err == nil && stored != nil {
-			messages, messagesErr := e.db.GetAllMessages(
-				context.Background(), candidate.Session.ID,
-			)
-			if messagesErr == nil && len(messages) > 0 {
-				prior = &ingest.PriorSession{
-					Session: *stored, Messages: messages,
+			if stored != nil {
+				messages, messagesErr := store.GetAllMessages(
+					ctx, candidate.Session.ID,
+				)
+				if messagesErr != nil {
+					return ingest.HistoryResult{}, messagesErr
+				}
+				if len(messages) > 0 {
+					prior = &ingest.PriorSession{
+						Session: *stored, Messages: messages,
+					}
 				}
 			}
 		}
-	default:
-		if ingest.IsOpenCodeFormatStorageAgent(agent) {
+	} else {
+		switch agent {
+		case parser.AgentOpenClaw:
+			path := candidate.Parsed.Session.File.Path
+			_, _, sqliteMember := parser.ParseVirtualSourcePathForBase(path, "openclaw-agent.sqlite")
+			if sqliteMember || !parser.IsOpenClawSessionFile(filepath.Base(path)) || candidate.Session.FilePath == nil {
+				break
+			}
 			store := e.historyStore()
-			stored, err := store.GetSessionFull(
+			stored, err := store.GetSessionFull(ctx, candidate.Session.ID)
+			if err != nil {
+				return ingest.HistoryResult{}, err
+			}
+			if stored != nil && stored.FilePath != nil &&
+				sameReconciliationSourcePath(*candidate.Session.FilePath, *stored.FilePath) &&
+				len(candidate.Messages) < stored.MessageCount {
+				// A shortened copy of the same legacy file is incomplete history.
+				// Different sources and SQLite members remain authoritative.
+				return ingest.HistoryResult{Action: ingest.HistoryPreserve}, nil
+			}
+		case parser.AgentRooCode, parser.AgentKiloLegacy, parser.AgentCline:
+			if len(candidate.Messages) > 0 {
+				break
+			}
+			store := e.historyStore()
+			messages, err := store.GetAllMessages(
+				context.Background(), candidate.Session.ID,
+			)
+			if err == nil && len(messages) > 0 {
+				prior = &ingest.PriorSession{
+					Session: candidate.Session, Messages: messages,
+				}
+			}
+		case parser.AgentVSCopilot:
+			stored, err := e.db.GetSessionFull(
 				context.Background(), candidate.Session.ID,
 			)
 			if err == nil && stored != nil {
-				messages, messagesErr := store.GetAllMessages(
+				messages, messagesErr := e.db.GetAllMessages(
 					context.Background(), candidate.Session.ID,
 				)
 				if messagesErr == nil && len(messages) > 0 {
 					prior = &ingest.PriorSession{
 						Session: *stored, Messages: messages,
+					}
+				}
+			}
+		default:
+			if ingest.IsOpenCodeFormatStorageAgent(agent) {
+				store := e.historyStore()
+				stored, err := store.GetSessionFull(
+					context.Background(), candidate.Session.ID,
+				)
+				if err == nil && stored != nil {
+					messages, messagesErr := store.GetAllMessages(
+						context.Background(), candidate.Session.ID,
+					)
+					if messagesErr == nil && len(messages) > 0 {
+						prior = &ingest.PriorSession{
+							Session: *stored, Messages: messages,
+						}
 					}
 				}
 			}

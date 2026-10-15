@@ -130,6 +130,46 @@ provenance with preserved sessions. Once all contributors are readable, a full
 parse can apply corrected or shortened transcripts. This metadata stays local to
 the archive; S3 materializations do not record temporary paths.
 
+### Claude persisted tool results
+
+Claude Code (and iCodeMate CLI, which shares its transcript layout and parser)
+moves a large tool output to a side file in the session's `tool-results`
+folder and leaves a placeholder in the transcript. The parser inlines the side
+file while it exists, so the first sync archives the full output. Once Claude
+Code deletes the side file after its cleanup period, a later full parse sees
+only the placeholder. The parser marks exactly the tool_result block that
+genuinely tried and failed to resolve a `persistedOutputPath`
+(`parser.ParsedToolResult.PersistedOutputUnresolved`; never derived from the
+placeholder text's own shape). `ingest.ReconcileProviderHistory`
+(`internal/ingest/history.go`) restores each flagged current event from the
+one archived event whose `tool_use_id`, source, and timestamp all match —
+never by array position, so a dedup collapse or a retry/branch reorder can
+never pair the wrong occurrence; no unique match leaves the event untouched,
+and a later, unflagged occurrence of the same `tool_use_id` is never
+overwritten. Restoration only happens when the archive held real text; that
+text, its length, and its raw digest are restored. When the archive held
+only a length without text (the `transcripts`/`usage` archive-content
+policies, or a blocked category), the event is left alone: "blank content,
+kept length" already means something else to every reader of
+`tool_result_events` (a deduped summary, re-derived from its one
+content-bearing event), and restoring a bare length would reproduce that
+same shape for an unrelated reason with no way to tell the two apart later.
+Accepted limit: once such an event's side file ages out, its archived
+length cannot be recovered on a later reparse; the event keeps whatever
+length its current placeholder text itself resolves to, not the archived
+length.
+
+This is the same provider-history dispatcher every other agent's archive
+preservation already goes through, gated by `ingest.IsClaudeFormatTranscript`
+(the agent and a `.jsonl` path, covering both Claude Code and iCodeMate CLI;
+`ingest.IsClaudeFormatAgent` alone would also match iCodeMate's unrelated
+VSCode-extension storage path), so hosted Postgres mirrors reach it with no
+separate wiring. `internal/sync/engine.go`'s
+`reconcileProviderHistoryContext` checks cheaply, over the parsed messages and
+before any store read, whether anything is flagged before loading the
+archived session. Rebuilds read the old archive, and S3 Claude sessions follow
+the same rule.
+
 ### Codex deletion scope
 
 Before data version 131, deleting a Codex-format thread excluded all its rollout
