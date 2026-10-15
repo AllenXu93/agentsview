@@ -227,7 +227,7 @@ function emptyPairwiseSelection(): UsagePairwiseSelection {
 export type UsageMode = "cost" | "token";
 
 function selectionKey(params: UsageParams): string {
-  return [params.project_key, params.model, params.agent].join("|");
+  return [params.project_key, params.model, params.agent, params.git_branch].join("|");
 }
 
 // active_since follows the clock, so only whether it is set changes the scope.
