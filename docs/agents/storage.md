@@ -485,6 +485,11 @@ Keep identity-only corrections in the reporting digest. The wire contract is in
   `internal/readbase.Sessions`, with required backend SQL and typed scanners.
   `readbase.ReadOnlyStubs` owns unsupported archive writes; `MirrorStubs` adds
   mirror curation and insight stubs. `HostedStore` keeps explicit forwards.
+- All four backends share activity report assembly and session usage selection
+  in `internal/activity`. Explicit inputs supply usage, candidate streams,
+  message counts and project maps; SQL, pricing, caches and read lifetimes stay
+  in each backend. Daily usage query strategies and aggregation loops remain
+  per backend.
 
 ### Usage cache divergence
 
