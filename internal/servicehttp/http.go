@@ -17,6 +17,7 @@ import (
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
 	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/requestsign"
 	"go.kenn.io/agentsview/internal/service"
 )
 
@@ -93,8 +94,9 @@ const recallNonRecordingAPIVersion = 4
 // HTTPServerCapabilities is the subset of version metadata needed to expose
 // client features safely for an explicitly selected daemon.
 type HTTPServerCapabilities struct {
-	ReadOnly   bool `json:"read_only"`
-	APIVersion int  `json:"api_version"`
+	ReadOnly           bool `json:"read_only"`
+	APIVersion         int  `json:"api_version"`
+	NonRecordingRecall bool
 }
 
 // NewHTTPBackend constructs a SessionService that proxies to a
@@ -121,7 +123,7 @@ func NewHTTPBackendForServer(
 		baseURL,
 		token,
 		capabilities.ReadOnly,
-		!capabilities.ReadOnly &&
+		(!capabilities.ReadOnly || capabilities.NonRecordingRecall) &&
 			capabilities.APIVersion >= recallNonRecordingAPIVersion,
 	)
 	b.apiVersion = capabilities.APIVersion
@@ -131,9 +133,14 @@ func NewHTTPBackendForServer(
 func newHTTPBackend(
 	baseURL, token string, readOnly, recallQueries bool,
 ) *httpBackend {
+	browserURL := baseURL
+	if requestsign.SignsFromEnvironment(baseURL) {
+		// Signed machine listeners serve no browser UI, so omit session links.
+		browserURL = ""
+	}
 	return &httpBackend{
 		baseURL:           strings.TrimSuffix(baseURL, "/"),
-		browserURL:        baseURL,
+		browserURL:        browserURL,
 		client:            &http.Client{Timeout: 30 * time.Second},
 		longRunningClient: &http.Client{Timeout: 0},
 		readOnly:          readOnly,
@@ -152,6 +159,10 @@ func ProbeHTTPServerCapabilities(
 	if err != nil {
 		return HTTPServerCapabilities{}, err
 	}
+	return probeHTTPServerCapabilities(ctx, api)
+}
+
+func probeHTTPServerCapabilities(ctx context.Context, api *apiclient.Client) (HTTPServerCapabilities, error) {
 	response, err := api.GetAPIV1VersionWithResponse(ctx)
 	if response == nil {
 		return HTTPServerCapabilities{}, err
@@ -161,7 +172,7 @@ func ProbeHTTPServerCapabilities(
 		return HTTPServerCapabilities{},
 			fmt.Errorf("probing server capabilities: %w", err)
 	}
-	return HTTPServerCapabilities{ReadOnly: response.JSON200.ReadOnly != nil && *response.JSON200.ReadOnly, APIVersion: int(response.JSON200.APIVersion)}, nil
+	return HTTPServerCapabilities{ReadOnly: response.JSON200.ReadOnly != nil && *response.JSON200.ReadOnly, APIVersion: int(response.JSON200.APIVersion), NonRecordingRecall: response.HTTPResponse.Header.Get("X-Agentsview-Recall-Queries") == "non-recording"}, nil
 }
 
 func (b *httpBackend) SupportsRecallQueries() bool { return b.recallQueries }
