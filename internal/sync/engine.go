@@ -1810,7 +1810,12 @@ func (e *Engine) prepareChangedPathSync(
 // different pass while waiting to enter the serialized sync path.
 func (e *Engine) syncChangedPathsLocked(
 	ctx context.Context, paths []string,
-) (SyncStats, int, error) {
+) (stats SyncStats, tombstoned int, retErr error) {
+	ctx, closeProviderCache, err := e.withProviderFingerprintCache(ctx, paths)
+	if err != nil {
+		return SyncStats{Aborted: true}, 0, err
+	}
+	defer func() { retErr = errors.Join(retErr, closeProviderCache()) }()
 	e.reportProgress(nil, Progress{
 		Phase:  PhaseDiscovering,
 		Detail: "Preparing changed session paths",
@@ -1818,7 +1823,7 @@ func (e *Engine) syncChangedPathsLocked(
 	ctx = parser.WithProjectRootMemo(ctx)
 	ctx = parser.WithCodexParentInventoryBatch(ctx)
 	e.invalidateAntigravityTitleCache(paths)
-	stats, tombstoned, err := e.applyChangedPathSyncLocked(
+	stats, tombstoned, err = e.applyChangedPathSyncLocked(
 		ctx, e.prepareChangedPathSync(ctx, paths),
 	)
 	// Title store events carry no session files, so this also handles them.
@@ -1830,6 +1835,52 @@ func (e *Engine) syncChangedPathsLocked(
 		stats.Failed += titleStats.Failed
 	}
 	return stats, tombstoned, err
+}
+
+// providerFingerprintCacheRootEligible reports whether at least one of a
+// provider's configured roots is eligible to receive the batch fingerprint
+// cache. A flat statExists works for most BatchFingerprintCache providers,
+// but Hermes and Augure Desktop can be configured with a "sessions"
+// directory that has no reason to exist on disk yet (no transcript has ever
+// been written) while its sibling state.db, the thing that actually makes
+// the cache useful, already does. Use the same resolution discovery does
+// for those two agents instead of asking whether the bare root path exists.
+func providerFingerprintCacheRootEligible(
+	agent parser.AgentType, roots []string,
+) bool {
+	if agent == parser.AgentHermes || agent == parser.AgentAugureDesktop {
+		return slices.ContainsFunc(roots, parser.HermesRootResolvesToStateDB)
+	}
+	return slices.ContainsFunc(roots, statExists)
+}
+
+func (e *Engine) withProviderFingerprintCache(
+	ctx context.Context, paths []string,
+) (context.Context, func() error, error) {
+	sources := e.sources()
+	for agent, roots := range sources.agentDirs {
+		factory := sources.providerFactories[agent]
+		if factory == nil || !factory.Capabilities().Sync.BatchFingerprintCache ||
+			!providerFingerprintCacheRootEligible(agent, roots) {
+			continue
+		}
+		if len(paths) == 0 {
+			return parser.WithReconciliationCache(ctx)
+		}
+		provider := factory.NewProvider(parser.ProviderConfig{Roots: roots})
+		plan, err := provider.WatchPlan(ctx)
+		if err != nil {
+			return ctx, nil, err
+		}
+		for _, path := range paths {
+			for _, root := range plan.Roots {
+				if changedPathWithinAnyRoot(path, []string{root.Path}) {
+					return parser.WithReconciliationCache(ctx)
+				}
+			}
+		}
+	}
+	return ctx, func() error { return nil }, nil
 }
 
 func (e *Engine) applyChangedPathSyncLocked(
@@ -2233,7 +2284,10 @@ func (e *Engine) classifyProviderChangedPath(
 						),
 					)
 				}
-				continue
+				_, incomplete := errors.AsType[parser.DiscoveryIncompleteError](err)
+				if !incomplete || ctx.Err() != nil || !provider.Capabilities().Sync.PartialDiscovery {
+					continue
+				}
 			}
 			if def.Type == parser.AgentOmnigent {
 				sources, err = e.expandOmnigentInheritedMetadataSources(
@@ -2533,6 +2587,24 @@ func providerChangedPathForceParse(
 			agent == parser.AgentGemini &&
 			parser.IsGeminiProjectMetadataFile(eventPath) {
 			return false
+		}
+		// A Hermes/Augure Desktop state.db event's orphan-transcript
+		// fallback surfaces every transcript whose session currently has
+		// no row, including one that was never a member and so is
+		// unrelated to this event. Its plain transcript path (not a
+		// state.db#<id> member) isn't backed by the event, so without this
+		// carve-out it would force-reparse and rewrite every
+		// always-standalone sibling on every unrelated state.db write.
+		// Let the normal freshness gates decide, the same way full sync
+		// does for the identical source; keep the force on a remove
+		// event so a deletion still re-emits.
+		if eventKind != "remove" &&
+			(agent == parser.AgentHermes || agent == parser.AgentAugureDesktop) {
+			// A "#" in a parent directory name does not make a transcript
+			// path a member.
+			if _, _, member := parser.ParseVirtualSourcePathForBase(sourcePath, "state.db"); !member {
+				return false
+			}
 		}
 		return true
 	}
@@ -8070,6 +8142,17 @@ func (e *Engine) syncAllLocked(
 		return SyncStats{Aborted: true}
 	}
 	e.invalidateAntigravityTitleCache(nil)
+	ctx, closeProviderCache, err := e.withProviderFingerprintCache(ctx, nil)
+	if err != nil {
+		return SyncStats{Aborted: true, Warnings: []string{err.Error()}}
+	}
+	defer func() {
+		if err := closeProviderCache(); err != nil {
+			stats.Aborted = true
+			stats.RecordFailed()
+			stats.Warnings = append(stats.Warnings, err.Error())
+		}
+	}()
 	ctx = e.parsePolicyContext(ctx)
 	ctx = parser.WithProjectRootMemo(ctx)
 	ctx = parser.WithCodexParentInventoryBatch(ctx)
@@ -8499,7 +8582,10 @@ func (e *Engine) discoverProviderSources(
 		if err != nil {
 			log.Printf("%s provider discovery: %v", agentType, err)
 			failures++
-			continue
+			_, incomplete := errors.AsType[parser.DiscoveryIncompleteError](err)
+			if !incomplete || ctx.Err() != nil || !provider.Capabilities().Sync.PartialDiscovery {
+				continue
+			}
 		}
 		if agentType == parser.AgentKiro {
 			sources = filterProviderSourcesToScope(sources, scope)
@@ -12555,8 +12641,25 @@ func (e *Engine) processProviderFile(
 	// An explicit full pass must replace the stored message stream after
 	// bypassing incremental append. Otherwise a complete parse can still be
 	// written with append semantics and leave stale earlier rows untouched.
+	//
+	// file.ForceFullParse means "this file was just fetched and must be
+	// looked at" (e.g. a routine remote-mirror import marking a
+	// freshly-synced state.db), not "every session this file fans out to
+	// must be rewritten." For Hermes/Augure Desktop, one state.db expands
+	// into many per-session members (MemberFreshnessOverridesFileForce);
+	// folding the file-level flag into every member's
+	// incForceReplace would force-rewrite every session in the archive on
+	// every routine import, defeating this provider's whole per-session
+	// freshness model. Only a member-level force (sourceForceReplace,
+	// incRes.forceReplace, or the engine-wide e.forceFullParse) bypasses
+	// the member's own unchanged-skip below. A standalone source, such as
+	// a Hermes transcript, is the fetched file itself and keeps
+	// file.ForceFullParse's existing effect, so an in-place remote edit
+	// still replaces its stored messages.
+	fileForceFullParse := file.ForceFullParse &&
+		(!providerSemantics.MemberFreshnessOverridesFileForce || !providerVirtualSourceContainerExists(file.Path))
 	incForceReplace := sourceForceReplace || incRes.forceReplace ||
-		e.forceFullParse || file.ForceFullParse
+		e.forceFullParse || fileForceFullParse
 
 	// DB-stored fingerprint skip. The provider has no database handle, so the
 	// engine reproduces the legacy DB-aware skip that single-session JSONL
@@ -12611,7 +12714,23 @@ func (e *Engine) processProviderFile(
 	// a provider whose fingerprint mtime differs from the stored value simply
 	// reparses, matching the prior behavior. Claude and Cowork have their own
 	// earlier freshness checks; this is the generic fallback for the rest.
-	if !forceSourceCwdParse && !incForceReplace && !e.forceParseRequested(file) &&
+	//
+	// This member's own check below (providerSourceUnchangedInDB) is a
+	// content-hash freshness decision that already rejects a genuinely
+	// changed member; forceParseRequested's file.ForceFullParse term exists
+	// for providers where one DiscoveredFile is one physical file, so
+	// "reparse this file" and "reparse this member" are the same thing. For
+	// Hermes/Augure Desktop's per-session fan-out
+	// (MemberFreshnessOverridesFileForce), they are not: a routine
+	// remote-mirror import marks the shared state.db ForceFullParse
+	// because the mirror layer can't
+	// incrementally diff it, and that flag reaches every member it fans out
+	// to. Excluding it here (fileForceFullParse), specifically for this
+	// skip, keeps that import from rewriting every unchanged session on
+	// every routine sync.
+	memberForceParseRequested := e.forceParse || e.forceFullParse || file.ForceParse ||
+		fileForceFullParse
+	if !forceSourceCwdParse && !incForceReplace && !memberForceParseRequested &&
 		e.providerSourceUnchangedInDB(
 			ctx, source, fingerprint, providerSemantics, preParseStatHash,
 		) {
@@ -20344,6 +20463,24 @@ func (e *Engine) FindSourceFile(ctx context.Context, sessionID string) string {
 		ctx, def, sessionID, bareID, storedPath,
 	); f != "" {
 		return f
+	}
+
+	// A legacy Hermes/Augure Desktop row's stored file_path is the bare
+	// state.db archive path -- that's what every session got under the
+	// old whole-archive write, before per-session paths existed. The
+	// provider facade above already checked this specific session
+	// against current archive membership and returned not-found
+	// authoritatively; falling back to the bare archive path here would
+	// let SyncSingleSessionContext reparse and force-replace every
+	// session in state.db, the same harm FindSource's own stored-hint
+	// check now guards against. Trust the provider's not-found, the way
+	// the non-FileBased DB-backed providers above already do
+	// unconditionally. A standalone transcript file's stored path still
+	// falls through below -- it's a real, individually-owned file, not a
+	// shared container.
+	if (def.Type == parser.AgentHermes || def.Type == parser.AgentAugureDesktop) &&
+		parser.HermesStoredPathIsAggregateArchive(storedPath) {
+		return ""
 	}
 
 	// Prefer stored file_path — it's authoritative and handles
