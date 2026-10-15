@@ -9,7 +9,6 @@ import { ApiError } from "../../api/runtime.js";
 import { starred } from "../../stores/starred.svelte.js";
 import { MetadataService } from "../../api/generated/index.js";
 import { branchFilterToken } from "../../branchFilters.js";
-import { MetadataService } from "../../api/generated/index.js";
 
 let component: ReturnType<typeof mount> | undefined;
 
@@ -288,14 +287,13 @@ describe("SessionFilterControl selected-to-top sort", () => {
   });
 
   it("searches root-session branches within the current project", async () => {
-    const searchBranches = vi.spyOn(MetadataService, "getApiV1BranchNames")
+    const searchBranches = vi
+      .spyOn(MetadataService, "getApiV1BranchNames")
       .mockResolvedValue({ branches: [], has_more: false });
     sessions.filters.project = "proj-a";
     await openDropdown();
 
-    document
-      .querySelector<HTMLButtonElement>(".branch-picker-trigger")!
-      .click();
+    document.querySelector<HTMLButtonElement>(".branch-picker-trigger")!.click();
 
     await vi.waitFor(() =>
       expect(searchBranches).toHaveBeenCalledWith(
@@ -303,7 +301,7 @@ describe("SessionFilterControl selected-to-top sort", () => {
           projects: ["proj-a"],
           scope: "roots",
         }),
-      )
+      ),
     );
   });
 
