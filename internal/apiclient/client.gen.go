@@ -4922,6 +4922,7 @@ func (c *Client) GetAPIV1UsageSummaryStreamStreamWithResponse(ctx context.Contex
 		"no_default_range":    {Style: "form", Explode: &[]bool{false}[0]},
 		"project":             {Style: "form", Explode: &[]bool{false}[0]},
 		"project_key":         {Style: "form", Explode: &[]bool{false}[0]},
+		"selected_git_branch": {Style: "form", Explode: &[]bool{false}[0]},
 		"session_counts":      {Style: "form", Explode: &[]bool{false}[0]},
 		"termination":         {Style: "form", Explode: &[]bool{false}[0]},
 		"timezone":            {Style: "form", Explode: &[]bool{false}[0]},
@@ -19901,6 +19902,9 @@ type GetAPIV1UsagePairwiseComparisonQuery struct {
 	// ExcludeGitBranch Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	ExcludeGitBranch *string `json:"exclude_git_branch,omitempty"`
 
+	// SelectedGitBranch Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+	SelectedGitBranch *string `json:"selected_git_branch,omitempty"`
+
 	// ExcludeProject Exclude a project
 	ExcludeProject *string `json:"exclude_project,omitempty"`
 
@@ -20017,6 +20021,9 @@ type GetAPIV1UsageSummaryQuery struct {
 	// ExcludeGitBranch Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	ExcludeGitBranch *string `json:"exclude_git_branch,omitempty"`
 
+	// SelectedGitBranch Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+	SelectedGitBranch *string `json:"selected_git_branch,omitempty"`
+
 	// ExcludeProject Exclude a project
 	ExcludeProject *string `json:"exclude_project,omitempty"`
 
@@ -20117,6 +20124,9 @@ type GetAPIV1UsageSummaryStreamQuery struct {
 
 	// ExcludeGitBranch Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
 	ExcludeGitBranch *string `json:"exclude_git_branch,omitempty"`
+
+	// SelectedGitBranch Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+	SelectedGitBranch *string `json:"selected_git_branch,omitempty"`
 
 	// ExcludeProject Exclude a project
 	ExcludeProject *string `json:"exclude_project,omitempty"`

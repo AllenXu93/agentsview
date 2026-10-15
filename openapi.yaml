@@ -23838,6 +23838,13 @@ paths:
           schema:
             description: Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
             type: string
+        - description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+          explode: false
+          in: query
+          name: selected_git_branch
+          schema:
+            description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+            type: string
         - description: Exclude a project
           explode: false
           in: query
@@ -24104,6 +24111,13 @@ paths:
           name: exclude_git_branch
           schema:
             description: Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
+            type: string
+        - description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+          explode: false
+          in: query
+          name: selected_git_branch
+          schema:
+            description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
             type: string
         - description: Exclude a project
           explode: false
@@ -24397,6 +24411,13 @@ paths:
           schema:
             description: Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
             type: string
+        - description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+          explode: false
+          in: query
+          name: selected_git_branch
+          schema:
+            description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+            type: string
         - description: Exclude a project
           explode: false
           in: query
@@ -24654,6 +24675,13 @@ paths:
           schema:
             description: Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
             type: string
+        - description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+          explode: false
+          in: query
+          name: selected_git_branch
+          schema:
+            description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+            type: string
         - description: Exclude a project
           explode: false
           in: query
@@ -24903,6 +24931,13 @@ paths:
           name: exclude_git_branch
           schema:
             description: Exclude branch names; multiple names use the branch list separator, and legacy project-qualified values remain accepted
+            type: string
+        - description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
+          explode: false
+          in: query
+          name: selected_git_branch
+          schema:
+            description: Second branch include list, matched against git_branch by branch name and project; project-qualified values may use opaque project keys
             type: string
         - description: Exclude a project
           explode: false

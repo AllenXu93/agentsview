@@ -1016,6 +1016,9 @@ func (b *httpBackend) UsageSummary(
 	if req.ExcludeGitBranch != "" {
 		q.ExcludeGitBranch = new(req.ExcludeGitBranch)
 	}
+	if req.SelectedGitBranch != "" {
+		q.SelectedGitBranch = new(req.SelectedGitBranch)
+	}
 	if req.ExcludeProject != "" {
 		q.ExcludeProject = new(req.ExcludeProject)
 	}
@@ -1148,6 +1151,9 @@ func (b *httpBackend) UsagePairwiseComparison(
 	}
 	if req.ExcludeGitBranch != "" {
 		q.ExcludeGitBranch = new(req.ExcludeGitBranch)
+	}
+	if req.SelectedGitBranch != "" {
+		q.SelectedGitBranch = new(req.SelectedGitBranch)
 	}
 	if req.ExcludeProject != "" {
 		q.ExcludeProject = new(req.ExcludeProject)
