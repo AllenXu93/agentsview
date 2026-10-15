@@ -1076,7 +1076,23 @@ func (b *httpBackend) UsageSummary(
 func (b *httpBackend) UsagePairwiseComparison(
 	ctx context.Context, req service.UsagePairwiseComparisonRequest,
 ) (*service.UsagePairwiseComparisonResponse, error) {
+	if req.FallbackToDefault || (req.LeftDimension == "" && req.LeftValue == "" && req.RightDimension == "" && req.RightValue == "") {
+		version := b.apiVersion
+		if version == 0 {
+			capabilities, err := ProbeHTTPServerCapabilities(ctx, b.baseURL, b.token)
+			if err != nil {
+				return nil, err
+			}
+			version = capabilities.APIVersion
+		}
+		if version < service.UsagePairwiseDefaultsAPIVersion {
+			return nil, fmt.Errorf("server API version %d does not support default pairwise comparisons or fallback_to_default; upgrade the server", version)
+		}
+	}
 	q := &apiclient.GetAPIV1UsagePairwiseComparisonQuery{}
+	if req.FallbackToDefault {
+		q.FallbackToDefault = new(true)
+	}
 	if req.From != "" {
 		parsedFrom, err := time.Parse(time.DateOnly, req.From)
 		if err != nil {
@@ -1132,16 +1148,16 @@ func (b *httpBackend) UsagePairwiseComparison(
 		q.Termination = new(req.Termination)
 	}
 	if req.LeftDimension != "" {
-		q.LeftDimension = req.LeftDimension
+		q.LeftDimension = new(req.LeftDimension)
 	}
 	if req.LeftValue != "" {
-		q.LeftValue = req.LeftValue
+		q.LeftValue = new(req.LeftValue)
 	}
 	if req.RightDimension != "" {
-		q.RightDimension = req.RightDimension
+		q.RightDimension = new(req.RightDimension)
 	}
 	if req.RightValue != "" {
-		q.RightValue = req.RightValue
+		q.RightValue = new(req.RightValue)
 	}
 	if req.MinUserMessages > 0 {
 		q.MinUserMessages = new(int64(req.MinUserMessages))

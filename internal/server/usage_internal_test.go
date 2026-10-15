@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,6 +37,7 @@ func TestUsageInputAPIErrorMapsToBadRequest(t *testing.T) {
 
 type usageSummaryCountsSpy struct {
 	db.Store
+	mu                   sync.Mutex
 	dailyCalls           int
 	countsCalls          int
 	matchingSessionCalls int
@@ -88,6 +90,8 @@ func assertUsageQueryCalls(
 func (s *usageSummaryCountsSpy) GetDailyUsage(
 	_ context.Context, f db.UsageFilter,
 ) (db.DailyUsageResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.dailyCalls++
 	s.filters = append(s.filters, f)
 	if len(s.result.Daily) == 0 && s.result.Totals == (db.UsageTotals{}) &&
@@ -428,15 +432,14 @@ func TestUsagePairwiseComparisonScansTwoDailyFilters(t *testing.T) {
 
 	assert.Equal(t, 2, spy.dailyCalls)
 	require.Len(t, spy.filters, 2)
-	assert.Equal(t, "claude-sonnet-4-20250514", spy.filters[0].Model)
-	assert.Empty(t, spy.filters[0].Project)
-	assert.Empty(t, spy.filters[1].Model)
-	assert.Equal(t, "beta", spy.filters[1].Project)
+	assert.ElementsMatch(t,
+		[][2]string{{"claude-sonnet-4-20250514", ""}, {"", "beta"}},
+		[][2]string{{spy.filters[0].Model, spy.filters[0].Project}, {spy.filters[1].Model, spy.filters[1].Project}})
 	assert.False(t, spy.filters[0].SkipSessionCounts)
 	assert.False(t, spy.filters[1].SkipSessionCounts)
 }
 
-func TestUsagePairwiseComparisonOpenAPIRequiresSideParams(t *testing.T) {
+func TestUsagePairwiseComparisonOpenAPIOptionalSideParams(t *testing.T) {
 	s := testServer(t, 30)
 	spec := readOpenAPISpec(t, s.Handler())
 	op := requireOpenAPIOperation(t, spec, "get", "/api/v1/usage/pairwise-comparison")
@@ -448,10 +451,10 @@ func TestUsagePairwiseComparisonOpenAPIRequiresSideParams(t *testing.T) {
 		}
 	}
 
-	assert.True(t, required["left_dimension"])
-	assert.True(t, required["left_value"])
-	assert.True(t, required["right_dimension"])
-	assert.True(t, required["right_value"])
+	for _, name := range []string{"left_dimension", "left_value", "right_dimension", "right_value", "fallback_to_default"} {
+		require.Contains(t, required, name)
+		assert.False(t, required[name], "%s must be optional", name)
+	}
 }
 
 func TestUsagePairwiseComparisonOpenAPIAllowsNullCostPerSessionDelta(
