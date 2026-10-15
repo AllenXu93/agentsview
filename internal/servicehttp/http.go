@@ -1090,6 +1090,7 @@ func (b *httpBackend) UsageSummary(
 		Pricing: wire.Pricing, Projects: wire.Projects, From: wire.From, To: wire.To,
 		Totals: wire.Totals, Daily: wire.Daily, ProjectTotals: wire.ProjectTotals,
 		ModelTotals: wire.ModelTotals, AgentTotals: wire.AgentTotals,
+		BranchTotals:  wire.BranchTotals,
 		SessionCounts: wire.SessionCounts, CacheStats: wire.CacheStats,
 		UnsupportedUsage: wire.UnsupportedUsage,
 		ModelAliases:     wire.ModelAliases,
