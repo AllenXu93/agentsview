@@ -2554,6 +2554,91 @@ describe("UsageStore project zoom", () => {
     expect(usage.zoomRows).toEqual([]);
   });
 
+  it.each(["a metric change", "a same-range refresh"])(
+    "keeps zoom rows through %s, even when it fails",
+    async (event) => {
+      const { usage } = await loadStore();
+      usageServiceMocks.getUsageZoom.mockResolvedValueOnce([group(1)]);
+      usage.setOpenProject("pl1:sha256:alpha");
+      await vi.waitFor(() => expect(usage.zoomRows).toEqual([group(1)]));
+      await vi.waitFor(() => expect(usage.isQuerying).toBe(false));
+      let reject!: (error: Error) => void;
+      usageServiceMocks.getUsageZoom.mockImplementationOnce(
+        () =>
+          new Promise((_, r) => {
+            reject = r;
+          }),
+      );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const refreshed =
+        event === "a metric change"
+          ? Promise.resolve(usage.setMode("token"))
+          : usage.fetchAll({ preserveTimeRange: true });
+      expect(usageServiceMocks.getUsageZoom).toHaveBeenCalledTimes(2);
+      expect(usage.zoomRows).toEqual([group(1)]);
+      expect(usage.loading.zoom).toBe(false);
+      reject(new Error("zoom failed"));
+      await refreshed;
+      await vi.waitFor(() => expect(usage.querying.zoom).toBe(false));
+      expect(usage.zoomRows).toEqual([group(1)]);
+      expect(usage.errors.zoom).toBeNull();
+      expect(warn).toHaveBeenCalledWith("usage.zoom refetch failed:", new Error("zoom failed"));
+      warn.mockRestore();
+      usage.cancelInFlightReads();
+    },
+  );
+
+  it.each(["a metric change", "a token-type change"])(
+    "drops a zoom list cut at the limit after %s, and reports a failed refetch",
+    async (event) => {
+      const { usage } = await loadStore();
+      if (event === "a token-type change") usage.setMode("token");
+      const cut = [group(1), { ...topSession(""), cost: testMoney(5) }];
+      usageServiceMocks.getUsageZoom.mockResolvedValueOnce(cut);
+      usage.setOpenProject("pl1:sha256:alpha");
+      await vi.waitFor(() => expect(usage.zoomRows).toEqual(cut));
+      await vi.waitFor(() => expect(usage.isQuerying).toBe(false));
+      usageServiceMocks.getUsageZoom.mockRejectedValueOnce(new Error("zoom failed"));
+      if (event === "a metric change") usage.setMode("token");
+      else usage.setSelectedTokenTypes(["output"]);
+      expect(usage.zoomRows).toBeNull();
+      expect(usage.loading.zoom).toBe(true);
+      await vi.waitFor(() => expect(usage.errors.zoom).toBe("zoom failed"));
+      expect(usage.zoomRows).toBeNull();
+    },
+  );
+
+  it("drops zoom rows when Recently active toggles, but keeps them when only its cutoff moves", async () => {
+    const { usage } = await loadStore();
+    const { sessions } = await import("./sessions.svelte.js");
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-08T12:00:00Z"));
+    usageServiceMocks.getUsageZoom.mockResolvedValueOnce([group(1)]);
+    usage.setOpenProject("pl1:sha256:alpha");
+    await vi.waitFor(() => expect(usage.zoomRows).toEqual([group(1)]));
+
+    sessions.filters.recentlyActive = true;
+    usageServiceMocks.getUsageZoom.mockRejectedValueOnce(new Error("zoom failed"));
+    await usage.fetchAll({ preserveTimeRange: true });
+    expect(usage.zoomRows).toBeNull();
+    expect(usage.errors.zoom).toBe("zoom failed");
+
+    usageServiceMocks.getUsageZoom.mockResolvedValueOnce([group(2)]);
+    await usage.fetchAll({ preserveTimeRange: true });
+    expect(usage.zoomRows).toEqual([group(2)]);
+
+    now.mockReturnValue(Date.parse("2026-10-08T12:05:00Z"));
+    usageServiceMocks.getUsageZoom.mockRejectedValueOnce(new Error("zoom failed"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await usage.fetchAll({ preserveTimeRange: true });
+    expect(usageServiceMocks.getUsageZoom.mock.lastCall?.[0]).toEqual(
+      expect.objectContaining({ active_since: "2026-10-07T12:05:00.000Z" }),
+    );
+    expect(usage.zoomRows).toEqual([group(2)]);
+    expect(usage.errors.zoom).toBeNull();
+    warn.mockRestore();
+    now.mockRestore();
+  });
+
   it.each(["returning to projects", "metric and token selection changes"])(
     "drops stale zoom results after %s",
     async (event) => {
