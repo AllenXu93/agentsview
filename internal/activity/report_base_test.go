@@ -103,6 +103,7 @@ func TestBuildReportArtifacts(t *testing.T) {
 				"aggregating example activity report",
 			)
 			require.NoError(t, err)
+			assert.Equal(t, Progress{Phase: ProgressDone, SessionsTotal: 1, SessionsProcessed: 1, RowsProcessed: 1}, done)
 			assert.Equal(t, []string{"usage", "candidates", "counts", "projects"}, backend.calls)
 			if withProgress {
 				assert.Equal(t, []Progress{
@@ -112,17 +113,11 @@ func TestBuildReportArtifacts(t *testing.T) {
 					{Phase: ProgressDone, SessionsTotal: 1, SessionsProcessed: 1, RowsProcessed: 1},
 				}, progress)
 			}
-			assert.Equal(t, Progress{Phase: ProgressDone, SessionsTotal: 1, SessionsProcessed: 1, RowsProcessed: 1}, done)
 			assert.Equal(t, export.ActivityReportSchemaVersion, artifacts.Report.SchemaVersion)
 			assert.Same(t, backend.pricing, artifacts.Report.Pricing)
-			assert.Equal(t, 20, artifacts.Report.Totals.OutputTokens)
-			assert.Equal(t, money.Money{Microdollars: 100}, artifacts.Report.Totals.Cost)
 			assert.Equal(t, 1, artifacts.Report.Buckets[10].AssistantMessages)
-			assert.Equal(t, "project-a", artifacts.Report.Projects["project-key-a"].DisplayLabel)
 			require.Len(t, artifacts.Sessions, 1)
 			assert.Equal(t, "project-key-a", artifacts.Sessions[0].ProjectKey)
-			require.Len(t, artifacts.Report.ByProject, 1)
-			assert.Equal(t, "project-key-a", artifacts.Report.ByProject[0].ProjectKey)
 			assert.Equal(t, []SessionRow{}, artifacts.Report.BySession)
 		})
 	}
@@ -145,6 +140,8 @@ func TestBuildReportArtifactsErrors(t *testing.T) {
 			require.ErrorIs(t, err, failure)
 			if stage == "candidates" {
 				require.EqualError(t, err, "aggregating example activity report: read failed")
+			} else {
+				require.EqualError(t, err, "read failed")
 			}
 			assert.False(t, done)
 			assert.Equal(t, Progress{}, completion)

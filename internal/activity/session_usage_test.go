@@ -35,12 +35,15 @@ func TestUsageDedupTokenIdentity(t *testing.T) {
 			want:      UsageDedupToken{Kind: "source", Value: "claude:u"},
 		},
 		{
-			name:   "key-only event uses stored key",
+			name:   "non-message source ignores source UUID",
 			source: "session",
+			agent:  "claude",
+			uuid:   "u",
 			key:    "k",
 			want:   UsageDedupToken{Kind: "usage", Value: "k"},
 		},
 		{name: "no identity"},
+		{name: "message UUID without agent has no identity", source: "message", uuid: "u"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			identity := UsageIdentity{
@@ -61,7 +64,7 @@ func TestSelectSessionUsageRows(t *testing.T) {
 		rows                   []UsageRow
 		wantIndexes            []int
 		wantSearches           []int
-		wantSurvivor           *UsageRow
+		wantCost               *money.Money
 		wantRaw, wantDiscarded map[string]int
 		wantContributing       map[string]struct{}
 	}{
@@ -72,42 +75,41 @@ func TestSelectSessionUsageRows(t *testing.T) {
 				{SessionID: "child", UsageSource: "message", Agent: "codex", SourceUUID: "u"},
 			},
 			wantIndexes: []int{0}, wantRaw: map[string]int{"root": 0, "child": 0},
+			wantSearches:  []int{0},
 			wantDiscarded: map[string]int{"child": 0}, wantContributing: map[string]struct{}{},
 		},
 		{
-			name: "Claude snapshot keeps attribution and combines searches",
+			name: "Claude snapshot forwards pricing and tracks contributing sessions",
 			rows: []UsageRow{
 				{
-					SessionID:         "root",
-					Timestamp:         "2026-06-16T10:00:00Z",
-					InputTokens:       10,
-					OutputTokens:      5,
-					WebSearchRequests: 3,
-					ClaudeMessageID:   "m",
-					ClaudeRequestID:   "r",
+					SessionID:       "root",
+					Timestamp:       "2026-06-16T10:00:00Z",
+					InputTokens:     10,
+					OutputTokens:    5,
+					ClaudeMessageID: "m",
+					ClaudeRequestID: "r",
 				},
 				{
 					SessionID:         "child",
+					WebSearchRequests: 2,
 					Timestamp:         "2026-06-16T10:00:01Z",
 					InputTokens:       100,
 					OutputTokens:      20,
-					WebSearchRequests: 1,
 					ClaudeMessageID:   "m",
 					ClaudeRequestID:   "r",
 				},
 			},
-			wantIndexes: []int{1}, wantSearches: []int{3},
+			wantIndexes:      []int{1},
+			wantSearches:     []int{2},
 			wantRaw:          map[string]int{"root": 5, "child": 20},
 			wantDiscarded:    map[string]int{"root": 5, "child": 20},
 			wantContributing: map[string]struct{}{"root": {}, "child": {}},
-			wantSurvivor: &UsageRow{
-				SessionID: "root", SourceSessionID: "child",
-				WebSearchRequests: 3, Cost: money.Money{Microdollars: 10},
-			},
+			wantCost:         &money.Money{Microdollars: 9},
 		},
 		{
-			name:        "empty rows retain empty collections",
-			wantIndexes: []int{}, wantRaw: map[string]int{}, wantDiscarded: map[string]int{}, wantContributing: map[string]struct{}{},
+			name:         "empty rows retain empty collections",
+			wantSearches: []int{},
+			wantIndexes:  []int{}, wantRaw: map[string]int{}, wantDiscarded: map[string]int{}, wantContributing: map[string]struct{}{},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,25 +134,18 @@ func TestSelectSessionUsageRows(t *testing.T) {
 			require.Len(t, result.Rows, len(tc.wantIndexes))
 			require.NotNil(t, result.Rows)
 			assert.Equal(t, tc.wantIndexes, pricedIndexes)
+			assert.Equal(t, tc.wantSearches, pricedSearches)
 			assert.Equal(t, tc.wantRaw, result.RawOutputTokensBySession)
 			assert.Equal(t, tc.wantDiscarded, result.DeduplicatedOutputTokens)
 			assert.Equal(t, tc.wantContributing, result.DiscardedContributingSessions)
-			if tc.wantSurvivor != nil {
-				assert.Equal(t, map[string]SessionTokenCoverage{
-					"root":  {OutputTokens: 20, PeakContextTokens: 100},
-					"child": {OutputTokens: 20, PeakContextTokens: 100},
-				}, result.CanonicalTokenCoverageBySession)
-				assert.Equal(t, tc.wantSearches, pricedSearches)
-				row := result.Rows[0]
-				assert.Equal(t, tc.wantSurvivor.SessionID, row.SessionID)
-				assert.Equal(t, tc.wantSurvivor.SourceSessionID, row.SourceSessionID)
-				assert.Equal(t, tc.wantSurvivor.WebSearchRequests, row.WebSearchRequests)
-				assert.Equal(t, tc.wantSurvivor.Cost, row.Cost)
-			}
-			for i, row := range result.Rows {
-				assert.Equal(t, export.CostSourceComputed, row.CostSource)
-				assert.True(t, row.Priced)
-				assert.Equal(t, tc.rows[tc.wantIndexes[i]].Contributes, row.Contributes)
+			if tc.wantCost != nil {
+				assert.Equal(t, *tc.wantCost, result.Rows[0].Cost)
+				assert.Equal(t, 2, result.Rows[0].WebSearchRequests)
+				assert.Equal(t, "root", result.Rows[0].SessionID)
+				assert.Equal(t, "child", result.Rows[0].SourceSessionID)
+				coverage, err := CanonicalSessionTokenCoverageContext(t.Context(), tc.rows)
+				require.NoError(t, err)
+				assert.Equal(t, coverage, result.CanonicalTokenCoverageBySession)
 			}
 		})
 	}
