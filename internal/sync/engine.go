@@ -2765,11 +2765,19 @@ func preferDiscoveredFile(
 	candidate, current parser.DiscoveredFile,
 ) bool {
 	if candidate.Agent == current.Agent && isCodexFormatAgent(candidate.Agent) {
+		// Keep import ranking consistent with parser.preferCodexSource.
+		// Across roots this is a selection policy, not evidence of freshness.
 		candLayout := codexLayoutForPath(candidate.Path)
 		currLayout := codexLayoutForPath(current.Path)
 		if candLayout != currLayout {
 			return candLayout == parser.CodexLayoutDated
 		}
+		candCompressed := strings.HasSuffix(candidate.Path, ".jsonl.zst")
+		currCompressed := strings.HasSuffix(current.Path, ".jsonl.zst")
+		if candCompressed != currCompressed {
+			return !candCompressed
+		}
+		return candidate.Path < current.Path
 	}
 	return false
 }
@@ -6653,8 +6661,12 @@ func (e *Engine) reconciliationCandidate(ctx context.Context,
 			}
 		}
 	}
-	if isCodexFormatAgent(agent) && codexLayoutForPath(path) == parser.CodexLayoutDated {
-		preference1 = 1
+	if isCodexFormatAgent(agent) {
+		if codexLayoutForPath(path) == parser.CodexLayoutDated {
+			preference1 = 1
+		}
+		// Match discovery: dated layout, then plain rollout, then path.
+		preference2 = boolPreference(!strings.HasSuffix(path, ".jsonl.zst"))
 	}
 	if isOpenCodeFormatAgent(agent) && !claudeFormat {
 		if statPath == path {
@@ -12795,6 +12807,8 @@ func (e *Engine) processProviderFile(
 			return processResult{err: err}, true
 		}
 	}
+	unknownSourceSize := sourceBytes < 0
+	sourceBytes = max(sourceBytes, 0) // Unknown sizes reserve the whole retention budget.
 	lease, err := e.retentionBudget().acquire(
 		ctx, sourceBytes,
 	)
@@ -12815,7 +12829,7 @@ func (e *Engine) processProviderFile(
 	var stagedSink *codexStagingSink
 	var stagedGCRelease func()
 	if file.Agent == parser.AgentCodex &&
-		sourceBytes > e.stagedCodexMin &&
+		(unknownSourceSize || sourceBytes > e.stagedCodexMin) &&
 		!e.forceParse {
 		stagedSink, err = newCodexStagingSink(ctx,
 			e.stagedCodexDir, e.blockedResultCategories, sourceBytes,
