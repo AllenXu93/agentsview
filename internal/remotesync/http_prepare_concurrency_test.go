@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestPrepareHTTPSyncsOverlapsTransfersWithinBound(t *testing.T) {
 	var progress []string
 	var lifecycle []string
 	dataDir := t.TempDir()
-	var syncs []HTTPSync
+	var syncs []RemoteSync
 	for i := range 6 {
 		remote := newMirrorTestRemote(t)
 		remote.writeSession(t, "session.jsonl", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), "session")
@@ -43,19 +44,19 @@ func TestPrepareHTTPSyncsOverlapsTransfersWithinBound(t *testing.T) {
 			case <-ctx.Done():
 			}
 		}
-		var hs HTTPSync
+		var hs RemoteSync
 		if len(syncs) == 0 {
 			_, hs = newMirrorSync(t, remote, dataDir)
 		} else {
 			hs = syncs[0]
-			hs.URL = remote.ts.URL
+			setHTTPSourceURL(t, &hs, remote.ts.URL)
 		}
 		hs.Host = host
 		hs.Progress = func(p syncpkg.Progress) {
 			runtime.Gosched()
 			progress = append(progress, p.Detail)
 		}
-		hs.Lifecycle = &HTTPSyncLifecycle{
+		hs.Lifecycle = &RemoteSyncLifecycle{
 			PrepareStarted: func() {
 				runtime.Gosched()
 				lifecycle = append(lifecycle, host+":started")
@@ -68,12 +69,12 @@ func TestPrepareHTTPSyncsOverlapsTransfersWithinBound(t *testing.T) {
 		syncs = append(syncs, hs)
 	}
 	type result struct {
-		prepared *PreparedHTTPSyncs
+		prepared *PreparedRemoteSyncs
 		err      error
 	}
 	done := make(chan result, 1)
 	go func() {
-		prepared, err := PrepareHTTPSyncs(ctx, syncs)
+		prepared, err := PrepareRemoteSyncs(ctx, syncs)
 		done <- result{prepared, err}
 	}()
 	started := 0
@@ -128,7 +129,7 @@ func TestPrepareHTTPSyncsCancelsPeersAndRetainsSpoolCleanup(t *testing.T) {
 			cleanupErr := errors.New("archive spool removal failed")
 			var allowCleanup atomic.Bool
 			allowCleanup.Store(!failCleanup)
-			var syncs []HTTPSync
+			var syncs []RemoteSync
 			for _, host := range []string{"host-a", "host-b"} {
 				remote := newMirrorTestRemote(t)
 				remote.writeSession(t, "session.jsonl", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), "session")
@@ -145,12 +146,12 @@ func TestPrepareHTTPSyncsCancelsPeersAndRetainsSpoolCleanup(t *testing.T) {
 					<-r.Context().Done()
 					archiveStopped <- struct{}{}
 				})
-				var hs HTTPSync
+				var hs RemoteSync
 				if len(syncs) == 0 {
 					_, hs = newMirrorSync(t, remote, dataDir)
 				} else {
 					hs = syncs[0]
-					hs.URL = remote.ts.URL
+					setHTTPSourceURL(t, &hs, remote.ts.URL)
 				}
 				hs.Host = host
 				var reported bool
@@ -180,11 +181,12 @@ func TestPrepareHTTPSyncsCancelsPeersAndRetainsSpoolCleanup(t *testing.T) {
 				}
 			}
 			failed := syncs[0]
-			failed.Host, failed.URL, failed.Progress = "host-c", remote.ts.URL, nil
+			failed.Host, failed.Progress = "host-c", nil
+			setHTTPSourceURL(t, &failed, remote.ts.URL)
 			syncs = append(syncs, failed)
 			ctx, cancel := context.WithTimeout(t.Context(), backgroundWaitTimeout)
 			defer cancel()
-			prepared, err := PrepareHTTPSyncs(ctx, syncs)
+			prepared, err := PrepareRemoteSyncs(ctx, syncs)
 			require.Error(t, err)
 			assert.Nil(t, prepared)
 			require.NotErrorIs(t, err, context.Canceled)
@@ -239,13 +241,13 @@ func TestPrepareHTTPSyncsParentCancellationWaitsForWorkers(t *testing.T) {
 	defer cancel()
 	finished := make(chan struct{})
 	releaseFinished := make(chan struct{})
-	hs.Lifecycle = &HTTPSyncLifecycle{PrepareFinished: func(error) {
+	hs.Lifecycle = &RemoteSyncLifecycle{PrepareFinished: func(error) {
 		close(finished)
 		<-releaseFinished
 	}}
 	done := make(chan error, 1)
 	go func() {
-		prepared, err := PrepareAvailableHTTPSyncs(ctx, []HTTPSync{hs})
+		prepared, err := PrepareAvailableRemoteSyncs(ctx, []RemoteSync{hs})
 		if prepared != nil {
 			err = errors.Join(err, prepared.Close())
 		}
@@ -275,4 +277,67 @@ func TestPrepareHTTPSyncsParentCancellationWaitsForWorkers(t *testing.T) {
 		require.FailNow(t, "group did not finish after its worker exited")
 	}
 	assertMirrorUnlocked(t, MirrorDir(hs.DataDir, hs.Host))
+}
+
+// offlineHostError marks a test host as unreachable, so preparation skips it
+// instead of cancelling its peers.
+type offlineHostError struct{}
+
+func (offlineHostError) Error() string         { return "host is offline" }
+func (offlineHostError) HostUnavailable() bool { return true }
+
+// progressingSource reports progress of its own, as the SSH source does while
+// it installs agentsview, and then reports its host offline.
+type progressingSource struct {
+	started  *sync.WaitGroup
+	progress syncpkg.ProgressFunc
+}
+
+func (s *progressingSource) ReportProgress(progress syncpkg.ProgressFunc) {
+	s.progress = progress
+}
+
+func (s *progressingSource) Targets(context.Context) (TargetSet, error) {
+	// Report only once every host is preparing, so the reports overlap.
+	s.started.Done()
+	s.started.Wait()
+	for range 200 {
+		s.progress(syncpkg.Progress{Detail: "Installing agentsview"})
+	}
+	return TargetSet{}, offlineHostError{}
+}
+
+func (s *progressingSource) Manifest(context.Context, TargetSet) (Manifest, bool, error) {
+	return Manifest{}, false, errors.New("not reached")
+}
+
+func (s *progressingSource) Archive(context.Context, ArchiveRequest) (*ArchiveStream, error) {
+	return nil, errors.New("not reached")
+}
+
+func TestPrepareRemoteSyncsSerializesProgressFromSources(t *testing.T) {
+	var started sync.WaitGroup
+	started.Add(2)
+	var inside, overlaps, reports atomic.Int64
+	// The CLI printer and the daemon's SSE writer are not safe for
+	// concurrent use, so reports from all hosts must arrive one at a time.
+	progress := func(syncpkg.Progress) {
+		if inside.Add(1) > 1 {
+			overlaps.Add(1)
+		}
+		runtime.Gosched()
+		reports.Add(1)
+		inside.Add(-1)
+	}
+	syncs := []RemoteSync{
+		{Host: "host-a", Source: &progressingSource{started: &started}, Progress: progress},
+		{Host: "host-b", Source: &progressingSource{started: &started}, Progress: progress},
+	}
+
+	prepared, err := PrepareAvailableRemoteSyncs(t.Context(), syncs)
+
+	require.NoError(t, err)
+	require.NoError(t, prepared.Close())
+	assert.GreaterOrEqual(t, reports.Load(), int64(400), "each source reported")
+	assert.Zero(t, overlaps.Load(), "progress callbacks overlapped")
 }
