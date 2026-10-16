@@ -74,6 +74,10 @@ type SourceCapabilities struct {
 	CompositeFingerprint CapabilitySupport
 	IncrementalAppend    CapabilitySupport
 	MultiSessionSource   CapabilitySupport
+	// AppOwnedStore means the stored file_path can be the app's shared
+	// state.db, so prune leaves it in place. OwnsAppStore recognizes only
+	// state.db stores; a provider with another store layout must extend it.
+	AppOwnedStore CapabilitySupport
 	// SharedContainerSource means streaming discovery emits multiple logical
 	// virtual members from one physical container and exact reconciliation
 	// rehydration is required to avoid reopening or rescanning that container.

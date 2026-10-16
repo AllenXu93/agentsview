@@ -15,6 +15,7 @@ import (
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 // PruneConfig holds parsed CLI options for the prune command.
@@ -111,7 +112,7 @@ func (p *Pruner) Prune(ctx context.Context, cfg PruneConfig) error {
 		return nil
 	}
 
-	writeSummary(p.Out, candidates)
+	filesKept := writeSummary(p.Out, candidates)
 
 	if cfg.DryRun {
 		fmt.Fprintln(p.Out, "\nDry run: no changes made.")
@@ -142,9 +143,13 @@ func (p *Pruner) Prune(ctx context.Context, cfg PruneConfig) error {
 
 	fmt.Fprintf(p.Out,
 		"\nDeleted %d sessions, removed %d files"+
-			" (%s reclaimed)\n",
+			" (%s reclaimed)",
 		deleted, filesRemoved, formatBytes(bytesReclaimed),
 	)
+	if filesKept > 0 {
+		writeKeptFiles(p.Out, "left", filesKept)
+	}
+	fmt.Fprintln(p.Out)
 	return nil
 }
 
@@ -156,7 +161,7 @@ func confirm(r io.Reader, w io.Writer, msg string) bool {
 	return ans == "y" || ans == "yes"
 }
 
-func writeSummary(w io.Writer, sessions []db.Session) {
+func writeSummary(w io.Writer, sessions []db.Session) int {
 	var totalSize int64
 	byProject := map[string]int{}
 	var projects []string
@@ -165,6 +170,9 @@ func writeSummary(w io.Writer, sessions []db.Session) {
 			projects = append(projects, s.Project)
 		}
 		byProject[s.Project]++
+		if s.FilePath != nil && parser.OwnsAppStore(parser.AgentType(s.Agent), *s.FilePath) {
+			continue
+		}
 		if s.FileSize != nil {
 			totalSize += *s.FileSize
 		}
@@ -173,14 +181,42 @@ func writeSummary(w io.Writer, sessions []db.Session) {
 	sort.Strings(projects)
 
 	fmt.Fprintf(w,
-		"Found %d sessions (%s on disk)\n",
+		"Found %d sessions (%s on disk)",
 		len(sessions), formatBytes(totalSize),
 	)
+	kept := keptSourceFiles(sessions)
+	if kept > 0 {
+		writeKeptFiles(w, "will leave", kept)
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "\nBy project:")
 	for _, proj := range projects {
 		count := byProject[proj]
 		fmt.Fprintf(w, "  %-40s %d\n", proj, count)
 	}
+	return kept
+}
+
+func writeKeptFiles(w io.Writer, verb string, count int) {
+	fmt.Fprintf(w, ", %s %d source file%s in place", verb, count, pluralSuffix(count))
+}
+
+func keptSourceFiles(sessions []db.Session) int {
+	kept := map[string]struct{}{}
+	for _, s := range sessions {
+		if s.FilePath == nil || !parser.OwnsAppStore(parser.AgentType(s.Agent), *s.FilePath) {
+			continue
+		}
+		path := parser.ResolveSourceFilePath(*s.FilePath)
+		kept[path] = struct{}{}
+	}
+	count := 0
+	for path := range kept {
+		if _, err := os.Stat(path); err == nil {
+			count++
+		}
+	}
+	return count
 }
 
 func deleteFiles(sessions []db.Session) (int, int64) {
@@ -188,7 +224,7 @@ func deleteFiles(sessions []db.Session) (int, int64) {
 	var reclaimed int64
 
 	for _, s := range sessions {
-		if s.FilePath == nil {
+		if s.FilePath == nil || parser.OwnsAppStore(parser.AgentType(s.Agent), *s.FilePath) {
 			continue
 		}
 		path := *s.FilePath

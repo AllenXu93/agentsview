@@ -2296,6 +2296,7 @@ func hermesProviderCapabilities() Capabilities {
 			FindSource:           CapabilitySupported,
 			CompositeFingerprint: CapabilitySupported,
 			MultiSessionSource:   CapabilitySupported,
+			AppOwnedStore:        CapabilitySupported,
 			PerSessionErrors:     CapabilityNotApplicable,
 			ExcludedSessions:     CapabilityNotApplicable,
 			ForceReplaceOnParse:  CapabilitySupported,

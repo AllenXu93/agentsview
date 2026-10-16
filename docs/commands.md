@@ -714,8 +714,10 @@ agentsview prune --first-message "test" --yes
 agentsview prune --project "old-project" --max-messages 5 --before 2025-06-01
 ```
 
-The prune command displays the number of sessions deleted and disk space
-reclaimed. Use `--dry-run` first to verify the filter matches what you expect.
+Prune deletes each matching session's source file, except the shared
+`state.db` of apps such as Hermes and Augure Desktop, which stays in place. The
+summary reports sessions deleted, disk space reclaimed, and how many source
+files stay in place. Use `--dry-run` first to preview the matches.
 
 ______________________________________________________________________
 

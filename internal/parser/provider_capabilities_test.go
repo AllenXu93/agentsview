@@ -64,6 +64,15 @@ func TestProviderCapabilitiesSharedSessionIDsOptIn(t *testing.T) {
 	}
 }
 
+func TestProviderCapabilitiesAppOwnedStorePaths(t *testing.T) {
+	for _, agent := range []AgentType{AgentHermes, AgentAugureDesktop, AgentPi, AgentClaude, AgentType("unknown")} {
+		for _, path := range []string{"state.db", "state.db#one", "profile#one/state.db#two", "sessions/one.jsonl", "session_one.json", ""} {
+			want := (agent == AgentHermes || agent == AgentAugureDesktop) && (path == "state.db" || path == "state.db#one" || path == "profile#one/state.db#two")
+			assert.Equalf(t, want, OwnsAppStore(agent, path), "%s: %s", agent, path)
+		}
+	}
+}
+
 func TestProviderCapabilitiesActivityHintsMatchConsumers(t *testing.T) {
 	assert.Equal(t, CapabilityUnsupported, (SourceCapabilities{}).ActivityHints,
 		"new providers must opt in explicitly")
