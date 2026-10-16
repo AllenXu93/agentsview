@@ -201,7 +201,8 @@ func usageExitCode(u *db.SessionUsage) int {
 // is experimental and may change.
 type sessionUsageOutput struct {
 	db.SessionUsage
-	ServerRunning bool `json:"server_running"`
+	ServerRunning     bool `json:"server_running"`
+	RefreshIncomplete bool `json:"refresh_incomplete,omitzero"`
 }
 
 // startupWaitTimeout is how long CLI subcommands wait for a
@@ -249,6 +250,7 @@ func sessionUsageData(ctx context.Context, sessionID string) (*sessionUsageOutpu
 		appCfg,
 		archiveQueryPolicy{
 			AutoStart:            true,
+			SkipInitialSync:      true,
 			ReadOnlyDaemon:       archiveQueryUseReadOnlyDaemon,
 			DirectReadOnlyAction: "refresh session usage directly",
 		},

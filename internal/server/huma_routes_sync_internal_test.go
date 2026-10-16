@@ -202,16 +202,15 @@ func (f *syncRouteFixture) writeClaudeSession(
 	firstMessage string,
 ) string {
 	t.Helper()
-	sessionPath := filepath.Join(f.claudeDir, relPath)
-	require.NoError(t, os.MkdirAll(filepath.Dir(sessionPath), 0o755))
-	require.NoError(t, os.WriteFile(
-		sessionPath,
-		[]byte(testjsonl.NewSessionBuilder().
-			AddClaudeUser("2024-01-01T00:00:00Z", firstMessage).
-			String()),
-		0o644,
-	))
-	return sessionPath
+	return f.writeClaudeTranscript(t, relPath, testjsonl.NewSessionBuilder().
+		AddClaudeUser("2024-01-01T00:00:00Z", firstMessage).String())
+}
+
+func (f *syncRouteFixture) writeClaudeTranscript(t *testing.T, relPath, content string) string {
+	t.Helper()
+	path := filepath.Join(f.claudeDir, relPath)
+	dbtest.WriteTestFile(t, path, []byte(content))
+	return path
 }
 
 func markDBStale(t *testing.T, dbPath string) {
@@ -1564,9 +1563,12 @@ func TestHumaSyncStatusUsesExistingOnDemandEngine(t *testing.T) {
 		WriteTimeout: 30 * time.Second,
 	}, database, nil)
 	engine := srv.syncEngineForLocal(t.Context(), database)
+	out, err := srv.humaSyncStatus(t.Context(), &emptyInput{})
+	require.NoError(t, err)
+	assert.False(t, out.Body.StartupPending)
 	engine.SyncAll(t.Context(), nil)
 
-	out, err := srv.humaSyncStatus(t.Context(), &emptyInput{})
+	out, err = srv.humaSyncStatus(t.Context(), &emptyInput{})
 
 	require.NoError(t, err)
 	require.NotNil(t, out.Body.Stats)
@@ -1823,31 +1825,17 @@ func TestCanceledForegroundSyncLeavesStartupFallbackEligible(t *testing.T) {
 		"a canceled HTTP sync must leave daemon startup recovery eligible")
 }
 
-func TestHumaSyncSessionLocalNoSyncResyncsStaleDB(t *testing.T) {
+func TestHumaSyncSessionRejectsStaleDB(t *testing.T) {
 	f := newSyncRouteFixture(t, withStaleDB())
 	sessionPath := f.writeClaudeSession(t, "proj/session.jsonl",
 		"stale session sync route")
 	require.True(t, f.db.NeedsResync())
+	require.NoError(t, f.db.CloseWriter())
 	w := postSessionSync(t, f.handler, sessionPath)
 
-	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-	assert.False(t, f.db.NeedsResync())
-	detail := decodeRecorder[service.SessionDetail](t, w)
-	assertFirstMessageContains(t, detail.FirstMessage, "stale session sync route")
-}
-
-func TestHumaSyncSessionCanceledPreResyncReturnsNil(t *testing.T) {
-	f := newSyncRouteFixture(t, withStaleDB())
-	require.True(t, f.db.NeedsResync())
-
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	out, err := f.srv.humaSyncSession(ctx, &sessionSyncInput{
-		Body: service.SyncInput{Path: filepath.Join(f.dir, "missing.jsonl")},
-	})
-
-	require.NoError(t, err)
-	assert.Nil(t, out)
+	require.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "true", w.Header().Get(ResyncRequiredHeader))
+	assert.True(t, f.db.NeedsResync())
 }
 
 func TestHumaSyncSessionCanceledServiceSyncReturnsNil(t *testing.T) {
@@ -2554,4 +2542,114 @@ func TestHandlerErrorsPreserveOnlyWriterClosedCause(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, status.GetStatus())
 		assert.ErrorIs(t, convert(fmt.Errorf("write failed: %w", db.ErrWriterClosed)), db.ErrWriterClosed)
 	}
+}
+
+func TestUsageRefreshRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "nil engine allows refresh when startup sync is disabled",
+			run: func(t *testing.T) {
+				t.Helper()
+				f := newSyncRouteFixture(t)
+				require.Nil(t, f.srv.engine)
+				content := testjsonl.NewSessionBuilder().
+					AddClaudeUserWithSessionID("2026-01-01T10:00:00Z", "start", "fresh").
+					AddClaudeAssistantUsage("2026-01-01T10:00:05Z", "done",
+						testjsonl.ClaudeAssistantUsage{MessageID: "msg-fresh", OutputTokens: 42}).
+					String()
+				f.writeClaudeTranscript(t, "project/fresh.jsonl", content)
+				engine := f.srv.syncEngineForLocal(t.Context(), f.db)
+				require.NoError(t, engine.SyncSingleSessionContext(t.Context(), "fresh"))
+				w := serveJSON(t, f.handler, http.MethodPost, "/api/v1/sessions/sync", map[string]any{
+					"id": "fresh", "subagents": true, "usage_refresh": true,
+				})
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			},
+		},
+		{
+			name: "defers a known session until startup finishes",
+			run: func(t *testing.T) {
+				t.Helper()
+				f := newSyncRouteFixture(t)
+				content := testjsonl.NewSessionBuilder().
+					AddClaudeUserWithSessionID("2026-01-01T10:00:00Z", "start", "parent").
+					AddClaudeAssistantUsage("2026-01-01T10:00:05Z", "done",
+						testjsonl.ClaudeAssistantUsage{MessageID: "msg-parent", OutputTokens: 20}).
+					String()
+				f.writeClaudeTranscript(t, "project/parent.jsonl", content)
+				engine := f.srv.syncEngineForLocal(t.Context(), f.db)
+				f.srv.engine = engine
+				f.srv.sessions = service.NewDirectBackend(f.db, engine)
+				require.NoError(t, engine.SyncSingleSessionContext(t.Context(), "parent"))
+				f.writeClaudeTranscript(t, "project/parent.jsonl",
+					strings.ReplaceAll(content, `"output_tokens":20`, `"output_tokens":30`))
+
+				body := map[string]any{"id": "parent", "subagents": true, "usage_refresh": true}
+				w := serveJSON(t, f.handler, http.MethodPost, "/api/v1/sessions/sync", body)
+				require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+				usage, err := service.SessionUsageWithSubagents(t.Context(), f.db, "parent", false)
+				require.NoError(t, err)
+				require.NotNil(t, usage)
+				assert.Equal(t, 20, usage.TotalOutputTokens)
+
+				w = serveJSON(t, f.handler, http.MethodPost, "/api/v1/sync?wait=true", nil)
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				w = serveJSON(t, f.handler, http.MethodPost, "/api/v1/sessions/sync", body)
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				usage, err = service.SessionUsageWithSubagents(t.Context(), f.db, "parent", false)
+				require.NoError(t, err)
+				require.NotNil(t, usage)
+				assert.Equal(t, 30, usage.TotalOutputTokens)
+			},
+		},
+		{
+			name: "returns conflict while another sync owns the engine",
+			run: func(t *testing.T) {
+				t.Helper()
+				f := newSyncRouteFixture(t)
+				dbtest.SeedSessionWithMessages(t, f.db, "retained", "project",
+					[]db.Message{dbtest.UserMsg("retained", 0, "stored transcript")})
+				engine := f.srv.syncEngineForLocal(t.Context(), f.db)
+				f.srv.engine = engine
+				f.srv.sessions = service.NewDirectBackend(f.db, engine)
+				engine.RecordStartupReconciled(syncpkg.SyncStats{}, nil)
+				locked, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+				go func() {
+					done <- engine.RunExclusive(func() error {
+						close(locked)
+						<-release
+						return nil
+					})
+				}()
+				<-locked
+				t.Cleanup(func() {
+					close(release)
+					require.NoError(t, <-done)
+				})
+
+				w := serveJSON(t, f.handler, http.MethodPost, "/api/v1/sessions/sync", map[string]any{
+					"id": "retained", "subagents": true, "usage_refresh": true,
+				})
+				require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+			},
+		},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+func TestUsageRefreshValidationPrecedesStartupGate(t *testing.T) {
+	f := newSyncRouteFixture(t)
+	engine := syncpkg.NewEngine(t.Context(), f.db, syncpkg.EngineConfig{Ephemeral: true})
+	t.Cleanup(engine.Close)
+	f.srv.engine = engine
+	f.srv.sessions = service.NewDirectBackend(f.db, engine)
+
+	w := serveJSON(t, f.handler, http.MethodPost, "/api/v1/sessions/sync", map[string]any{
+		"path": "session.jsonl", "usage_refresh": true,
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }

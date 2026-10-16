@@ -986,8 +986,8 @@ server's normal write timeout. Press Ctrl+C to stop waiting; shared cache work
 can continue in the daemon.
 
 Restart older daemons after upgrading so they provide the usage progress
-endpoint. `session usage`, `token-use`, and `usage statusline` still wait for
-initial sync, including when they reuse a daemon started by daily usage.
+endpoint. `usage statusline` still waits for initial sync, including when it
+reuses a daemon started by daily usage.
 Statusline limits the complete wait and report request to 30 seconds.
 
 Offline reads require an archive at the current data version. If an upgrade
@@ -1159,13 +1159,12 @@ use IDs like `agent-a86574e`, and some other agents use prefixes such as
 `codex:my-session-id`. Raw session IDs emitted by the underlying agent are also
 accepted when AgentsView can resolve them back to the canonical stored session.
 
-If the AgentsView server is already running, the command reads the current
-database state. If no server is running, it performs an on-demand sync for the
-requested session first.
+The command uses a compatible local daemon, starting one if needed. It follows
+the same refresh and missing-session behavior as
+[`agentsview session usage`](/docs/session-api/#agentsview-session-usage).
 
-As of 0.40.0, the reported totals include every subagent transcript the session
-spawned, so the cost matches what the session actually spent. `token-use` has no
-opt-out; use `agentsview session usage <id> --own-only` for own-session numbers.
+Totals include archived subagent spend. `token-use` has no opt-out; use
+`agentsview session usage <id> --own-only` for own-session numbers.
 
 **Example:**
 
@@ -1733,9 +1732,10 @@ agentsview session parent <id> <parent>  # record the launching session
 [labels](/docs/session-api/#agentsview-session-label) and
 [pull request links](/docs/session-api/#pull-request-links).
 
-`session usage` attributes each subagent transcript's spend to the session that
-spawned it, so a parent that delegated most of its work still reports the full
-cost. `--own-only` restores the older own-session output.
+`session usage` includes archived subagent spend in the parent total. See the
+[session usage contract](/docs/session-api/#agentsview-session-usage) for
+refresh behavior, missing-session exit codes, and the `refresh_incomplete`
+JSON field.
 
 `session search` supports substring (default), `--regex`, `--fts`, `--semantic`,
 and `--hybrid` modes. Repeatable `--exclude-session <id>` drops matches from

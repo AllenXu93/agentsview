@@ -1452,7 +1452,7 @@ func TestSessionUsage_ServerFlagUsesHTTP(t *testing.T) {
 	assert.Equal(t, "breakdown=true&subagents=true", reqs.UsageQuery,
 		"remote CLI must request full breakdown rows and subagent usage")
 	assert.Equal(t, service.SyncInput{
-		ID: "remote-session", Subagents: true,
+		ID: "remote-session", Subagents: true, UsageRefresh: true,
 	}, reqs.SyncInput)
 	assert.Equal(t, []string{
 		"/api/v1/version",
@@ -1620,29 +1620,65 @@ func TestSessionUsage_NoSyncLocalAttributionAndMissingData(t *testing.T) {
 	}
 }
 
-func TestSessionUsage_ServerFlagRejectsCombinedUsageFromOlderDaemon(
-	t *testing.T,
-) {
-	newAgentDataDir(t)
-
-	ts, reqs := newRemoteUsageServer(t, remoteUsageSpec{
-		canonicalID: "remote-session",
-		apiVersion:  5,
-	})
-	cmd := sessionUsageCommand(t,
-		"session", "usage", "remote-session", "--server", ts.URL)
-
-	out, code, err := sessionUsageDataForCommand(cmd, "remote-session")
-
-	require.Error(t, err)
-	assert.Nil(t, out)
-	assert.Equal(t, tokenUseExitErr, code)
-	assert.Contains(t, err.Error(),
-		"does not support combined subagent usage")
-	assert.Contains(t, err.Error(), "--own-only")
-	assert.Equal(t, []string{"/api/v1/version"}, reqs.RequestPath)
-	assert.Empty(t, reqs.SyncInput.ID)
-	assert.Empty(t, reqs.UsagePath)
+func TestSessionUsageRemoteCombinedAPIVersionRequirements(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		version                  int
+		noSync                   bool
+		wantError, wantErrorAlso string
+	}{
+		{
+			name:          "combined usage requires API 6",
+			version:       server.SubagentUsageAPIVersion - 1,
+			wantError:     "does not support combined subagent usage",
+			wantErrorAlso: "--own-only",
+		},
+		{
+			name:      "refresh requires API 12",
+			version:   server.UsageRefreshAPIVersion - 1,
+			wantError: "pass --no-sync",
+		},
+		{
+			name:    "no-sync reads combined usage from API 6",
+			version: server.SubagentUsageAPIVersion,
+			noSync:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newAgentDataDir(t)
+			ts, reqs := newRemoteUsageServer(t, remoteUsageSpec{
+				canonicalID: "remote-session", apiVersion: tc.version,
+			})
+			args := []string{"session", "usage", "remote-session", "--server", ts.URL}
+			if tc.noSync {
+				args = append(args, "--no-sync")
+			}
+			cmd := sessionUsageCommand(t, args...)
+			out, code, err := sessionUsageDataForCommand(cmd, "remote-session")
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				if tc.wantErrorAlso != "" {
+					assert.Contains(t, err.Error(), tc.wantErrorAlso)
+				}
+				assert.Nil(t, out)
+				assert.Equal(t, tokenUseExitErr, code)
+				assert.Equal(t, []string{"/api/v1/version"}, reqs.RequestPath)
+				assert.Empty(t, reqs.SyncInput.ID)
+				assert.Empty(t, reqs.UsagePath)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, out)
+			assert.Equal(t, tokenUseExitOK, code)
+			assert.Equal(t, 42, out.TotalOutputTokens)
+			assert.Empty(t, reqs.SyncInput.ID)
+			assert.Equal(t, []string{
+				"/api/v1/version",
+				"/api/v1/sessions/remote-session",
+				"/api/v1/sessions/remote-session/usage",
+			}, reqs.RequestPath)
+		})
+	}
 }
 
 func TestSessionUsage_ServerFlagOwnOnlySkipsSubagents(t *testing.T) {
@@ -1662,8 +1698,7 @@ func TestSessionUsage_ServerFlagOwnOnlySkipsSubagents(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Equal(t, "breakdown=true", reqs.UsageQuery,
 		"--own-only must not ask the daemon for subagent usage")
-	assert.Empty(t, reqs.SyncInput.ID,
-		"--own-only must not ask the daemon to refresh subagents")
+	assert.Empty(t, reqs.SyncInput.ID, "--own-only reads archived usage over HTTP")
 	assert.Equal(t, []string{
 		"/api/v1/sessions/remote-session",
 		"/api/v1/sessions/remote-session/usage",
@@ -1700,44 +1735,37 @@ func seedSubagentOnlyUsage(
 	}))
 }
 
-func TestSessionUsage_LocalIncludesSubagentUsageByDefault(t *testing.T) {
-	dataDir := newAgentDataDir(t)
-	t.Setenv("AGENTSVIEW_NO_DAEMON", "1")
+func TestSessionUsage_LocalSubagentInclusionToggle(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		args          []string
+		wantCode      int
+		wantChildren  int
+		wantTokens    int
+		wantTokenData bool
+	}{
+		{"default includes", nil, tokenUseExitOK, 1, 24, true},
+		{"own-only excludes", []string{"--own-only"}, tokenUseExitNoTokenData, 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := newAgentDataDir(t)
+			t.Setenv("AGENTSVIEW_NO_DAEMON", "1")
 
-	localDB := dbtest.OpenTestDBAt(t, sessionsDBPath(dataDir))
-	seedSubagentOnlyUsage(t, localDB, "claude:parent-only", "agent-child", 24)
+			localDB := dbtest.OpenTestDBAt(t, sessionsDBPath(dataDir))
+			seedSubagentOnlyUsage(t, localDB, "claude:parent-only", "agent-child", 24)
 
-	cmd := sessionUsageCommand(t, "session", "usage", "claude:parent-only")
-
-	out, code, err := sessionUsageDataForCommand(cmd, "claude:parent-only")
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, tokenUseExitOK, code,
-		"a parent whose token data lives in subagents must not exit 3")
-	assert.Equal(t, "claude:parent-only", out.SessionID)
-	assert.Equal(t, 1, out.SubagentCount)
-	assert.Equal(t, 24, out.TotalOutputTokens)
-	assert.True(t, out.HasTokenData)
-}
-
-func TestSessionUsage_LocalOwnOnlyExcludesSubagentUsage(t *testing.T) {
-	dataDir := newAgentDataDir(t)
-	t.Setenv("AGENTSVIEW_NO_DAEMON", "1")
-
-	localDB := dbtest.OpenTestDBAt(t, sessionsDBPath(dataDir))
-	seedSubagentOnlyUsage(t, localDB, "claude:parent-only", "agent-child", 24)
-
-	cmd := sessionUsageCommand(t,
-		"session", "usage", "claude:parent-only", "--own-only")
-
-	out, code, err := sessionUsageDataForCommand(cmd, "claude:parent-only")
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, tokenUseExitNoTokenData, code,
-		"--own-only restores the pre-rollup empty report and exit code")
-	assert.Zero(t, out.SubagentCount)
-	assert.Zero(t, out.TotalOutputTokens)
-	assert.False(t, out.HasTokenData)
+			args := append([]string{"session", "usage", "claude:parent-only"}, tc.args...)
+			cmd := sessionUsageCommand(t, args...)
+			out, code, err := sessionUsageDataForCommand(cmd, "claude:parent-only")
+			require.NoError(t, err)
+			require.NotNil(t, out)
+			assert.Equal(t, tc.wantCode, code)
+			assert.Equal(t, "claude:parent-only", out.SessionID)
+			assert.Equal(t, tc.wantChildren, out.SubagentCount)
+			assert.Equal(t, tc.wantTokens, out.TotalOutputTokens)
+			assert.Equal(t, tc.wantTokenData, out.HasTokenData)
+		})
+	}
 }
 
 func TestSessionUsage_PGFlagIncludesSubagentUsage(t *testing.T) {
@@ -1760,149 +1788,73 @@ func TestSessionUsage_PGFlagIncludesSubagentUsage(t *testing.T) {
 }
 
 func TestSessionUsage_UsesDiscoveredDaemon(t *testing.T) {
-	dataDir := newAgentDataDir(t)
+	for _, tc := range []struct {
+		name     string
+		readOnly bool
+	}{
+		{name: "writable daemon"},
+		{name: "archived read-only daemon", readOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := newAgentDataDir(t)
+			var paths *[]string
+			var ts *httptest.Server
+			if tc.readOnly {
+				ts, paths = readOnlySessionUsageRuntimeServer(t)
+				registerTestRuntime(t, dataDir, ts.URL, true)
+			} else {
+				ts = sessionUsageRuntimeServer(t, func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.URL.Path {
+					case "/api/v1/sessions/remote-session":
+						_, _ = w.Write([]byte(`{
+							"id": "remote-session",
+							"agent": "codex",
+							"project": "remote-project"
+						}`))
+					case "/api/v1/sessions/sync":
+						_, _ = w.Write([]byte(`{"id":"remote-session"}`))
+					case "/api/v1/sessions/remote-session/usage":
+						_, _ = w.Write([]byte(`{
+							"session_id": "remote-session",
+							"agent": "codex",
+							"project": "remote-project",
+						"total_output_tokens": 42,
+						"peak_context_tokens": 2048,
+						"has_token_data": true,
+						"cost": {"microdollars": 500000},
+						"has_cost": true,
+						"models": ["gpt-5.1"],
+						"unpriced_models": []
+					}`))
+					default:
+						http.Error(w, "unexpected path: "+r.URL.Path, http.StatusInternalServerError)
+						http.NotFound(w, r)
+					}
+				})
+				registerSyncRouteTestRuntime(t, dataDir, ts.URL)
+			}
 
-	var gotUsagePath string
-	ts := sessionUsageRuntimeServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/sessions/remote-session":
-			_, _ = w.Write([]byte(`{
-				"id": "remote-session",
-				"agent": "codex",
-				"project": "remote-project"
-			}`))
-		case "/api/v1/sessions/sync":
-			var input service.SyncInput
-			if !assert.NoError(t, json.UnmarshalRead(r.Body, &input)) {
+			cmd := sessionUsageCommand(t, "session", "usage", "remote-session")
+			out, code, err := sessionUsageDataForCommand(cmd, "remote-session")
+			require.NoError(t, err)
+			require.NotNil(t, out)
+			assert.Equal(t, tokenUseExitOK, code)
+			assert.Equal(t, 42, out.TotalOutputTokens)
+			assert.NoFileExists(t, filepath.Join(dataDir, "sessions.db"))
+			if tc.readOnly {
+				assert.False(t, out.RefreshIncomplete)
+				assert.Equal(t, []string{
+					"/api/v1/sessions/remote-session",
+					"/api/v1/sessions/sync",
+					"/api/v1/sessions/remote-session/usage",
+				}, *paths)
 				return
 			}
-			assert.Equal(t, service.SyncInput{
-				ID: "remote-session", Subagents: true,
-			}, input)
-			_, _ = w.Write([]byte(`{"id":"remote-session"}`))
-		case "/api/v1/sessions/remote-session/usage":
-			gotUsagePath = r.URL.Path
-			_, _ = w.Write([]byte(`{
-				"session_id": "remote-session",
-				"agent": "codex",
-				"project": "remote-project",
-				"total_output_tokens": 42,
-				"peak_context_tokens": 2048,
-				"has_token_data": true,
-				"cost": {"microdollars": 500000},
-				"has_cost": true,
-				"models": ["gpt-5.1"],
-				"unpriced_models": []
-			}`))
-		default:
-			http.Error(w, "unexpected path: "+r.URL.Path, http.StatusInternalServerError)
-			http.NotFound(w, r)
-		}
-	})
-	registerSyncRouteTestRuntime(t, dataDir, ts.URL)
-
-	cmd := sessionUsageCommand(t, "session", "usage", "remote-session")
-
-	out, code, err := sessionUsageDataForCommand(cmd, "remote-session")
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, "/api/v1/sessions/remote-session/usage", gotUsagePath)
-	assert.Equal(t, tokenUseExitOK, code)
-	assert.Equal(t, "remote-session", out.SessionID)
-	assert.True(t, out.ServerRunning)
-	assert.NoFileExists(t, filepath.Join(dataDir, "sessions.db"))
-}
-
-func TestSessionUsage_DefaultUsesArchivedReadOnlyDaemonUsage(t *testing.T) {
-	dataDir := newAgentDataDir(t)
-	ts, paths := readOnlySessionUsageRuntimeServer(t)
-	registerTestRuntime(t, dataDir, ts.URL, true)
-
-	cmd := sessionUsageCommand(t, "session", "usage", "remote-session")
-
-	out, code, err := sessionUsageDataForCommand(cmd, "remote-session")
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, tokenUseExitOK, code)
-	assert.Equal(t, 42, out.TotalOutputTokens)
-	assert.Equal(t, []string{
-		"/api/v1/sessions/remote-session",
-		"/api/v1/sessions/sync",
-		"/api/v1/sessions/remote-session/usage",
-	}, *paths)
-	assert.NoFileExists(t, filepath.Join(dataDir, "sessions.db"))
-}
-
-func TestTokenUse_UsesDiscoveredDaemon(t *testing.T) {
-	dataDir := newAgentDataDir(t)
-
-	var gotUsagePath string
-	ts := sessionUsageRuntimeServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/sessions/remote-session":
-			_, _ = w.Write([]byte(`{
-				"id": "remote-session",
-				"agent": "codex",
-				"project": "remote-project"
-			}`))
-		case "/api/v1/sessions/sync":
-			var input service.SyncInput
-			if !assert.NoError(t, json.UnmarshalRead(r.Body, &input)) {
-				return
-			}
-			assert.Equal(t, service.SyncInput{
-				ID: "remote-session", Subagents: true,
-			}, input)
-			_, _ = w.Write([]byte(`{"id":"remote-session"}`))
-		case "/api/v1/sessions/remote-session/usage":
-			gotUsagePath = r.URL.Path
-			_, _ = w.Write([]byte(`{
-				"session_id": "remote-session",
-				"agent": "codex",
-				"project": "remote-project",
-				"total_output_tokens": 42,
-				"peak_context_tokens": 2048,
-				"has_token_data": true,
-				"cost": {"microdollars": 500000},
-				"has_cost": true,
-				"models": ["gpt-5.1"],
-				"unpriced_models": []
-			}`))
-		default:
-			http.Error(w, "unexpected path: "+r.URL.Path, http.StatusInternalServerError)
-			http.NotFound(w, r)
-		}
-	})
-	registerSyncRouteTestRuntime(t, dataDir, ts.URL)
-
-	out, code, err := sessionUsageData(t.Context(), "remote-session")
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, "/api/v1/sessions/remote-session/usage", gotUsagePath)
-	assert.Equal(t, tokenUseExitOK, code)
-	assert.Equal(t, "remote-session", out.SessionID)
-	assert.True(t, out.ServerRunning)
-	assert.NoFileExists(t, filepath.Join(dataDir, "sessions.db"))
-}
-
-func TestTokenUse_UsesArchivedReadOnlyDaemonUsage(t *testing.T) {
-	dataDir := newAgentDataDir(t)
-	ts, paths := readOnlySessionUsageRuntimeServer(t)
-	registerTestRuntime(t, dataDir, ts.URL, true)
-
-	out, code, err := sessionUsageData(t.Context(), "remote-session")
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	assert.Equal(t, tokenUseExitOK, code)
-	assert.Equal(t, 42, out.TotalOutputTokens)
-	assert.Equal(t, []string{
-		"/api/v1/sessions/remote-session",
-		"/api/v1/sessions/sync",
-		"/api/v1/sessions/remote-session/usage",
-	}, *paths)
-	assert.NoFileExists(t, filepath.Join(dataDir, "sessions.db"))
+			assert.Equal(t, "remote-session", out.SessionID)
+			assert.True(t, out.ServerRunning)
+		})
+	}
 }
 
 func readOnlySessionUsageRuntimeServer(
@@ -2504,4 +2456,152 @@ func TestPrintSessionParentHumanClearAbsent(t *testing.T) {
 	var out bytes.Buffer
 	printSessionParentHuman(&out, "worker", &db.SessionExternalParent{}, true)
 	assert.Equal(t, "worker: no launcher parent to remove\n", out.String())
+}
+
+func TestSessionUsageResolvesMissingIDsBySyncStatus(t *testing.T) {
+	const clearStatus = `{"archive_stale":false,"startup_pending":false,"stats":{}}`
+	for _, tc := range []struct {
+		name, id, statusBody      string
+		statusCode                int
+		noSync, ownOnly, imported bool
+		wantErr, wantErrAlso      string
+		wantCode, detailLookups   int
+		wantStatusChecks          int
+	}{
+		{
+			name: "startup ingestion pending", id: "absent",
+			statusBody: `{"archive_stale":false,"startup_pending":true,"stats":{}}`,
+			wantErr:    "not yet available", wantCode: tokenUseExitErr,
+			detailLookups: 1, wantStatusChecks: 1,
+		},
+		{
+			name: "archive rebuild pending", id: "absent",
+			statusBody: `{"archive_stale":true,"startup_pending":false,"stats":{}}`,
+			wantErr:    "not yet available", wantCode: tokenUseExitErr,
+			detailLookups: 1, wantStatusChecks: 1,
+		},
+		{
+			name: "still absent after clear status", id: "absent",
+			statusBody: clearStatus, wantCode: tokenUseExitNotFound,
+			detailLookups: 2, wantStatusChecks: 1,
+		},
+		{
+			name: "status unavailable", id: "absent",
+			statusCode: http.StatusServiceUnavailable,
+			statusBody: `{"title":"Service Unavailable","status":503,"detail":"status unavailable"}`,
+			wantErr:    "checking sync status:", wantErrAlso: "503",
+			wantCode: tokenUseExitErr, detailLookups: 1, wantStatusChecks: 1,
+		},
+		{
+			name: "imported after clear status", id: "remote-session",
+			statusBody: clearStatus, imported: true, wantCode: tokenUseExitOK,
+			detailLookups: 2, wantStatusChecks: 1,
+		},
+		{
+			name: "no-sync skips status", id: "absent", statusBody: clearStatus,
+			noSync: true, wantCode: tokenUseExitNotFound, detailLookups: 1,
+		},
+		{
+			name: "own-only skips status", id: "absent", statusBody: clearStatus,
+			ownOnly: true, wantCode: tokenUseExitNotFound, detailLookups: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newAgentDataDir(t)
+			ts, requests := newRemoteUsageServer(t, remoteUsageSpec{
+				canonicalID: "remote-session",
+			})
+			original := ts.Config.Handler
+			detailLookups := 0
+			statusChecks := 0
+			ts.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/api/v1/sessions/") &&
+					r.URL.Path != "/api/v1/sessions/sync" &&
+					!strings.HasSuffix(r.URL.Path, "/usage") {
+					requests.RequestPath = append(requests.RequestPath, r.URL.Path)
+					if r.URL.Path == "/api/v1/sessions/"+tc.id {
+						detailLookups++
+					}
+					if tc.imported && statusChecks > 0 {
+						original.ServeHTTP(w, r)
+						return
+					}
+					http.NotFound(w, r)
+					return
+				}
+				if r.URL.Path == "/api/v1/sync/status" {
+					requests.RequestPath = append(requests.RequestPath, r.URL.Path)
+					statusChecks++
+					if tc.statusCode != 0 {
+						w.Header().Set("Content-Type", "application/problem+json")
+						w.WriteHeader(tc.statusCode)
+						_, _ = w.Write([]byte(tc.statusBody))
+						return
+					}
+					writeJSONResponse(w, tc.statusBody)
+					return
+				}
+				original.ServeHTTP(w, r)
+			})
+
+			args := []string{"session", "usage", tc.id, "--server", ts.URL}
+			if tc.noSync {
+				args = append(args, "--no-sync")
+			}
+			if tc.ownOnly {
+				args = append(args, "--own-only")
+			}
+			cmd := sessionUsageCommand(t, args...)
+			out, code, err := sessionUsageDataForCommand(cmd, tc.id)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				if tc.wantErrAlso != "" {
+					assert.Contains(t, err.Error(), tc.wantErrAlso)
+				}
+				assert.Nil(t, out)
+			} else {
+				require.NoError(t, err)
+				if tc.imported {
+					require.NotNil(t, out)
+					assert.Equal(t, 42, out.TotalOutputTokens)
+				} else {
+					assert.Nil(t, out)
+				}
+			}
+			assert.Equal(t, tc.wantCode, code)
+			assert.Equal(t, tc.detailLookups, detailLookups)
+			assert.Equal(t, tc.wantStatusChecks, statusChecks)
+			if !tc.imported {
+				assert.Empty(t, requests.SyncInput.ID)
+			}
+		})
+	}
+}
+
+func TestSessionUsageIncompleteRefreshReturnsAvailableUsage(t *testing.T) {
+	const reason = "startup ingestion is incomplete"
+	newAgentDataDir(t)
+	ts, _ := newRemoteUsageServer(t, remoteUsageSpec{canonicalID: "remote-session"})
+	original := ts.Config.Handler
+	ts.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/sessions/sync" {
+			http.Error(w, reason, http.StatusConflict)
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	var out *sessionUsageOutput
+	var code int
+	stderr := captureStderr(t, func() {
+		cmd := sessionUsageCommand(t, "session", "usage", "remote-session", "--server", ts.URL)
+		var err error
+		out, code, err = sessionUsageDataForCommand(cmd, "remote-session")
+		require.NoError(t, err)
+		require.NotNil(t, out)
+	})
+	assert.Equal(t, 42, out.TotalOutputTokens)
+	assert.True(t, out.RefreshIncomplete)
+	assert.Equal(t, tokenUseExitOK, code)
+	assert.Contains(t, stderr, "warning: usage refresh incomplete; showing usage currently stored in the archive")
+	assert.Contains(t, stderr, reason)
 }

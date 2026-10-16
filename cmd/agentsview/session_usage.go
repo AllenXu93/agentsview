@@ -34,10 +34,14 @@ func newSessionUsageCommand() *cobra.Command {
 		Use:   "usage <id>",
 		Short: "Show token usage and cost estimate for a session",
 		Long: "Show token usage and cost estimate for a session.\n\n" +
-			"Totals include every subagent transcript spawned by the " +
-			"session (Claude Code writes those to their own files), so " +
-			"the cost matches what the session actually spent. Pass " +
-			"--own-only to report just the named transcript's rows.",
+			"Totals include archived subagent usage. Source refresh can find " +
+			"Claude subagent transcripts beside the named session. " +
+			"--own-only reports the named transcript's usage.\n\n" +
+			"Missing daemon IDs return a retry error while startup ingestion or an archive rebuild is pending; " +
+			"otherwise they return exit 2. " +
+			"--no-sync and HTTP --own-only read only the archive; missing IDs return exit 2. " +
+			"If refresh is refused or fails, the command shows archived usage with a warning; " +
+			"JSON sets refresh_incomplete. Direct mode keeps its targeted source lookup.",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -103,7 +107,7 @@ func sessionUsageDataForCommand(
 		}
 		if !query.OwnOnly {
 			if err := requireRemoteSubagentUsageSupport(
-				ctx, remote, token,
+				ctx, remote, token, !query.NoSync,
 			); err != nil {
 				return nil, tokenUseExitErr, err
 			}
@@ -127,6 +131,7 @@ func sessionUsageDataForCommand(
 		archiveQueryPolicy{
 			NoSync:               noSync,
 			AutoStart:            true,
+			SkipInitialSync:      true,
 			ReadOnlyDaemon:       archiveQueryUseReadOnlyDaemon,
 			DirectReadOnlyAction: "refresh session usage directly",
 		},
@@ -139,7 +144,7 @@ func sessionUsageDataForCommand(
 }
 
 func requireRemoteSubagentUsageSupport(
-	ctx context.Context, baseURL, token string,
+	ctx context.Context, baseURL, token string, refresh bool,
 ) error {
 	capabilities, err := servicehttp.ProbeHTTPServerCapabilities(
 		ctx, baseURL, token,
@@ -151,6 +156,13 @@ func requireRemoteSubagentUsageSupport(
 		return fmt.Errorf(
 			"server API version %d does not support combined subagent usage; "+
 				"upgrade or restart the server, or pass --own-only",
+			capabilities.APIVersion,
+		)
+	}
+	if refresh && capabilities.APIVersion < server.UsageRefreshAPIVersion {
+		return fmt.Errorf(
+			"server API version %d does not support usage refresh without waiting for ingestion; "+
+				"upgrade or restart the server, or pass --no-sync",
 			capabilities.APIVersion,
 		)
 	}
@@ -176,22 +188,52 @@ func httpSessionUsageData(
 		ctx = context.Background()
 	}
 	sessionID := query.SessionID
-	resolvedID, err := resolveServiceSessionID(
-		ctx, servicehttp.NewHTTPBackend(baseURL, token, false, ""), sessionID,
-	)
+	backend := servicehttp.NewHTTPBackend(baseURL, token, false, "")
+	resolvedID, err := resolveServiceSessionID(ctx, backend, sessionID)
 	if err != nil {
-		if errors.Is(err, errSessionNotFound) {
+		if !errors.Is(err, errSessionNotFound) {
+			return nil, tokenUseExitErr, err
+		}
+		if query.OwnOnly || query.NoSync {
 			fmt.Fprintf(os.Stderr, "session not found: %s\n", sessionID)
 			return nil, tokenUseExitNotFound, nil
 		}
-		return nil, tokenUseExitErr, err
+		startupPending, archiveStale, statusErr := httpSessionSyncStatus(
+			ctx, baseURL, token,
+		)
+		if statusErr != nil {
+			return nil, tokenUseExitErr, fmt.Errorf(
+				"checking sync status: %w", statusErr,
+			)
+		}
+		if startupPending || archiveStale {
+			return nil, tokenUseExitErr, errors.New(
+				"session usage is not yet available; retry after startup ingestion " +
+					"or the archive rebuild finishes",
+			)
+		}
+		// Startup or rebuild work can finish after the first lookup but before
+		// the status request. Resolve once more before declaring the ID absent.
+		resolvedID, err = resolveServiceSessionID(ctx, backend, sessionID)
+		if err != nil {
+			if !errors.Is(err, errSessionNotFound) {
+				return nil, tokenUseExitErr, err
+			}
+			fmt.Fprintf(os.Stderr, "session not found: %s\n", sessionID)
+			return nil, tokenUseExitNotFound, nil
+		}
 	}
+	refreshIncomplete := false
 	if !query.OwnOnly && !query.NoSync {
-		backend := servicehttp.NewHTTPBackend(baseURL, token, false, "")
-		if _, syncErr := backend.Sync(ctx, service.SyncInput{
-			ID: resolvedID, Subagents: true,
-		}); syncErr != nil && !errors.Is(syncErr, db.ErrReadOnly) {
-			fmt.Fprintf(os.Stderr, "warning: sync failed: %v\n", syncErr)
+		_, syncErr := backend.Sync(ctx, service.SyncInput{
+			ID: resolvedID, Subagents: true, UsageRefresh: true,
+		})
+		if syncErr != nil {
+			if !errors.Is(syncErr, db.ErrReadOnly) {
+				refreshIncomplete = true
+				fmt.Fprintf(os.Stderr,
+					"warning: usage refresh incomplete; showing usage currently stored in the archive: %v\n", syncErr)
+			}
 		}
 	}
 	// Request the full breakdown so the remote path matches the
@@ -235,7 +277,8 @@ func httpSessionUsageData(
 		TotalOutputTokens: int(wire.TotalOutputTokens), PeakContextTokens: int(wire.PeakContextTokens),
 		HasTokenData: wire.HasTokenData, Cost: wire.Cost, HasCost: wire.HasCost, CostUSD: wire.CostUsd,
 		Models: wire.Models, UnpricedModels: wire.UnpricedModels,
-		BreakdownCount: int(wire.BreakdownCount), Breakdown: wire.Breakdown, ServerRunning: true,
+		BreakdownCount: int(wire.BreakdownCount), Breakdown: wire.Breakdown,
+		ServerRunning: true, RefreshIncomplete: refreshIncomplete,
 	}
 	if wire.CostSource != nil {
 		out.CostSource = export.CostSource(*wire.CostSource)
@@ -247,6 +290,28 @@ func httpSessionUsageData(
 		out.SubagentCount = int(*wire.SubagentCount)
 	}
 	return &out, usageExitCode(&out.SessionUsage), nil
+}
+
+func httpSessionSyncStatus(
+	ctx context.Context, baseURL, token string,
+) (startupPending, archiveStale bool, err error) {
+	api, err := apiclient.NewHTTPClient(baseURL, token, sessionUsageHTTPClient)
+	if err != nil {
+		return false, false, err
+	}
+	response, err := api.GetAPIV1SyncStatusWithResponse(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	if response == nil {
+		return false, false, io.ErrUnexpectedEOF
+	}
+	if response.JSON200 == nil {
+		return false, false, fmt.Errorf(
+			"sync status: HTTP %d: %s", response.StatusCode, response.Body,
+		)
+	}
+	return response.JSON200.StartupPending, response.JSON200.ArchiveStale, nil
 }
 
 func pgSessionUsageData(
@@ -382,6 +447,9 @@ func renderSessionUsageHuman(w io.Writer, out *sessionUsageOutput) error {
 	}
 	if out.AICredits > 0 {
 		fmt.Fprintf(w, "%s %.0f\n", label("AI Credits"), out.AICredits)
+	}
+	if out.RefreshIncomplete {
+		fmt.Fprintln(w, "Usage refresh: incomplete; showing archived totals")
 	}
 	return nil
 }

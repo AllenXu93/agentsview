@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -160,8 +161,7 @@ func TestLocalArchiveQuerySessionUsageNoSyncSkipsSingleSessionSync(
 		assert.Equal(t, tokenUseExitOK, exitCode)
 		assert.Equal(t, 42, out.TotalOutputTokens)
 	})
-	assert.NotContains(t, stderr, "warning: sync failed")
-	assert.NotContains(t, stderr, "warning: pricing seed failed")
+	assert.NotContains(t, stderr, "warning: usage refresh incomplete")
 }
 
 // TestLocalSessionUsageRefreshesSubagentTranscripts covers the freshness
@@ -258,4 +258,73 @@ func TestLocalSessionUsageRefreshesSubagentTranscripts(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, own)
 	assert.Zero(t, own.SubagentCount)
+}
+
+func TestLocalSessionUsageStaleArchiveReturnsStoredUsage(t *testing.T) {
+	database, backend, freshID := staleSessionUsageBackend(t)
+	stderr := captureStderr(t, func() {
+		out, code, err := backend.SessionUsage(t.Context(), sessionUsageQuery{SessionID: "saved"})
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, 42, out.TotalOutputTokens)
+		assert.True(t, out.RefreshIncomplete)
+		assert.Equal(t, tokenUseExitOK, code)
+	})
+	assert.True(t, database.NeedsResync())
+	assert.Contains(t, stderr, "warning: archive data version changed; showing stored usage until the archive is rebuilt")
+	retryStderr := captureStderr(t, func() {
+		out, code, err := backend.SessionUsage(t.Context(), sessionUsageQuery{SessionID: "codex:" + freshID})
+		assert.Nil(t, out)
+		require.ErrorContains(t, err, "archive rebuild")
+		assert.Equal(t, tokenUseExitErr, code)
+	})
+	assert.NotContains(t, retryStderr, "session not found")
+	out, _, err := backend.SessionUsage(t.Context(), sessionUsageQuery{SessionID: "saved", NoSync: true})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.False(t, out.RefreshIncomplete)
+}
+
+func TestLocalSessionUsageReportsNotFoundWhenStale(t *testing.T) {
+	_, backend, _ := staleSessionUsageBackend(t)
+	missingStderr := captureStderr(t, func() {
+		out, code, err := backend.SessionUsage(t.Context(), sessionUsageQuery{SessionID: "missing"})
+		require.NoError(t, err)
+		assert.Nil(t, out)
+		assert.Equal(t, tokenUseExitNotFound, code)
+	})
+	assert.NotContains(t, missingStderr, "warning:")
+}
+
+func staleSessionUsageBackend(t *testing.T) (*db.DB, localArchiveQueryBackend, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "sessions.db")
+	writer := dbtest.OpenTestDBAt(t, dbPath)
+	root := t.TempDir()
+	codexRoot := t.TempDir()
+	source := filepath.Join(root, "project-a", "saved.jsonl")
+	dbtest.WriteTestFile(t, source, []byte(testjsonl.NewSessionBuilder().AddClaudeUser("2026-01-01T00:00:00Z", "changed source").String()))
+	const freshID = "123e4567-e89b-42d3-a456-426614174000"
+	freshSource := filepath.Join(codexRoot,
+		"rollout-2026-01-01T00-00-00-"+freshID+".jsonl")
+	dbtest.WriteTestFile(t, freshSource, []byte(testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON(freshID, "project-a", "user", "2026-01-01T00:00:00Z"),
+		testjsonl.CodexMsgJSON("user", "fresh source", "2026-01-01T00:00:00Z"),
+	)))
+	require.NoError(t, writer.UpsertSession(t.Context(), db.Session{ID: "saved", Agent: "claude", Project: "project-a", FilePath: new(source), TotalOutputTokens: 42, HasTotalOutputTokens: true}))
+	require.NoError(t, writer.Close())
+	raw, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	_, err = raw.ExecContext(t.Context(), "PRAGMA user_version = 0")
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	database, err := db.OpenIsolatedContext(t.Context(), dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { database.Close() })
+	agentDirs := map[parser.AgentType][]string{
+		parser.AgentClaude: {root},
+		parser.AgentCodex:  {codexRoot},
+	}
+	backend := localArchiveQueryBackend{database: database, offline: true, cfg: config.Config{AgentDirs: agentDirs}}
+	return database, backend, freshID
 }

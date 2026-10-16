@@ -34,10 +34,11 @@ func (s *Server) registerSyncRoutes() {
 }
 
 type syncStatusResponse struct {
-	ArchiveStale bool               `json:"archive_stale" doc:"Results may reflect the archive before a required parser rebuild"`
-	LastSync     string             `json:"last_sync"`
-	Stats        *syncpkg.SyncStats `json:"stats"`
-	Progress     *syncpkg.Progress  `json:"progress,omitempty"`
+	ArchiveStale   bool               `json:"archive_stale" doc:"Results may reflect the archive before a required parser rebuild"`
+	StartupPending bool               `json:"startup_pending" doc:"Startup ingestion has not completed successfully"`
+	LastSync       string             `json:"last_sync"`
+	Stats          *syncpkg.SyncStats `json:"stats"`
+	Progress       *syncpkg.Progress  `json:"progress,omitempty"`
 }
 
 type sessionSyncInput struct {
@@ -162,6 +163,7 @@ func (s *Server) humaSyncStatus(
 	if engine == nil {
 		return &jsonOutput[syncStatusResponse]{Body: syncStatusResponse{ArchiveStale: s.archiveStale()}}, nil
 	}
+	startupPending := s.engine != nil && !s.engine.StartupReconciled()
 	lastSync := engine.LastSync()
 	stats := engine.LastSyncStats()
 	var lastSyncStr string
@@ -174,10 +176,11 @@ func (s *Server) humaSyncStatus(
 	}
 	return &jsonOutput[syncStatusResponse]{
 		Body: syncStatusResponse{
-			ArchiveStale: s.archiveStale(),
-			LastSync:     lastSyncStr,
-			Stats:        &stats,
-			Progress:     progress,
+			ArchiveStale:   s.archiveStale(),
+			StartupPending: startupPending,
+			LastSync:       lastSyncStr,
+			Stats:          &stats,
+			Progress:       progress,
 		},
 	}, nil
 }
@@ -1078,17 +1081,25 @@ func (s *Server) humaSyncSession(
 	if in.Body.Subagents && in.Body.ID == "" {
 		return nil, apiError(http.StatusBadRequest, "'subagents' requires 'id'")
 	}
-	if err := s.resyncBeforeSessionSync(ctx); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil, nil
-		}
-		if handled := handleHumaContextError(err); handled != nil {
-			return nil, handled
-		}
-		return nil, apiError(http.StatusInternalServerError, err.Error())
+	if err := service.ValidateUsageRefresh(in.Body); err != nil {
+		return nil, apiError(http.StatusBadRequest, err.Error())
+	}
+	if local, ok := s.db.(*db.DB); ok && local.NeedsResync() {
+		return nil, huma.ErrorWithHeaders(
+			apiError(http.StatusConflict,
+				"archive is stale; wait for the rebuild or run 'agentsview sync --full' before syncing this session"),
+			http.Header{ResyncRequiredHeader: []string{"true"}},
+		)
+	}
+	if in.Body.UsageRefresh && s.engine != nil && !s.engine.StartupReconciled() {
+		return nil, apiError(http.StatusConflict,
+			"startup ingestion is incomplete; wait for scheduled ingestion or run 'agentsview sync'")
 	}
 	detail, err := s.sessionSyncService(ctx).Sync(ctx, in.Body)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidUsageRefresh) {
+			return nil, apiError(http.StatusBadRequest, err.Error())
+		}
 		if errors.Is(err, context.Canceled) {
 			return nil, nil
 		}
@@ -1098,26 +1109,12 @@ func (s *Server) humaSyncSession(
 		if handled := handleHumaReadOnly(err); handled != nil {
 			return nil, handled
 		}
-		if errors.Is(err, db.ErrSessionExcluded) ||
+		if errors.Is(err, syncpkg.ErrSyncInProgress) ||
+			errors.Is(err, db.ErrSessionExcluded) ||
 			errors.Is(err, db.ErrSessionTrashed) {
 			return nil, apiError(http.StatusConflict, err.Error())
 		}
 		return nil, apiError(http.StatusInternalServerError, err.Error())
 	}
 	return &jsonOutput[*service.SessionDetail]{Body: detail}, nil
-}
-
-func (s *Server) resyncBeforeSessionSync(ctx context.Context) error {
-	local, ok := s.db.(*db.DB)
-	if !ok || !local.NeedsResync() {
-		return nil
-	}
-	engine, err := s.syncEngineForRequest(ctx)
-	if err != nil {
-		return err
-	}
-	if _, err := s.runResyncWithFallback(ctx, engine, nil); err != nil {
-		return err
-	}
-	return ctx.Err()
 }

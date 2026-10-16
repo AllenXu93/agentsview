@@ -56,13 +56,15 @@ type VersionInfo struct {
 // Bump it when a client-visible contract cannot be decoded safely by an older
 // CLI or daemon.
 const (
-	APIVersion = 11
+	APIVersion = 12
 	// ScopedWatchPushAPIVersion is the first daemon API that accepts bounded
 	// watcher batches and their authoritative recovery scope on push requests.
 	ScopedWatchPushAPIVersion = 7
 	// SubagentUsageAPIVersion is the first daemon API that guarantees
 	// combined session-usage scope and targeted descendant synchronization.
 	SubagentUsageAPIVersion = 6
+	// UsageRefreshAPIVersion supports usage refresh without waiting for ingestion.
+	UsageRefreshAPIVersion = 12
 )
 
 const daemonService = "agentsview"
@@ -919,7 +921,8 @@ func (s *Server) archiveStaleMiddleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			if !archiveFreshnessProbe(r.URL.Path) && s.archiveStale() {
 				w.Header().Set(apiclient.ArchiveStaleHeader, "true")
-				if archiveWriteRequest(r) {
+				// Session sync returns its stale-archive conflict through the route.
+				if archiveWriteRequest(r) && r.URL.Path != "/api/v1/sessions/sync" {
 					if local, ok := s.db.(*db.DB); ok && local.WriterClosed() {
 						response := writerClosedResponse(w.Header().Add, true)
 						writeError(w, response.Status, response.Message)

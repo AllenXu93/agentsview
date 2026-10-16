@@ -1705,3 +1705,12 @@ func TestDirectBackend_Stats_ArchiveOnlyHostOutcomesUnavailable(t *testing.T) {
 		assert.Contains(t, source.Warnings, provider+" outcomes are unavailable in an archive-only database")
 	}
 }
+
+func TestValidateUsageRefreshRequiresCombinedID(t *testing.T) {
+	for _, input := range []service.SyncInput{
+		{UsageRefresh: true, Subagents: true},
+		{ID: "parent", UsageRefresh: true},
+	} {
+		require.ErrorIs(t, service.ValidateUsageRefresh(input), service.ErrInvalidUsageRefresh)
+	}
+}

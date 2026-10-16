@@ -578,6 +578,15 @@ func (b *directBackend) Sync(
 	if in.Subagents && in.ID == "" {
 		return nil, errors.New("sync: subagents requires id")
 	}
+	if err := ValidateUsageRefresh(in); err != nil {
+		return nil, err
+	}
+	if in.UsageRefresh {
+		if err := b.engine.TrySyncSessionWithSubagentsContext(ctx, in.ID); err != nil {
+			return nil, err
+		}
+		return b.Get(ctx, in.ID)
+	}
 	if in.Subagents {
 		if err := b.engine.SyncSessionWithSubagentsContext(
 			ctx, in.ID,

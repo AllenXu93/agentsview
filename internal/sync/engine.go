@@ -2024,6 +2024,10 @@ func (e *Engine) ReparsePathsContext(ctx context.Context, paths []string) error 
 }
 
 func (e *Engine) syncPathsContext(ctx context.Context, paths []string, force bool) error {
+	return e.syncPathsWithLockContext(ctx, paths, force, false)
+}
+
+func (e *Engine) syncPathsWithLockContext(ctx context.Context, paths []string, force, try bool) error {
 	if e.sourceSyncErr != nil {
 		return e.sourceSyncErr
 	}
@@ -2032,7 +2036,9 @@ func (e *Engine) syncPathsContext(ctx context.Context, paths []string, force boo
 	}
 	ctx = e.parsePolicyContext(ctx)
 	stats, tombstoned, err := func() (SyncStats, int, error) {
-		e.syncMu.Lock()
+		if err := e.lockSync(try); err != nil {
+			return SyncStats{}, 0, err
+		}
 		defer e.syncMu.Unlock()
 		defer e.clearCurrentProgress()
 		previous := e.forceFullParse
@@ -4983,6 +4989,17 @@ func (e *Engine) RunExclusive(work func() error) error {
 // found another sync or maintenance pass holding the exclusive engine lock.
 var ErrSyncInProgress = errors.New("sync already in progress")
 
+func (e *Engine) lockSync(try bool) error {
+	if try {
+		if !e.syncMu.TryLock() {
+			return ErrSyncInProgress
+		}
+	} else {
+		e.syncMu.Lock()
+	}
+	return nil
+}
+
 // TryRunExclusive is the non-blocking foreground counterpart to RunExclusive.
 // Background work keeps using RunExclusive so scheduled obligations are not
 // lost; user-triggered sync requests use this method to fail promptly instead
@@ -4993,8 +5010,8 @@ func (e *Engine) TryRunExclusive(work func() error) error {
 			"TryRunExclusive refused on report-only parse-diff engine",
 		)
 	}
-	if !e.syncMu.TryLock() {
-		return ErrSyncInProgress
+	if err := e.lockSync(true); err != nil {
+		return err
 	}
 	defer e.syncMu.Unlock()
 	return work()
@@ -21039,6 +21056,10 @@ func (e *Engine) SyncSingleSession(sessionID string) (err error) {
 func (e *Engine) SyncSingleSessionContext(
 	ctx context.Context, sessionID string,
 ) (err error) {
+	return e.syncSingleSessionContext(ctx, sessionID, false)
+}
+
+func (e *Engine) syncSingleSessionContext(ctx context.Context, sessionID string, try bool) (err error) {
 	if e.sourceSyncErr != nil {
 		return e.sourceSyncErr
 	}
@@ -21049,7 +21070,9 @@ func (e *Engine) SyncSingleSessionContext(
 		)
 	}
 	ctx = e.parsePolicyContext(ctx)
-	e.syncMu.Lock()
+	if err := e.lockSync(try); err != nil {
+		return err
+	}
 	preserved := false
 	sessionsChanged := false
 	// Defers run LIFO: unlock runs first (releasing syncMu), then

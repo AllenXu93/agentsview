@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -140,8 +141,8 @@ func resolveArchiveQueryTransport(
 	policy archiveQueryPolicy,
 ) (transport, error) {
 	if policy.AutoStart && !policy.NoSync {
-		// Daily reports can read committed data while sync runs after
-		// readiness. Session-specific commands still need startup ingestion.
+		// Queries that skip startup ingestion can read committed data
+		// while the daemon syncs after readiness.
 		cfg.SkipInitialSync = policy.SkipInitialSync
 		return ensureTransportContext(ctx, cfg, transportIntentArchiveWrite, 0)
 	}
@@ -308,7 +309,9 @@ func (b localArchiveQueryBackend) SessionUsage(
 		ctx, b.database, b.cfg.AgentDirs, query.SessionID,
 	)
 
-	if known && !b.skipFreshData && !query.NoSync {
+	stale := b.database.NeedsResync()
+	refreshIncomplete := stale && !b.skipFreshData && !query.NoSync
+	if known && !b.skipFreshData && !query.NoSync && !stale {
 		engine := sync.NewEngine(ctx, b.database, sync.EngineConfig{
 			AgentDirs:               b.cfg.AgentDirs,
 			SourceMachines:          b.cfg.SourceMachines,
@@ -327,8 +330,9 @@ func (b localArchiveQueryBackend) SessionUsage(
 			syncErr = engine.SyncSessionWithSubagentsContext(ctx, resolvedID)
 		}
 		if syncErr != nil {
+			refreshIncomplete = true
 			fmt.Fprintf(os.Stderr,
-				"warning: sync failed: %v\n", syncErr)
+				"warning: usage refresh incomplete; showing usage currently stored in the archive: %v\n", syncErr)
 		}
 		// Flush pending debounced signal recomputes before the
 		// usage query reads the session.
@@ -349,8 +353,16 @@ func (b localArchiveQueryBackend) SessionUsage(
 			fmt.Errorf("querying session usage: %w", err)
 	}
 	if u == nil {
+		if stale && known && !b.skipFreshData && !query.NoSync {
+			return nil, tokenUseExitErr, errors.New(
+				"session usage is not yet available; retry after the archive rebuild finishes",
+			)
+		}
 		fmt.Fprintf(os.Stderr, "session not found: %s\n", query.SessionID)
 		return nil, tokenUseExitNotFound, nil
+	}
+	if stale && !b.skipFreshData && !query.NoSync {
+		fmt.Fprintln(os.Stderr, "warning: archive data version changed; showing stored usage until the archive is rebuilt")
 	}
 	if len(u.UnpricedModels) > 0 && !b.offline {
 		refreshed, refErr := pricingrefresh.RefreshIfStale(
@@ -375,8 +387,9 @@ func (b localArchiveQueryBackend) SessionUsage(
 		}
 	}
 	return &sessionUsageOutput{
-		SessionUsage:  *u,
-		ServerRunning: false,
+		SessionUsage:      *u,
+		ServerRunning:     false,
+		RefreshIncomplete: refreshIncomplete,
 	}, usageExitCode(u), nil
 }
 

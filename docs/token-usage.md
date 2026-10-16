@@ -1090,12 +1090,18 @@ when it must include new source changes. Full parser rebuilds serve the retained
 archive with a stale warning; scoped upgrades and schema repairs finish before
 the daemon serves requests.
 
-`session usage`, `token-use`, and `usage statusline` complete pending startup
-ingestion before querying. This also applies when a previous daily report
-started the daemon. Once startup ingestion is complete, subsequent queries do
-not repeat a full sync; the daemon's file watcher handles later source changes.
-During a full parser rebuild, these commands skip startup ingestion and read the
+`usage statusline` completes pending startup ingestion before querying. This
+also applies when a previous daily report started the daemon. Once startup
+ingestion is complete, subsequent queries do not repeat a full sync; the
+daemon's file watcher handles later source changes.
+During a full parser rebuild, statusline skips startup ingestion and reads the
 retained archive with a stale warning.
+
+`session usage` and its `token-use` alias refresh known sessions without
+waiting for startup ingestion. Combined totals include archived descendants.
+See the [session usage contract](/docs/session-api/#agentsview-session-usage)
+for refresh behavior, missing-session exit codes, and the `refresh_incomplete`
+JSON field.
 
 `--no-sync` skips source refresh and starts any new daemon without automatic
 sync. It does not disable sync on an already-running daemon. `--offline` reads

@@ -6764,6 +6764,8 @@ components:
           type: string
         subagents:
           type: boolean
+        usage_refresh:
+          type: boolean
       type: object
     ServiceToolCall:
       additionalProperties: false
@@ -7580,10 +7582,14 @@ components:
           type: string
         progress:
           $ref: "#/components/schemas/SyncProgress"
+        startup_pending:
+          description: Startup ingestion has not completed successfully
+          type: boolean
         stats:
           $ref: "#/components/schemas/SyncSyncStats"
       required:
         - archive_stale
+        - startup_pending
         - last_sync
         - stats
       type: object
