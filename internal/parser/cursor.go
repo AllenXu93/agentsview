@@ -591,7 +591,7 @@ func parseCursorJSONL(data string) []ParsedMessage {
 			msg.Role = RoleAssistant
 			text, thinkingText, dialogueText, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), content)
 			msg.Content = text
-			msg.DialogueText = new(dialogueText)
+			msg.DialogueText = new(strings.TrimSpace(dialogueText))
 			msg.ThinkingText = thinkingText
 			msg.HasThinking = hasThinking
 			msg.HasToolUse = hasToolUse

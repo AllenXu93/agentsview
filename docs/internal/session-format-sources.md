@@ -2139,6 +2139,9 @@ schemas keep their existing ordering behavior.
 
 ## OpenHands (`openhands`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against parser fixtures.
+  Structured text blocks retain literal markers separately from reasoning and
+  tool calls.
 - **Format:** A CLI conversation directory containing `base_state.json` and one
   JSON file per event under `events/`; Agentsview also fingerprints optional
   legacy `TASKS.json` files.
@@ -2978,6 +2981,9 @@ schemas keep their existing ordering behavior.
 
 ## OpenClaw (`openclaw`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against parser fixtures.
+  Structured text blocks retain literal markers separately from reasoning and
+  tool calls.
 - **Format:** Per-agent session JSONL managed by the OpenClaw session store.
 - **Evidence:** `source`.
 - **Upstream:** Clone `https://github.com/openclaw/openclaw.git` at
@@ -3044,6 +3050,9 @@ schemas keep their existing ordering behavior.
 
 ## QClaw (`qclaw`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against parser fixtures.
+  Structured text blocks retain literal markers separately from reasoning and
+  tool calls.
 - **Format:** OpenClaw-compatible agent session JSONL with QClaw-specific root
   discovery.
 - **Evidence:** `no-public-source`.
@@ -3439,6 +3448,9 @@ schemas keep their existing ordering behavior.
 
 ## Devin CLI (`devin`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against parser fixtures.
+  Structured text blocks retain literal markers separately from reasoning and
+  tool calls.
 - **Format:** `cli/sessions.db` for session metadata plus transcript JSON
   artifacts. The `sessions.created_at`, `sessions.last_activity_at`, and
   `message_nodes.created_at` columns are Unix epoch seconds (not

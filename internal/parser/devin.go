@@ -579,7 +579,7 @@ func parseDevinDBMessageNode(
 		return ParsedMessage{}, false, nil
 	}
 
-	content, thinking, _, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), root.Get("content"))
+	content, thinking, dialogue, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), root.Get("content"))
 	topThinking := strings.TrimSpace(root.Get("thinking").Str)
 	if topThinking != "" && topThinking != thinking {
 		thinking = joinNonEmpty(thinking, topThinking)
@@ -623,6 +623,7 @@ func parseDevinDBMessageNode(
 		Ordinal:          ordinal,
 		Role:             role,
 		Content:          content,
+		DialogueText:     new(dialogue),
 		ThinkingText:     thinking,
 		Timestamp:        devinUnixSec(row.CreatedAt),
 		HasThinking:      hasThinking,
@@ -971,7 +972,7 @@ func parseDevinStep(rawSessionID string, step gjson.Result, ordinal int, model s
 		return ParsedMessage{}, false
 	}
 
-	content, thinking, _, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), step.Get("message"))
+	content, thinking, dialogue, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), step.Get("message"))
 	topLevelToolText, topLevelToolCalls := formatTopLevelToolUses(step.Get("tool_use"))
 	if topLevelToolText != "" {
 		content = joinNonEmpty(content, topLevelToolText)
@@ -998,6 +999,7 @@ func parseDevinStep(rawSessionID string, step gjson.Result, ordinal int, model s
 		Ordinal:          ordinal,
 		Role:             role,
 		Content:          content,
+		DialogueText:     new(dialogue),
 		ThinkingText:     thinking,
 		Timestamp:        devinStepTimestamp(step),
 		HasThinking:      hasThinking,

@@ -275,7 +275,7 @@ func parseOpenHandsMessageEvent(
 		return ParsedMessage{}, false, ""
 	}
 
-	content, _, _, _, _, toolCalls, toolResults := ExtractTextContent(context.Background(), llmMessage.Get("content"))
+	content, thinking, dialogue, blockThinking, _, toolCalls, toolResults := ExtractTextContent(context.Background(), llmMessage.Get("content"))
 	content, hasThinking := openHandsAppendThinking(
 		content, ev,
 	)
@@ -290,8 +290,10 @@ func parseOpenHandsMessageEvent(
 		Ordinal:       ordinal,
 		Role:          role,
 		Content:       content,
+		DialogueText:  new(strings.TrimSpace(dialogue)),
+		ThinkingText:  joinNonEmpty(thinking, openHandsThinkingText(ev)),
 		Timestamp:     ts,
-		HasThinking:   hasThinking,
+		HasThinking:   hasThinking || blockThinking,
 		HasToolUse:    len(toolCalls) > 0,
 		ContentLength: len(content),
 		ToolCalls:     toolCalls,

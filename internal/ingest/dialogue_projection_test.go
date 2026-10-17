@@ -85,7 +85,7 @@ func TestPiSearchSeparatesDialogueThinkingAndTools(t *testing.T) {
 			}
 		}
 	}
-	for _, mode := range []string{"fts", "terms", "semantic", "hybrid"} {
+	for _, mode := range []string{"terms", "semantic", "hybrid"} {
 		_, err := destination.SearchContent(t.Context(), db.ContentSearchFilter{Pattern: "reasoningneedle", Mode: mode, Sources: []string{"thinking"}})
 		var inputErr *db.SearchInputError
 		require.ErrorAs(t, err, &inputErr)

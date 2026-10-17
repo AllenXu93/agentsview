@@ -28,10 +28,11 @@ const (
 // mirror SessionFilter; they are mapped through buildSessionFilter so the
 // include-children / one-shot / orphan logic is shared, not reimplemented.
 type ContentSearchFilter struct {
-	Pattern       string
-	Mode          string   // "substring" (default) | "regex" | "fts" | "terms" | "semantic" | "hybrid"
-	Sources       []string // subset of {"messages","thinking","tool_input","tool_result"}
-	ExcludeSystem bool
+	Pattern        string
+	Mode           string   // "substring" (default) | "regex" | "fts" | "terms" | "semantic" | "hybrid"
+	Sources        []string // subset of {"messages","thinking","tool_input","tool_result"}
+	ExcludeSystem  bool
+	defaultSources bool
 
 	Project, ExcludeProject, Machine, Agent           string
 	SessionID, GitBranchExact                         string
@@ -76,7 +77,7 @@ type ContentMatch struct {
 	Agent       string  `json:"agent"`
 	Machine     string  `json:"machine"`
 	DisplayName *string `json:"display_name"`
-	Location    string  `json:"location"` // message | thinking | tool_input | tool_result
+	Location    string  `json:"location" doc:"Where the match occurred: message, thinking, tool_input, or tool_result."`
 	Role        string  `json:"role"`
 	ToolName    string  `json:"tool_name,omitempty"`
 	Ordinal     int     `json:"ordinal"`
@@ -275,15 +276,13 @@ func (db *DB) SearchContent(
 	}
 
 	if len(f.Sources) == 0 {
+		f.defaultSources = true
 		f.Sources = []string{"messages", "tool_input", "tool_result"}
 		if f.Mode == "" || f.Mode == "substring" || f.Mode == "regex" {
 			f.Sources = append(f.Sources, "thinking")
 		}
 	}
 	for _, s := range f.Sources {
-		if s == "thinking" && f.Mode == "fts" {
-			return ContentSearchPage{}, searchInputErrorf("search: thinking requires SQLite substring or regex mode")
-		}
 		if s != "messages" && s != "thinking" && s != "tool_input" && s != "tool_result" {
 			return ContentSearchPage{}, searchInputErrorf("search: unknown source %q", s)
 		}
@@ -362,8 +361,8 @@ func (db *DB) searchContentSubstring(
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE m.dialogue_text IS NOT NULL AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
-			snippetExpr("m.thinking_text"), sysPred, scope))
+			WHERE (%t OR m.dialogue_text IS NOT NULL) AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
+			snippetExpr("m.thinking_text"), !f.defaultSources, sysPred, scope))
 		args = append(args, like)
 		args = append(args, scopeArgs...)
 	}
@@ -655,7 +654,7 @@ func (db *DB) regexCandidateRows(
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE m.dialogue_text IS NOT NULL AND %s AND m.thinking_text <> '' AND %s AND m.%s`, w, sysPred, scope))
+			WHERE (%t OR m.dialogue_text IS NOT NULL) AND %s AND m.thinking_text <> '' AND %s AND m.%s`, !f.defaultSources, w, sysPred, scope))
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {

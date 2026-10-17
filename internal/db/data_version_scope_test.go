@@ -68,7 +68,7 @@ func TestValidateDataVersionScopes(t *testing.T) {
 
 func TestDialogueScopedUpgradePreservesSessions(t *testing.T) {
 	d := testDB(t)
-	providers := []parser.AgentType{parser.AgentPi, parser.AgentOMP, parser.AgentOMO, parser.AgentPrimeAgent, parser.AgentStepCode, parser.AgentIflow, parser.AgentClaude, parser.AgentCowork, parser.AgentIcodemate, parser.AgentQoder, parser.AgentCursor, parser.AgentAmp, parser.AgentOpenClaude}
+	providers := []parser.AgentType{parser.AgentPi, parser.AgentOMP, parser.AgentOMO, parser.AgentPrimeAgent, parser.AgentStepCode, parser.AgentIflow, parser.AgentClaude, parser.AgentCowork, parser.AgentIcodemate, parser.AgentQoder, parser.AgentCursor, parser.AgentAmp, parser.AgentOpenClaude, parser.AgentOpenClaw, parser.AgentQClaw, parser.AgentDevin, parser.AgentOpenHands}
 	assert.ElementsMatch(t, providers, ScopedDataVersionProviders(137, 138))
 	for _, agent := range append(providers, parser.AgentCursorIDE) {
 		id := string(agent) + ":kept"

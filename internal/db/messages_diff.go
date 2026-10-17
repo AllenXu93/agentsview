@@ -48,6 +48,10 @@ var messageUpdateSetClause = func() string {
 // Both sides go through the same resolve helpers the insert path
 // uses, so equality is defined on exactly the persisted tuples.
 func messageRowEqual(a, b Message) bool {
+	if a.DialogueText != b.DialogueText &&
+		(a.DialogueText == nil || b.DialogueText == nil || *a.DialogueText != *b.DialogueText) {
+		return false
+	}
 	if a.SessionID != b.SessionID || a.Ordinal != b.Ordinal ||
 		a.Role != b.Role || a.Content != b.Content ||
 		a.ThinkingText != b.ThinkingText || a.Timestamp != b.Timestamp ||
@@ -65,8 +69,7 @@ func messageRowEqual(a, b Message) bool {
 		a.PromptSource != b.PromptSource || a.SourceUUID != b.SourceUUID ||
 		a.SourceParentUUID != b.SourceParentUUID ||
 		a.IsSidechain != b.IsSidechain ||
-		a.IsCompactBoundary != b.IsCompactBoundary ||
-		!equalOptional(a.DialogueText, b.DialogueText) {
+		a.IsCompactBoundary != b.IsCompactBoundary {
 		return false
 	}
 
@@ -455,8 +458,4 @@ func placeholderList(n int) string {
 	return strings.TrimSuffix(
 		strings.Repeat("?,", n), ",",
 	)
-}
-
-func equalOptional(a, b *string) bool {
-	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }

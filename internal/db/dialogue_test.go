@@ -118,3 +118,19 @@ func TestDialogueProjectionKeepsCitationMembers(t *testing.T) {
 		assert.Equal(t, [2]int{1, 3}, page.Matches[0].OrdinalRange)
 	}
 }
+
+func TestThinkingSourceSearchesUnclassifiedArchiveRows(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "archived", "project", func(s *Session) { s.UserMessageCount = 2 })
+	insertMessages(t, d, Message{SessionID: "archived", Role: "assistant", Content: "[Thinking]\narchivedneedle\n[/Thinking]\nAnswer", ThinkingText: "archivedneedle"})
+	for _, mode := range []string{"substring", "regex"} {
+		explicit, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "archivedneedle", Mode: mode, Sources: []string{"thinking"}})
+		require.NoError(t, err)
+		require.Len(t, explicit.Matches, 1)
+		assert.Equal(t, "thinking", explicit.Matches[0].Location)
+		all, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "archivedneedle", Mode: mode})
+		require.NoError(t, err)
+		require.Len(t, all.Matches, 1)
+		assert.Equal(t, "message", all.Matches[0].Location)
+	}
+}
