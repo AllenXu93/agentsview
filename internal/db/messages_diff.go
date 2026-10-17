@@ -179,6 +179,7 @@ func transcriptMessagesEqual(stored, incoming []Message) bool {
 func transcriptMessageEqual(a, b Message) bool {
 	comparableTranscriptMessage := func(msg Message) Message {
 		msg.ID = 0
+		msg.DialogueText = nil
 		msg.ContentLength = 0
 		msg.SourceType = ""
 		msg.SourceParentUUID = ""

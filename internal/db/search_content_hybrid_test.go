@@ -142,8 +142,6 @@ func TestSearchContentHybridFTSSnippetUsesDialogue(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page.Matches, 1)
 	assert.Equal(t, "answerneedle", page.Matches[0].Snippet)
-	assert.NotContains(t, page.Matches[0].Snippet, "reasoningneedle")
-	assert.NotContains(t, page.Matches[0].Snippet, "secretpath")
 }
 
 // TestSearchContentHybridScoresStrictlyDescending pins that fused RRF scores

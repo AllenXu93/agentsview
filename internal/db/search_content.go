@@ -344,10 +344,10 @@ func (db *DB) searchContentSubstring(
 				COALESCE(m.timestamp,'') AS ts, %s AS snippet,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				0 AS src, m.id AS row_id
-			FROM messages m JOIN message_search_content mc ON mc.id = m.id
+			FROM messages m
 			JOIN sessions s ON s.id = m.session_id
 			WHERE %s LIKE ? ESCAPE '\' AND %s AND m.%s`,
-			snippetExpr("mc.content"), "mc.content",
+			snippetExpr("COALESCE(m.dialogue_text, m.content)"), "COALESCE(m.dialogue_text, m.content)",
 			sysPred, scope))
 		args = append(args, like)
 		args = append(args, scopeArgs...)
@@ -379,8 +379,8 @@ func (db *DB) searchContentSubstring(
 			FROM tool_calls tc
 			JOIN messages mm ON mm.id = tc.message_id
 			JOIN sessions s ON s.id = tc.session_id
-			WHERE tc.input_json LIKE ? ESCAPE '\' AND tc.%s`,
-			snippetExpr("tc.input_json"), scope))
+			WHERE COALESCE(NULLIF(tc.input_json, ''), tc.file_path) LIKE ? ESCAPE '\' AND tc.%s`,
+			snippetExpr("COALESCE(NULLIF(tc.input_json, ''), tc.file_path)"), scope))
 		args = append(args, like)
 		args = append(args, scopeArgs...)
 	}
@@ -626,7 +626,7 @@ func (db *DB) regexCandidateRows(
 			SystemPrefixSQL("m.content", "m.role")
 	}
 	if hasSource(f, "messages") {
-		w := prefilterClause("mc.content")
+		w := prefilterClause("COALESCE(m.dialogue_text, m.content)")
 		branches = append(branches, fmt.Sprintf(`
 			SELECT m.session_id AS session_id, s.project AS project,
 				s.agent AS agent,
@@ -637,10 +637,10 @@ func (db *DB) regexCandidateRows(
 				%s AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				0 AS src, m.id AS row_id
-			FROM messages m JOIN message_search_content mc ON mc.id = m.id
+			FROM messages m
 			JOIN sessions s ON s.id = m.session_id
 			WHERE %s AND %s AND m.%s`,
-			"mc.content", w, sysPred, scope))
+			"COALESCE(m.dialogue_text, m.content)", w, sysPred, scope))
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "thinking") {
@@ -660,7 +660,7 @@ func (db *DB) regexCandidateRows(
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {
-		w := prefilterClause("tc.input_json")
+		w := prefilterClause("COALESCE(NULLIF(tc.input_json, ''), tc.file_path)")
 		branches = append(branches, fmt.Sprintf(`
 			SELECT tc.session_id AS session_id, s.project AS project,
 				s.agent AS agent,
@@ -668,7 +668,7 @@ func (db *DB) regexCandidateRows(
 				'tool_input' AS location,
 				'assistant' AS role, tc.tool_name AS tool_name,
 				mm.ordinal AS ordinal, COALESCE(mm.timestamp,'') AS ts,
-				tc.input_json AS body,
+				COALESCE(NULLIF(tc.input_json, ''), tc.file_path) AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				1 AS src, tc.id AS row_id
 			FROM tool_calls tc JOIN messages mm ON mm.id = tc.message_id
@@ -883,16 +883,15 @@ func (db *DB) searchContentFTS(
 	query := fmt.Sprintf(`
 		SELECT m.session_id, s.project, s.agent,
 			COALESCE(s.transcript_revision,''), 'message', m.role, '',
-			m.ordinal, COALESCE(m.timestamp,'') AS ts, mc.content AS snippet
+			m.ordinal, COALESCE(m.timestamp,'') AS ts, COALESCE(m.dialogue_text, m.content) AS snippet
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
-		JOIN message_search_content mc ON mc.id = m.id
 		JOIN sessions s ON s.id = m.session_id
 		WHERE messages_fts MATCH ? AND %s AND m.%s
 		ORDER BY rank ASC, m.ordinal ASC, m.id ASC
 		LIMIT ? OFFSET ?`, sysPred, scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
-	args := []any{ftsQuery.match}
+	args := []any{"dialogue : (" + ftsQuery.match + ")"}
 	args = append(args, scopeArgs...)
 	args = append(args, f.Limit+1, f.Cursor)
 	page, err := db.scanContentMatches(ctx, query, args, f.Limit, f.Cursor, func(body string) string {
@@ -1416,7 +1415,7 @@ func (db *DB) fetchHybridFTSBatch(
 	scope, scopeArgs := semanticSessionScopeSubquery(f)
 	query := fmt.Sprintf(`
 		SELECT m.session_id, m.ordinal,
-		       snippet(messages_fts, 0, '', '', '...', 32) AS snip
+		       snippet(messages_fts, 1, '', '', '...', 32) AS snip
 		FROM messages_fts f JOIN messages m ON m.id = f.rowid
 		WHERE messages_fts MATCH ? AND m.role IN ('user','assistant')
 		  AND m.is_system = 0 AND %s
@@ -1425,7 +1424,7 @@ func (db *DB) fetchHybridFTSBatch(
 		SystemPrefixSQL("m.content", "m.role"), scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
 
-	args := []any{ftsQuery.match}
+	args := []any{"dialogue : (" + ftsQuery.match + ")"}
 	args = append(args, scopeArgs...)
 	args = append(args, k, offset)
 
@@ -1701,13 +1700,12 @@ func (db *DB) enrichSemanticHits(
 			query := "WITH hits(session_id, ordinal) AS (VALUES " +
 				strings.Join(values, ", ") + ") " +
 				"SELECT m.session_id, s.project, s.agent, s.machine, COALESCE(s.display_name, s.session_name), m.role, m.ordinal, " +
-				"COALESCE(m.timestamp, ''), m.content, mc.content, " +
+				"COALESCE(m.timestamp, ''), m.content, COALESCE(m.dialogue_text, m.content), " +
 				"COALESCE(s.transcript_revision, ''), " +
 				"COALESCE(s.relationship_type, ''), " +
 				"COALESCE(s.parent_session_id, ''), m.is_sidechain " +
 				"FROM hits h " +
 				"JOIN messages m ON m.session_id = h.session_id AND m.ordinal = h.ordinal " +
-				"JOIN message_search_content mc ON mc.id = m.id " +
 				"JOIN sessions s ON s.id = m.session_id"
 
 			rows, err := db.getReader().QueryContext(ctx, query, args...)

@@ -12,7 +12,7 @@ import (
 func refreshDialogueFTS(ctx context.Context, w *writerHandle) error {
 	var ddl string
 	err := w.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name = 'messages_fts'").Scan(&ddl)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && strings.Contains(ddl, "message_search_content") {
+	if errors.Is(err, sql.ErrNoRows) || err == nil && strings.Contains(ddl, "dialogue,") {
 		return nil
 	}
 	if err != nil {
@@ -25,7 +25,7 @@ func refreshDialogueFTS(ctx context.Context, w *writerHandle) error {
 	defer func() { _ = tx.Rollback() }()
 	for _, query := range []string{
 		"DROP TRIGGER IF EXISTS messages_ai", "DROP TRIGGER IF EXISTS messages_ad", "DROP TRIGGER IF EXISTS messages_au",
-		"DROP TABLE messages_fts", schemaFTS, "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')",
+		"DROP TABLE messages_fts", "DROP VIEW IF EXISTS message_search_content", schemaFTS, "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')",
 	} {
 		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("refreshing dialogue FTS: %w", err)

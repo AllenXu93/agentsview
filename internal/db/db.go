@@ -654,8 +654,8 @@ var schemaSQL string
 // the two installation sites byte-identical.
 const messagesADTriggerDDL = `
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content)
-        VALUES('delete', old.id, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_fts(messages_fts, rowid, content, dialogue)
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
 END;
 `
 
@@ -669,35 +669,35 @@ const messagesCJKADTriggerDDL = `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_ad
 AFTER DELETE ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
-    INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, content)
-        VALUES('delete', old.id, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, content, dialogue)
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
 END;
 `
 
 const schemaFTS = `
 CREATE VIEW IF NOT EXISTS message_search_content AS
-SELECT id, session_id, COALESCE(dialogue_text, content) AS content FROM messages;
+SELECT id, session_id, content, COALESCE(dialogue_text, content) AS dialogue FROM messages;
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content,
+    content, dialogue,
     content='message_search_content',
     content_rowid='id',
     tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 ` + messagesADTriggerDDL + `
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content)
-        VALUES('delete', old.id, COALESCE(old.dialogue_text, old.content));
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_fts(messages_fts, rowid, content, dialogue)
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 `
 
 const schemaCJKFTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_cjk_fts USING fts5(
-    content,
+    content, dialogue,
     content='message_search_content',
     content_rowid='id',
     tokenize='simple 0'
@@ -708,15 +708,15 @@ const schemaCJKFTSTriggers = `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_ai
 AFTER INSERT ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
-    INSERT INTO messages_cjk_fts(rowid, content) VALUES (new.id, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_cjk_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 ` + messagesCJKADTriggerDDL + `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_au
 AFTER UPDATE ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
-    INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, content)
-        VALUES('delete', old.id, COALESCE(old.dialogue_text, old.content));
-    INSERT INTO messages_cjk_fts(rowid, content) VALUES (new.id, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, content, dialogue)
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_cjk_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 
 -- The persistent BEFORE triggers mark a session pending without consulting

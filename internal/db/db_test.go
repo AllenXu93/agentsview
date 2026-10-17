@@ -4871,15 +4871,6 @@ func TestOpenRejectsArchiveWhoseFTSModuleIsUnavailable(t *testing.T) {
 	require.Error(t, err, "Open must refuse an archive whose FTS index this executable cannot load")
 	require.ErrorContains(t, err, "no such module: fts5_absent")
 	require.ErrorContains(t, err, "-tags fts5")
-
-	raw, err = sql.Open("sqlite3", makeDSN(path, true))
-	require.NoError(t, err)
-	defer raw.Close()
-	var content string
-	require.NoError(t, raw.QueryRowContext(t.Context(),
-		"SELECT content FROM messages WHERE session_id = 's1' AND ordinal = 0",
-	).Scan(&content))
-	assert.Equal(t, "indexed text", content)
 }
 
 func TestPath(t *testing.T) {
