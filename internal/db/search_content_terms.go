@@ -49,9 +49,8 @@ func ValidateTermsFilter(f ContentSearchFilter) error {
 // implement terms mode. Everything else in the query is shared so the
 // exchange definition cannot drift between them.
 type termsSQLFragments struct {
-	systemPrefix  func(contentCol, roleCol string) string
-	messageText   func(alias string) string
-	prefilterText string
+	systemPrefix                           func(contentCol, roleCol string) string
+	messageText, messageTable, messageJoin string
 	// bodyAgg concatenates an exchange's message content in ordinal order.
 	bodyAgg string
 	// timestamp and sessionSort select the match timestamp and the session
@@ -61,22 +60,23 @@ type termsSQLFragments struct {
 
 var termsSQLByDialect = map[string]termsSQLFragments{
 	"sqlite": {
-		systemPrefix:  SystemPrefixSQL,
-		messageText:   func(alias string) string { return "COALESCE(" + alias + ".dialogue_text, " + alias + ".content)" },
-		prefilterText: "COALESCE(dialogue_text, content)",
-		bodyAgg:       "GROUP_CONCAT(content, char(10) ORDER BY ordinal)",
-		timestamp:     "COALESCE(m.timestamp,'')",
-		sessionSort:   "COALESCE(s.ended_at, s.started_at, s.created_at, '')",
-		orderBySort:   "julianday(sort_ts) DESC",
+		systemPrefix: SystemPrefixSQL,
+		messageText:  "mc.content",
+		messageTable: "message_search_content",
+		messageJoin:  "JOIN message_search_content mc ON mc.id = m.id",
+		bodyAgg:      "GROUP_CONCAT(content, char(10) ORDER BY ordinal)",
+		timestamp:    "COALESCE(m.timestamp,'')",
+		sessionSort:  "COALESCE(s.ended_at, s.started_at, s.created_at, '')",
+		orderBySort:  "julianday(sort_ts) DESC",
 	},
 	"postgres": {
-		systemPrefix:  PostgresSystemPrefixSQL,
-		messageText:   func(alias string) string { return alias + ".content" },
-		prefilterText: "content",
-		bodyAgg:       `STRING_AGG(content, E'\n' ORDER BY ordinal)`,
-		timestamp:     "m.timestamp",
-		sessionSort:   "COALESCE(s.ended_at, s.started_at, s.created_at)",
-		orderBySort:   "sort_ts DESC NULLS LAST",
+		systemPrefix: PostgresSystemPrefixSQL,
+		messageText:  "m.content",
+		messageTable: "messages",
+		bodyAgg:      `STRING_AGG(content, E'\n' ORDER BY ordinal)`,
+		timestamp:    "m.timestamp",
+		sessionSort:  "COALESCE(s.ended_at, s.started_at, s.created_at)",
+		orderBySort:  "sort_ts DESC NULLS LAST",
 	},
 }
 
@@ -123,9 +123,9 @@ func BuildTermsSearchSQL(
 	for _, term := range terms {
 		prefilter.WriteString(`
 			  AND m.session_id IN (
-				SELECT session_id FROM messages
+				SELECT session_id FROM ` + frag.messageTable + `
 				WHERE session_id IN (SELECT id FROM scoped)
-				  AND ` + b.ContainsPredicate(frag.prefilterText, term) + ")")
+				  AND ` + b.ContainsPredicate("content", term) + ")")
 	}
 	predicates := make([]string, 0, len(terms)+1)
 	for _, term := range terms {
@@ -153,6 +153,7 @@ func BuildTermsSearchSQL(
 					THEN %s ELSE %s END AS subordinate,
 				CASE WHEN m.role = 'user' THEN 1 ELSE 0 END AS user_start
 			FROM messages m
+			%s
 			JOIN sessions s ON s.id = m.session_id
 			JOIN scoped sc ON sc.id = m.session_id
 			WHERE m.role IN ('user','assistant')
@@ -183,10 +184,10 @@ func BuildTermsSearchSQL(
 		WHERE %s
 		ORDER BY subordinate ASC, %s, session_id ASC, start_ordinal ASC
 		LIMIT %s OFFSET %s`,
-		where, frag.timestamp, frag.messageText("m"), frag.sessionSort,
+		where, frag.timestamp, frag.messageText, frag.sessionSort,
 		dialect.trueLiteral, SubordinateSessionSQL("s"),
 		dialect.trueLiteral, dialect.falseLiteral,
-		dialect.falseLiteral, frag.systemPrefix("m.content", "m.role"),
+		frag.messageJoin, dialect.falseLiteral, frag.systemPrefix("m.content", "m.role"),
 		prefilter.String(), frag.bodyAgg,
 		strings.Join(predicates, " AND "), frag.orderBySort,
 		b.Add(f.Limit+1), b.Add(f.Cursor))

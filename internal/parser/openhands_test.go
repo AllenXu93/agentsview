@@ -208,7 +208,8 @@ func TestParseOpenHandsObservationWithoutToolCallIsMarkedToolOutput(t *testing.T
 	require.True(t, ok)
 	assert.Equal(t, RoleUser, msg.Role)
 	assert.Equal(t, "token=abc123", msg.Content)
-	assert.Equal(t, new(""), msg.DialogueText)
+	assert.Nil(t, msg.DialogueText)
+	assert.Empty(t, msg.ToolCalls)
 	assert.Equal(t, SourceSubtypeToolResult, msg.SourceSubtype,
 		"an observation with no tool call to pair with is still tool output")
 }

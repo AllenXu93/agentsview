@@ -603,6 +603,13 @@ func parseDevinDBMessageNode(
 
 	tokenUsage, contextTokens, outputTokens, hasContextTokens, hasOutputTokens := devinTokenUsageFromNodeMetrics(root.Get("metadata.metrics"))
 
+	// The per-message generation model is the authoritative model for both
+	// display and pricing: the session-level sessions.model column is often
+	// empty or a coarse alias, and each request records the concrete model it
+	// used at metadata.generation_model. Mirror the transcript path, which
+	// prefers extra.generation_model over the session model.
+	messageModel := firstNonEmpty(root.Get("metadata.generation_model").Str, model)
+
 	// Keep otherwise-empty assistant turns that still consumed tokens (for
 	// example a "stop" turn with no text and no tool calls): dropping them
 	// would silently discard their prompt/completion usage and undercount
@@ -614,12 +621,6 @@ func parseDevinDBMessageNode(
 	}
 
 	msg := ParsedMessage{
-		// The per-message generation model is the authoritative model for both
-		// display and pricing: the session-level sessions.model column is often
-		// empty or a coarse alias, and each request records the concrete model it
-		// used at metadata.generation_model. Mirror the transcript path, which
-		// prefers extra.generation_model over the session model.
-		Model:            firstNonEmpty(root.Get("metadata.generation_model").Str, model),
 		Ordinal:          ordinal,
 		Role:             role,
 		Content:          content,
@@ -632,6 +633,7 @@ func parseDevinDBMessageNode(
 		ContentLength:    len(content),
 		ToolCalls:        toolCalls,
 		ToolResults:      toolResults,
+		Model:            messageModel,
 		TokenUsage:       tokenUsage,
 		ContextTokens:    contextTokens,
 		OutputTokens:     outputTokens,

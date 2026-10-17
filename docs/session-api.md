@@ -806,15 +806,16 @@ Pi, OMP, OMO, Prime Agent, StepCode, iFlow, Claude Code, Cowork, iCodeMate CLI,
 Qoder, Cursor JSONL, Amp, OpenClaude, OpenClaw, QClaw, Devin, and OpenHands.
 Those projections exclude rendered tool calls and reasoning from snippets,
 while preserving literal marker text in dialogue. Pi and iFlow also store
-reasoning in `thinking_text`. Substring and regex searches include `thinking` by
-default; use `--in messages` for dialogue alone or `--in thinking` for reasoning
-alone. FTS, terms, semantic, and hybrid reject `thinking` as a source. Semantic
-search continues to embed full message text; hybrid's keyword search uses
-dialogue.
+reasoning in `thinking_text`. SQLite substring and regex searches include
+`thinking` by default; use `--in messages` for dialogue alone or `--in thinking`
+for reasoning alone. FTS, terms, semantic, and hybrid reject `thinking` as a
+source. Semantic search continues to embed full message text; hybrid's keyword
+search uses dialogue.
 
 Existing sessions from these providers are reparsed when their source files are
-available. Other providers and parser paths, sessions without source files, and
-imported v4 artifacts keep searching their stored content.
+available. Other providers and parser paths, sessions without source files,
+imported v4 artifacts, and unpaired OpenHands observations keep searching their
+stored content as `message` hits.
 Transcript display, block order, and artifact format v4 remain unchanged.
 
 One-shot, automated, and subagent sessions are excluded by default; opt back in

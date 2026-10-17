@@ -5025,9 +5025,6 @@ func (db *DB) init(ctx context.Context, progress OpenProgressFunc) error {
 	}
 
 	progress.report("Initializing full-text search")
-	if err := refreshDialogueFTS(ctx, w); err != nil {
-		return err
-	}
 	var fts5Available bool
 	if err := w.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM pragma_module_list WHERE name = 'fts5')`,
@@ -5044,6 +5041,14 @@ func (db *DB) init(ctx context.Context, progress OpenProgressFunc) error {
 		return fmt.Errorf("checking fts table: %w", err)
 	}
 	hadFTS := ftsCount > 0
+	if hadFTS {
+		if err := db.checkFTSModuleLoads(ctx, w); err != nil {
+			return err
+		}
+		if err := refreshDialogueFTS(ctx, w); err != nil {
+			return err
+		}
+	}
 
 	// Attempt to initialize FTS. Failure is non-fatal
 	// (might be missing module).
@@ -5051,15 +5056,7 @@ func (db *DB) init(ctx context.Context, progress OpenProgressFunc) error {
 		if fts5Available {
 			return fmt.Errorf("initializing FTS: %w", err)
 		}
-	} else if hadFTS {
-		// IF NOT EXISTS skips the module lookup for an existing
-		// table, so an archive indexed by an fts5 build opens on an
-		// executable without fts5 and every message write then fails
-		// inside the messages triggers. Refuse the open instead.
-		if err := db.checkFTSModuleLoads(ctx, w); err != nil {
-			return err
-		}
-	} else {
+	} else if !hadFTS {
 		// Schema init succeeded and we didn't have FTS
 		// before. Populate the index for existing messages.
 		if _, err := w.ExecContext(ctx,

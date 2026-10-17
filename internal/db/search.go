@@ -453,7 +453,7 @@ func (db *DB) Search(
 				snippet(messages_fts, 0, '<mark>', '</mark>',
 					'...', %d) AS snippet,
 				best.best_rank AS rank,
-				instr(LOWER(COALESCE(m.dialogue_text, m.content)), LOWER(best.best_query))
+				instr(LOWER(mc.content), LOWER(best.best_query))
 					AS match_pos
 			FROM (
 				SELECT session_id, best_rowid, best_ordinal, best_rank, best_query
@@ -477,6 +477,7 @@ func (db *DB) Search(
 			) AS best
 			JOIN messages_fts ON messages_fts.rowid = best.best_rowid
 			JOIN messages m ON m.id = best.best_rowid
+			JOIN message_search_content mc ON mc.id = m.id
 			JOIN sessions s ON m.session_id = s.id
 			WHERE messages_fts MATCH ?
 

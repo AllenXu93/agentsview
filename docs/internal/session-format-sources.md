@@ -2141,7 +2141,10 @@ schemas keep their existing ordering behavior.
 
 - **Dialogue projection:** Reverified 2026-10-17 against parser fixtures.
   Structured text blocks retain literal markers separately from reasoning and
-  tool calls.
+  tool calls. Unpaired observations retain their stored-content
+  `message` search behavior and add no tool call. The SQLite-only `thinking`
+  source searches reasoning with substring or regex mode; source-less sessions
+  and v4 imports retain their stored-content fallback.
 - **Format:** A CLI conversation directory containing `base_state.json` and one
   JSON file per event under `events/`; Agentsview also fingerprints optional
   legacy `TASKS.json` files.

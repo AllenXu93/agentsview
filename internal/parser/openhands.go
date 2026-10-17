@@ -320,15 +320,21 @@ func parseOpenHandsActionEvent(
 	}
 
 	action := ev.Get("action")
-	inputJSON := strings.TrimSpace(ev.Get("tool_call.arguments").Str)
+	inputJSON := strings.TrimSpace(
+		ev.Get("tool_call.arguments").Str,
+	)
 	if inputJSON == "" {
 		inputJSON = action.Raw
 	}
 
 	content, thinking, dialogue, blockThinking, _, _, _ := ExtractTextContent(context.Background(), ev.Get("thought"))
-	rendering := formatOpenHandsAction(toolName, action, ev.Get("summary").Str)
+	rendering := formatOpenHandsAction(
+		toolName, action, ev.Get("summary").Str,
+	)
 	content = joinOpenHandsParts(content, rendering)
-	content, hasThinking := openHandsAppendThinking(content, ev)
+	content, hasThinking := openHandsAppendThinking(
+		content, ev,
+	)
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return ParsedMessage{}, false, ""
@@ -362,9 +368,13 @@ func parseOpenHandsObservationEvent(
 	ts time.Time,
 ) (ParsedMessage, bool, string) {
 	observation := ev.Get("observation")
-	raw, display := openHandsObservationContent(observation)
+	raw, display := openHandsObservationContent(
+		observation,
+	)
 	display = strings.TrimSpace(display)
-	workingDir := observation.Get("metadata.working_dir").Str
+	workingDir := observation.Get(
+		"metadata.working_dir",
+	).Str
 
 	toolUseID := ev.Get("tool_call_id").Str
 	if toolUseID == "" {
@@ -375,14 +385,9 @@ func parseOpenHandsObservationEvent(
 			Ordinal:       ordinal,
 			Role:          RoleUser,
 			Content:       display,
-			DialogueText:  new(""),
 			SourceSubtype: SourceSubtypeToolResult,
 			Timestamp:     ts,
 			ContentLength: len(display),
-			ToolCalls: []ParsedToolCall{{
-				ToolName:     ev.Get("tool_name").Str,
-				ResultEvents: []ParsedToolResultEvent{{Content: display, Timestamp: ts}},
-			}},
 		}, true, workingDir
 	}
 
@@ -392,7 +397,9 @@ func parseOpenHandsObservationEvent(
 	}
 	contentLength := len(display)
 	if contentLength == 0 {
-		contentLength = toolResultContentLength(gjson.Parse(raw))
+		contentLength = toolResultContentLength(
+			gjson.Parse(raw),
+		)
 	}
 
 	return ParsedMessage{

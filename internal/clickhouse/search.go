@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -214,9 +213,6 @@ func (s *Store) SearchContent(ctx context.Context, f db.ContentSearchFilter) (db
 	}
 	if f.Pattern == "" {
 		return db.ContentSearchPage{}, nil
-	}
-	if slices.Contains(f.Sources, "thinking") {
-		return db.ContentSearchPage{}, &db.SearchInputError{Msg: "search: thinking requires SQLite substring or regex mode"}
 	}
 	if f.Mode == "semantic" || f.Mode == "hybrid" {
 		// Invalid input returns the same 400 on every backend before the

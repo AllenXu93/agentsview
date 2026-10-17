@@ -10,11 +10,12 @@ The latest release is
 ## Unreleased
 
 - SQLite message search matches dialogue and keeps tool renderings and reasoning
-  out of snippets. Substring and regex search include reasoning as `thinking` by
-  default; use `--in thinking` to search it alone. FTS, terms, semantic, and
-  hybrid reject that source. Existing sessions reparse when source files are
-  available; source-less sessions and v4 imports keep searching their saved
-  text.
+  out of snippets for Pi and Claude formats, Amp, OpenClaude, OpenClaw, QClaw,
+  Devin, and OpenHands. SQLite substring and regex search include reasoning as
+  `thinking` by default; use `--in thinking` to search it alone. FTS, terms,
+  semantic, and hybrid reject that source. Existing sessions reparse when source
+  files are available; source-less sessions, v4 imports, and unpaired OpenHands
+  observations keep searching their saved text as `message` hits.
 
 **Upgrade notes**
 
