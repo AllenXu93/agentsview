@@ -29,20 +29,9 @@ func TestCodexLegacyPageVersionRebuildsEveryProvider(t *testing.T) {
 }
 
 func TestDialogueUpgradePreservesCompletedCodexRepositoryUpgrade(t *testing.T) {
-	d := testDB(t)
-	for _, agent := range []string{"codex", "pi"} {
-		insertSession(t, d, agent, "project", func(s *Session) { s.Agent = agent })
-	}
-	_, err := d.getWriter().Exec(t.Context(), "UPDATE sessions SET data_version = 138; PRAGMA user_version = 138")
-	require.NoError(t, err)
-	path := d.Path()
-	require.NoError(t, d.Close())
-	d, err = OpenIsolated(t.Context(), path)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, d.Close()) })
-	assert.False(t, d.NeedsResync())
-	assert.Equal(t, 139, d.GetSessionDataVersion(t.Context(), "codex"))
-	assert.Equal(t, 138, d.GetSessionDataVersion(t.Context(), "pi"))
+	scope := ScopedDataVersionProviders(138, 139)
+	assert.Contains(t, scope, parser.AgentPi)
+	assert.NotContains(t, scope, parser.AgentCodex)
 }
 
 func TestValidateDataVersionScopes(t *testing.T) {

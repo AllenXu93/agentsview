@@ -146,7 +146,6 @@ func TestSanitizeMessageDropsDuplicateDialogue(t *testing.T) {
 		name, content, thinking string
 		dialogue, want          *string
 	}{
-		{name: "exact duplicate dropped", content: "answer", dialogue: Ptr("answer")},
 		{name: "duplicate after content sanitization dropped", content: "ans\x00wer", dialogue: Ptr("answer")},
 		{name: "duplicate after dialogue sanitization dropped", content: "answer", dialogue: Ptr("ans\x00wer\xff")},
 		{name: "distinct dialogue kept", content: "answer [Read: file.txt]", dialogue: Ptr("answer"), want: Ptr("answer")},

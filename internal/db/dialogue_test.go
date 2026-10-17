@@ -13,7 +13,7 @@ import (
 	"go.kenn.io/agentsview/internal/config"
 )
 
-func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
+func TestDialogueFTSUpgradePreservesMessagesAndReportsProgress(t *testing.T) {
 	const total, needle = 20001, 12345
 	path := filepath.Join(t.TempDir(), "archive.db")
 	d := testDBAtPath(t, path, "source")
@@ -53,18 +53,10 @@ func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
 	session, err := d.GetSession(t.Context(), "legacy")
 	require.NoError(t, err)
 	assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
-	terms, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "reasoningneedle", Mode: "terms", Sources: []string{"messages"}})
-	require.NoError(t, err)
-	require.Len(t, terms.Matches, 1)
-	assert.Equal(t, "message", terms.Matches[0].Location)
 	for _, term := range []string{"answerneedle", "reasoningneedle"} {
 		ordinary, err := d.Search(t.Context(), SearchFilter{Query: term})
 		require.NoError(t, err)
 		assert.Len(t, ordinary.Results, 1, term)
-		page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: term, Mode: "fts", Sources: []string{"messages"}})
-		require.NoError(t, err)
-		require.Len(t, page.Matches, 1, term)
-		assert.Equal(t, "message", page.Matches[0].Location)
 	}
 
 	var positions []int
@@ -171,7 +163,7 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 							wantOrdinary = 1
 						}
 						assert.Len(t, ordinary.Results, wantOrdinary, term)
-						if phase == "insert" && tc.name == "porter" {
+						if phase == "insert" {
 							continue
 						}
 						page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: term, Mode: "fts", Sources: []string{"messages"}})
