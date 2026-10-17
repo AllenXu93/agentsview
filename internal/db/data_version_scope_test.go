@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -29,9 +30,24 @@ func TestCodexLegacyPageVersionRebuildsEveryProvider(t *testing.T) {
 }
 
 func TestDialogueUpgradePreservesCompletedCodexRepositoryUpgrade(t *testing.T) {
-	scope := ScopedDataVersionProviders(138, 139)
-	assert.Contains(t, scope, parser.AgentPi)
-	assert.NotContains(t, scope, parser.AgentCodex)
+	const completedVersion = 138
+	path := filepath.Join(t.TempDir(), "archive.db")
+	d := testDBAtPath(t, path, "completed Codex upgrade")
+	for _, agent := range []string{"codex", "pi"} {
+		insertSession(t, d, agent, "project", func(s *Session) { s.Agent = agent })
+		require.NoError(t, d.SetSessionDataVersion(t.Context(), agent, completedVersion))
+	}
+	// Keep the current schema and model the completed parser upgrade on disk.
+	require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+		return writeUserVersion(t.Context(), tx, completedVersion)
+	}))
+	require.NoError(t, d.Close())
+	reopened, err := OpenIsolated(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	assert.False(t, reopened.NeedsResync())
+	assert.Equal(t, CurrentDataVersion(), reopened.GetSessionDataVersion(t.Context(), "codex"))
+	assert.Equal(t, completedVersion, reopened.GetSessionDataVersion(t.Context(), "pi"))
 }
 
 func TestValidateDataVersionScopes(t *testing.T) {
