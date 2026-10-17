@@ -1261,7 +1261,7 @@ type OpenProgress struct {
 	ResyncRequired bool
 }
 
-// OpenProgressFunc reports a database startup stage before its work begins.
+// OpenProgressFunc reports database startup stages and completed work.
 // Callbacks run synchronously and must not write to the archive.
 type OpenProgressFunc func(OpenProgress)
 
@@ -5045,7 +5045,7 @@ func (db *DB) init(ctx context.Context, progress OpenProgressFunc) error {
 		if err := db.checkFTSModuleLoads(ctx, w); err != nil {
 			return err
 		}
-		if err := refreshDialogueFTS(ctx, w); err != nil {
+		if err := refreshDialogueFTS(ctx, w, progress); err != nil {
 			return err
 		}
 	}

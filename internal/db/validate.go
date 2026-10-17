@@ -200,6 +200,9 @@ func SanitizeMessage(m *Message) ValidationStats {
 			m.ContentLength -= removed
 		}
 	}
+	if m.DialogueText != nil && *m.DialogueText != "" && *m.DialogueText == m.Content && m.ThinkingText == "" {
+		m.DialogueText = nil
+	}
 	sanitizeStringField(&m.ClaudeMessageID, &stats)
 	sanitizeStringField(&m.ClaudeRequestID, &stats)
 	sanitizeStringField(&m.SourceType, &stats)

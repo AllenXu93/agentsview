@@ -1558,6 +1558,9 @@ func TestImportChatGPTExtendsTruncatedText(t *testing.T) {
 		assert.Equal(t, before[0].ID, after[0].ID)
 		assert.Equal(t, before[1].ID, after[1].ID)
 		assert.Equal(t, full, after[0].Content)
+		assert.Nil(t, after[0].DialogueText)
+		assert.Empty(t, after[0].ThinkingText)
+		assert.Equal(t, before[0].HasThinking, after[0].HasThinking)
 		assert.Equal(t, len(full), after[0].ContentLength)
 		assert.Equal(t, before[1], after[1])
 

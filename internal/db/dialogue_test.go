@@ -3,59 +3,117 @@ package db
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/config"
 )
 
 func TestDialogueColumnUpgradeKeepsArchiveInPlace(t *testing.T) {
-	for _, source := range []string{"messages", "message_search_content"} {
-		t.Run(source, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "archive.db")
-			d := testDBAtPath(t, path, "source")
-			insertSession(t, d, "pi:kept", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 1 })
-			const content = "[Thinking]\nreasoningneedle\n[/Thinking]\nAnswer"
-			insertMessages(t, d,
-				Message{SessionID: "pi:kept", Ordinal: 0, Role: "user", Content: "Question"},
-				Message{SessionID: "pi:kept", Ordinal: 1, Role: "assistant", Content: content, ThinkingText: "reasoningneedle", HasThinking: true},
-			)
-			before, err := d.GetAllMessages(t.Context(), "pi:kept")
-			require.NoError(t, err)
-			require.NoError(t, d.DropFTS(t.Context()))
-			legacyView := "ALTER TABLE messages DROP COLUMN dialogue_text;"
-			if source == "message_search_content" {
-				legacyView = "CREATE VIEW message_search_content AS SELECT id, session_id, COALESCE(dialogue_text, content) AS content FROM messages;"
-			}
-			_, err = d.getWriter().Exec(t.Context(), fmt.Sprintf(`DROP VIEW message_search_content;
- %s
- CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='%s', content_rowid='id', tokenize='porter unicode61');
+	path := filepath.Join(t.TempDir(), "archive.db")
+	d := testDBAtPath(t, path, "source")
+	insertSession(t, d, "pi:kept", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 1 })
+	const content = "[Thinking]\nreasoningneedle\n[/Thinking]\nAnswer"
+	insertMessages(t, d,
+		Message{SessionID: "pi:kept", Ordinal: 0, Role: "user", Content: "Question"},
+		Message{SessionID: "pi:kept", Ordinal: 1, Role: "assistant", Content: content, ThinkingText: "reasoningneedle", HasThinking: true},
+	)
+	before, err := d.GetAllMessages(t.Context(), "pi:kept")
+	require.NoError(t, err)
+	require.NoError(t, d.DropFTS(t.Context()))
+	_, err = d.getWriter().Exec(t.Context(), fmt.Sprintf(`DROP VIEW message_search_content;
+ ALTER TABLE messages DROP COLUMN dialogue_text;
+ CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id', tokenize='porter unicode61');
  INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
- PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, legacyView, source, CurrentDataVersion()-1, CurrentDataVersion()-1))
-			require.NoError(t, err)
-			require.NoError(t, d.Close())
-			d, err = Open(t.Context(), path)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, d.Close()) })
-			assert.False(t, d.NeedsResync())
-			stored, err := d.GetAllMessages(t.Context(), "pi:kept")
-			require.NoError(t, err)
-			require.Len(t, stored, 2)
-			assert.Equal(t, before[1].ID, stored[1].ID)
-			assert.Equal(t, content, stored[1].Content)
-			assert.Nil(t, stored[1].DialogueText)
-			assert.Equal(t, "reasoningneedle", stored[1].ThinkingText)
-			session, err := d.GetSession(t.Context(), "pi:kept")
-			require.NoError(t, err)
-			assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
-			for _, mode := range []string{"fts", "terms"} {
-				page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: "reasoningneedle", Mode: mode, IncludeOneShot: true})
-				require.NoError(t, err)
-				require.Len(t, page.Matches, 1)
-				assert.Equal(t, "message", page.Matches[0].Location)
-			}
-		})
+ PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, CurrentDataVersion()-1, CurrentDataVersion()-1))
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+	d, err = Open(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, d.Close()) })
+	assert.False(t, d.NeedsResync())
+	stored, err := d.GetAllMessages(t.Context(), "pi:kept")
+	require.NoError(t, err)
+	require.Len(t, stored, 2)
+	assert.Equal(t, before[1].ID, stored[1].ID)
+	assert.Equal(t, content, stored[1].Content)
+	assert.Nil(t, stored[1].DialogueText)
+	assert.Equal(t, "reasoningneedle", stored[1].ThinkingText)
+	session, err := d.GetSession(t.Context(), "pi:kept")
+	require.NoError(t, err)
+	assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
+	for _, mode := range []string{"fts", "terms"} {
+		page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: "reasoningneedle", Mode: mode, IncludeOneShot: true})
+		require.NoError(t, err)
+		require.Len(t, page.Matches, 1)
+		assert.Equal(t, "message", page.Matches[0].Location)
 	}
+}
+
+func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
+	const total, needle = 20001, 12345
+	path := filepath.Join(t.TempDir(), "archive.db")
+	d := testDBAtPath(t, path, "source")
+	insertSession(t, d, "legacy", "project", func(s *Session) { s.UserMessageCount = 2 })
+	require.NoError(t, d.DropFTS(t.Context()))
+	_, err := d.getWriter().Exec(t.Context(), fmt.Sprintf(`DROP VIEW message_search_content;
+ ALTER TABLE messages DROP COLUMN dialogue_text;
+ WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < %d)
+ INSERT INTO messages (session_id, ordinal, role, content, content_length)
+ SELECT 'legacy', i, CASE i %% 2 WHEN 0 THEN 'user' ELSE 'assistant' END,
+  CASE i WHEN %d THEN 'answerneedle [Thinking] reasoningneedle' ELSE 'filler ' || i END, 0 FROM n;
+ CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id', tokenize='porter unicode61');
+ INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+ PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, total, needle, CurrentDataVersion()-1, CurrentDataVersion()-1))
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+
+	var details []string
+	d, err = OpenWithProgress(t.Context(), path, config.ArchiveContentFull, func(progress OpenProgress) {
+		details = append(details, progress.Detail)
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, d.Close()) })
+
+	stored, err := d.GetAllMessages(t.Context(), "legacy")
+	require.NoError(t, err)
+	require.Len(t, stored, total)
+	assert.Equal(t, "answerneedle [Thinking] reasoningneedle", stored[needle].Content)
+	assert.Nil(t, stored[needle].DialogueText)
+	for _, term := range []string{"answerneedle", "reasoningneedle"} {
+		ordinary, err := d.Search(t.Context(), SearchFilter{Query: term})
+		require.NoError(t, err)
+		assert.Len(t, ordinary.Results, 1, term)
+		page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: term, Mode: "fts", Sources: []string{"messages"}})
+		require.NoError(t, err)
+		require.Len(t, page.Matches, 1, term)
+		assert.Equal(t, "message", page.Matches[0].Location)
+	}
+
+	var positions []int
+	for _, detail := range details {
+		rest, ok := strings.CutPrefix(detail, "Updating full-text search: ")
+		if !ok {
+			continue
+		}
+		var done, of int
+		_, err := fmt.Sscanf(rest, "%d/%d messages", &done, &of)
+		require.NoError(t, err, detail)
+		require.Equal(t, total, of, detail)
+		if done == 0 && len(positions) == 0 {
+			continue
+		}
+		require.Positive(t, done, detail)
+		if len(positions) > 0 {
+			require.Greater(t, done, positions[len(positions)-1], detail)
+		}
+		positions = append(positions, done)
+	}
+	require.GreaterOrEqual(t, len(positions), 3, "progress details: %q", details)
+	assert.Equal(t, total, positions[len(positions)-1])
 }
 
 func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
