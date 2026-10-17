@@ -801,16 +801,20 @@ The content-search response includes `active_filter_applied`, which is true when
 `exclude_active_since` was applied before pagination. All current stores support
 this filter. Older servers may omit the field.
 
-SQLite's `messages` source searches dialogue from text blocks, with snippets
-that exclude rendered tool calls and reasoning blocks. Pi and iFlow also store
+SQLite's `messages` source searches dialogue from structured text blocks in
+Pi, OMP, OMO, Prime Agent, StepCode, iFlow, Claude Code, Cowork, iCodeMate CLI,
+Qoder, Cursor JSONL, Amp, OpenClaude, OpenClaw, QClaw, Devin, and OpenHands.
+Those projections exclude rendered tool calls and reasoning from snippets,
+while preserving literal marker text in dialogue. Pi and iFlow also store
 reasoning in `thinking_text`. Substring and regex searches include `thinking` by
 default; use `--in messages` for dialogue alone or `--in thinking` for reasoning
 alone. FTS, terms, semantic, and hybrid reject `thinking` as a source. Semantic
 search continues to embed full message text; hybrid's keyword search uses
 dialogue.
 
-Existing sessions are reparsed when their source files are available. Sessions
-without source files and imported v4 artifacts keep searching their stored text.
+Existing sessions from these providers are reparsed when their source files are
+available. Other providers and parser paths, sessions without source files, and
+imported v4 artifacts keep searching their stored content.
 Transcript display, block order, and artifact format v4 remain unchanged.
 
 One-shot, automated, and subagent sessions are excluded by default; opt back in

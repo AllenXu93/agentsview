@@ -320,21 +320,15 @@ func parseOpenHandsActionEvent(
 	}
 
 	action := ev.Get("action")
-	inputJSON := strings.TrimSpace(
-		ev.Get("tool_call.arguments").Str,
-	)
+	inputJSON := strings.TrimSpace(ev.Get("tool_call.arguments").Str)
 	if inputJSON == "" {
 		inputJSON = action.Raw
 	}
 
-	content := openHandsText(ev.Get("thought"))
-	rendering := formatOpenHandsAction(
-		toolName, action, ev.Get("summary").Str,
-	)
+	content, thinking, dialogue, blockThinking, _, _, _ := ExtractTextContent(context.Background(), ev.Get("thought"))
+	rendering := formatOpenHandsAction(toolName, action, ev.Get("summary").Str)
 	content = joinOpenHandsParts(content, rendering)
-	content, hasThinking := openHandsAppendThinking(
-		content, ev,
-	)
+	content, hasThinking := openHandsAppendThinking(content, ev)
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return ParsedMessage{}, false, ""
@@ -344,8 +338,10 @@ func parseOpenHandsActionEvent(
 		Ordinal:       ordinal,
 		Role:          RoleAssistant,
 		Content:       content,
+		DialogueText:  new(strings.TrimSpace(dialogue)),
+		ThinkingText:  joinNonEmpty(thinking, openHandsThinkingText(ev)),
 		Timestamp:     ts,
-		HasThinking:   hasThinking,
+		HasThinking:   hasThinking || blockThinking,
 		HasToolUse:    true,
 		ContentLength: len(content),
 		Model:         model,
@@ -366,13 +362,9 @@ func parseOpenHandsObservationEvent(
 	ts time.Time,
 ) (ParsedMessage, bool, string) {
 	observation := ev.Get("observation")
-	raw, display := openHandsObservationContent(
-		observation,
-	)
+	raw, display := openHandsObservationContent(observation)
 	display = strings.TrimSpace(display)
-	workingDir := observation.Get(
-		"metadata.working_dir",
-	).Str
+	workingDir := observation.Get("metadata.working_dir").Str
 
 	toolUseID := ev.Get("tool_call_id").Str
 	if toolUseID == "" {
@@ -383,9 +375,14 @@ func parseOpenHandsObservationEvent(
 			Ordinal:       ordinal,
 			Role:          RoleUser,
 			Content:       display,
+			DialogueText:  new(""),
 			SourceSubtype: SourceSubtypeToolResult,
 			Timestamp:     ts,
 			ContentLength: len(display),
+			ToolCalls: []ParsedToolCall{{
+				ToolName:     ev.Get("tool_name").Str,
+				ResultEvents: []ParsedToolResultEvent{{Content: display, Timestamp: ts}},
+			}},
 		}, true, workingDir
 	}
 
@@ -395,9 +392,7 @@ func parseOpenHandsObservationEvent(
 	}
 	contentLength := len(display)
 	if contentLength == 0 {
-		contentLength = toolResultContentLength(
-			gjson.Parse(raw),
-		)
+		contentLength = toolResultContentLength(gjson.Parse(raw))
 	}
 
 	return ParsedMessage{
@@ -429,11 +424,6 @@ func openHandsBaseStateCwd(base gjson.Result) string {
 		}
 	}
 	return ""
-}
-
-func openHandsText(content gjson.Result) string {
-	text, _, _, _, _, _, _ := ExtractTextContent(context.Background(), content)
-	return strings.TrimSpace(text)
 }
 
 func openHandsAppendThinking(

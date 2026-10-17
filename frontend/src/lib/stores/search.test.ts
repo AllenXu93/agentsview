@@ -125,23 +125,6 @@ describe("SearchStore", () => {
     expect(createSearchStore(storage).mode).toBe(expected);
   });
 
-  it("resets the retired reasoning mode before searching", async () => {
-    searchService.getApiV1Search.mockResolvedValue(fullTextResponse("needle"));
-    const storage = memoryStorage({ [SEARCH_MODE_STORAGE_KEY]: "reasoning" });
-    const store = createSearchStore(storage);
-    expect(storage.getItem(SEARCH_MODE_STORAGE_KEY)).toBe("fulltext");
-
-    store.search("needle");
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS);
-
-    expect(searchService.getApiV1Search).toHaveBeenCalledWith(
-      expect.objectContaining({ q: "needle" }),
-      expect.anything(),
-    );
-    expect(store.results[0]?.session_id).toBe("full-0");
-    expect(searchService.getApiV1SearchContent).not.toHaveBeenCalled();
-  });
-
   it("defensively handles unavailable storage", () => {
     const throwingStorage = {
       getItem: vi.fn(() => {

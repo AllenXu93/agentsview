@@ -56,7 +56,6 @@ function loadMode(storage: SearchModeStorage | null): SearchMode {
   try {
     const value = storage?.getItem(SEARCH_MODE_STORAGE_KEY);
     if (SEARCH_MODES.includes(value as SearchMode)) return value as SearchMode;
-    if (value) storage?.setItem(SEARCH_MODE_STORAGE_KEY, "fulltext");
     return "fulltext";
   } catch {
     return "fulltext";
