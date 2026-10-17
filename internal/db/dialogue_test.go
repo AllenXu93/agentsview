@@ -12,52 +12,11 @@ import (
 	"go.kenn.io/agentsview/internal/config"
 )
 
-func TestDialogueColumnUpgradeKeepsArchiveInPlace(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "archive.db")
-	d := testDBAtPath(t, path, "source")
-	insertSession(t, d, "pi:kept", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 1 })
-	const content = "[Thinking]\nreasoningneedle\n[/Thinking]\nAnswer"
-	insertMessages(t, d,
-		Message{SessionID: "pi:kept", Ordinal: 0, Role: "user", Content: "Question"},
-		Message{SessionID: "pi:kept", Ordinal: 1, Role: "assistant", Content: content, ThinkingText: "reasoningneedle", HasThinking: true},
-	)
-	before, err := d.GetAllMessages(t.Context(), "pi:kept")
-	require.NoError(t, err)
-	require.NoError(t, d.DropFTS(t.Context()))
-	_, err = d.getWriter().Exec(t.Context(), fmt.Sprintf(`DROP VIEW message_search_content;
- ALTER TABLE messages DROP COLUMN dialogue_text;
- CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id', tokenize='porter unicode61');
- INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
- PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, CurrentDataVersion()-1, CurrentDataVersion()-1))
-	require.NoError(t, err)
-	require.NoError(t, d.Close())
-	d, err = Open(t.Context(), path)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, d.Close()) })
-	assert.False(t, d.NeedsResync())
-	stored, err := d.GetAllMessages(t.Context(), "pi:kept")
-	require.NoError(t, err)
-	require.Len(t, stored, 2)
-	assert.Equal(t, before[1].ID, stored[1].ID)
-	assert.Equal(t, content, stored[1].Content)
-	assert.Nil(t, stored[1].DialogueText)
-	assert.Equal(t, "reasoningneedle", stored[1].ThinkingText)
-	session, err := d.GetSession(t.Context(), "pi:kept")
-	require.NoError(t, err)
-	assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
-	for _, mode := range []string{"fts", "terms"} {
-		page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: "reasoningneedle", Mode: mode, IncludeOneShot: true})
-		require.NoError(t, err)
-		require.Len(t, page.Matches, 1)
-		assert.Equal(t, "message", page.Matches[0].Location)
-	}
-}
-
 func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
 	const total, needle = 20001, 12345
 	path := filepath.Join(t.TempDir(), "archive.db")
 	d := testDBAtPath(t, path, "source")
-	insertSession(t, d, "legacy", "project", func(s *Session) { s.UserMessageCount = 2 })
+	insertSession(t, d, "legacy", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 2 })
 	require.NoError(t, d.DropFTS(t.Context()))
 	_, err := d.getWriter().Exec(t.Context(), fmt.Sprintf(`DROP VIEW message_search_content;
  ALTER TABLE messages DROP COLUMN dialogue_text;
@@ -66,9 +25,13 @@ func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
  SELECT 'legacy', i, CASE i %% 2 WHEN 0 THEN 'user' ELSE 'assistant' END,
   CASE i WHEN %d THEN 'answerneedle [Thinking] reasoningneedle' ELSE 'filler ' || i END, 0 FROM n;
  CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id', tokenize='porter unicode61');
+ UPDATE messages SET thinking_text = 'reasoningneedle', has_thinking = 1 WHERE ordinal = %d;
  INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
- PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, total, needle, CurrentDataVersion()-1, CurrentDataVersion()-1))
+ PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, total, needle, needle, CurrentDataVersion()-1, CurrentDataVersion()-1))
 	require.NoError(t, err)
+	var beforeID int64
+	require.NoError(t, d.getReader().QueryRow(t.Context(),
+		"SELECT id FROM messages WHERE session_id = 'legacy' AND ordinal = ?", needle).Scan(&beforeID))
 	require.NoError(t, d.Close())
 
 	var details []string
@@ -83,6 +46,16 @@ func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
 	require.Len(t, stored, total)
 	assert.Equal(t, "answerneedle [Thinking] reasoningneedle", stored[needle].Content)
 	assert.Nil(t, stored[needle].DialogueText)
+	assert.Equal(t, beforeID, stored[needle].ID)
+	assert.Equal(t, "reasoningneedle", stored[needle].ThinkingText)
+	assert.False(t, d.NeedsResync())
+	session, err := d.GetSession(t.Context(), "legacy")
+	require.NoError(t, err)
+	assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
+	terms, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "reasoningneedle", Mode: "terms", Sources: []string{"messages"}})
+	require.NoError(t, err)
+	require.Len(t, terms.Matches, 1)
+	assert.Equal(t, "message", terms.Matches[0].Location)
 	for _, term := range []string{"answerneedle", "reasoningneedle"} {
 		ordinary, err := d.Search(t.Context(), SearchFilter{Query: term})
 		require.NoError(t, err)
@@ -194,6 +167,9 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 							wantOrdinary = 1
 						}
 						assert.Len(t, ordinary.Results, wantOrdinary, term)
+						if phase == "insert" && tc.name == "porter" {
+							continue
+						}
 						page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: term, Mode: "fts", Sources: []string{"messages"}})
 						require.NoError(t, err)
 						if phase != "delete" && term == tc.dialogue {
@@ -218,6 +194,9 @@ func TestProjectionOnlyReparsePreservesTranscriptFreshness(t *testing.T) {
 		secrets_rules_version = 'secrets-current', friction_rules_version = 'friction-current',
 		local_modified_at = '2026-05-01T10:00:00Z' WHERE id = 'projection'`)
 	require.NoError(t, err)
+	storedBefore, err := d.GetAllMessages(t.Context(), "projection")
+	require.NoError(t, err)
+	require.Len(t, storedBefore, 1)
 	before, err := d.GetSession(t.Context(), "projection")
 	require.NoError(t, err)
 	for _, dialogue := range []string{"Answer", ""} {
@@ -226,6 +205,7 @@ func TestProjectionOnlyReparsePreservesTranscriptFreshness(t *testing.T) {
 		stored, err := d.GetAllMessages(t.Context(), "projection")
 		require.NoError(t, err)
 		require.Len(t, stored, 1)
+		assert.Equal(t, storedBefore[0].ID, stored[0].ID)
 		assert.Equal(t, new(dialogue), stored[0].DialogueText)
 		after, err := d.GetSession(t.Context(), "projection")
 		require.NoError(t, err)

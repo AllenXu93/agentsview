@@ -165,14 +165,16 @@ func TestSanitizeMessageDropsDuplicateDialogue(t *testing.T) {
 			}
 			SanitizeMessage(&sanitized)
 			assert.Equal(t, tc.want, sanitized.DialogueText, "sanitized")
-
-			d := testDB(t)
-			insertSession(t, d, "s1", "project")
-			require.NoError(t, d.ReplaceSessionMessages(t.Context(), "s1", []Message{m}))
-			stored, err := d.GetMessageByOrdinal(t.Context(), "s1", 0)
-			require.NoError(t, err)
-			require.NotNil(t, stored)
-			assert.Equal(t, tc.want, stored.DialogueText, "persisted")
 		})
 	}
+
+	d := testDB(t)
+	insertSession(t, d, "s1", "project")
+	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "s1", []Message{{
+		SessionID: "s1", Role: "assistant", Content: "answer", DialogueText: Ptr("answer"),
+	}}))
+	stored, err := d.GetMessageByOrdinal(t.Context(), "s1", 0)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Nil(t, stored.DialogueText)
 }

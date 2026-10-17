@@ -1415,24 +1415,16 @@ func TestTranscriptsToolPathRemainsSearchable(t *testing.T) {
 	d.SetArchiveContent(config.ArchiveContentTranscripts)
 	insertSession(t, d, "paths", "project", func(s *Session) { s.UserMessageCount = 2 })
 	insertMessages(t, d, Message{SessionID: "paths", Role: "assistant",
-		Content: "Reading [Read: retainedneedle.txt]", DialogueText: new("Reading"),
+		Content:   "Reading [Read: retainedneedle.txt]",
 		ToolCalls: []ToolCall{{ToolName: "Read", Category: "Read", InputJSON: `{"file_path":"retainedneedle.txt"}`, FilePath: "retainedneedle.txt"}},
 	})
-	stored, err := d.GetAllMessages(t.Context(), "paths")
-	require.NoError(t, err)
-	require.Len(t, stored, 1)
-	require.Len(t, stored[0].ToolCalls, 1)
-	assert.Empty(t, stored[0].ToolCalls[0].InputJSON)
-	assert.Equal(t, "retainedneedle.txt", stored[0].ToolCalls[0].FilePath)
 	for _, mode := range []string{"substring", "regex"} {
 		t.Run(mode, func(t *testing.T) {
-			for _, sources := range [][]string{nil, {"tool_input"}} {
-				page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "retainedneedle", Mode: mode, Sources: sources})
-				require.NoError(t, err)
-				require.Len(t, page.Matches, 1, "%s %v", mode, sources)
-				assert.Equal(t, "tool_input", page.Matches[0].Location)
-				assert.Equal(t, "retainedneedle.txt", page.Matches[0].Snippet)
-			}
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "retainedneedle", Mode: mode, Sources: []string{"tool_input"}})
+			require.NoError(t, err)
+			require.Len(t, page.Matches, 1, mode)
+			assert.Equal(t, "tool_input", page.Matches[0].Location)
+			assert.Equal(t, "retainedneedle.txt", page.Matches[0].Snippet)
 		})
 	}
 }

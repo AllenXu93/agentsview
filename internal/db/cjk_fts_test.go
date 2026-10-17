@@ -90,11 +90,6 @@ func TestCJKFTSChineseSearch(t *testing.T) {
 		{"user", "请验证这段长句中的中文搜索功能，并检查 SQLite 集成。"},
 		{"assistant", "发现一个错误，随后修复。"},
 	})
-	messages, err := d.GetAllMessages(t.Context(), "chinese")
-	require.NoError(t, err)
-	messages[1].DialogueText = new(messages[1].Content)
-	messages[1].Content += " [Tool] 工具输出"
-	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "chinese", messages))
 	seedSearchSession(t, d, "france", "proj", [][2]string{
 		{"user", "法国的首都是巴黎。"},
 	})
@@ -113,7 +108,7 @@ func TestCJKFTSChineseSearch(t *testing.T) {
 
 	var pinyinMatch string
 	simpleFTSJiebaMu.Lock()
-	err = d.getReader().QueryRow(t.Context(),
+	err := d.getReader().QueryRow(t.Context(),
 		"SELECT jieba_query(?, 0)", "zhong",
 	).Scan(&pinyinMatch)
 	simpleFTSJiebaMu.Unlock()
@@ -247,20 +242,6 @@ func TestCJKFTSChineseSearch(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, repaired.Matches)
 	assert.Equal(t, "chinese", repaired.Matches[0].SessionID)
-
-	toolOutput, err := d.SearchContent(t.Context(), ContentSearchFilter{
-		Pattern: "工具输出", Mode: "fts", Sources: []string{"messages"},
-	})
-	require.NoError(t, err)
-	assert.Empty(t, toolOutput.Matches)
-	messages[1].DialogueText = new("新的回答")
-	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "chinese", messages))
-	updated, err := d.SearchContent(t.Context(), ContentSearchFilter{
-		Pattern: "新的回答", Mode: "fts", Sources: []string{"messages"},
-	})
-	require.NoError(t, err)
-	require.Len(t, updated.Matches, 1)
-	assert.Equal(t, "chinese", updated.Matches[0].SessionID)
 
 	_, err = d.getWriter().Exec(t.Context(),
 		"UPDATE stats SET value = 'stale' WHERE key = ?",

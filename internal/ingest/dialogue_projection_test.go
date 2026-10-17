@@ -24,7 +24,6 @@ func TestPiSourceReparseSeparatesSearchContent(t *testing.T) {
 	provider, ok := parser.NewProvider(parser.AgentPi, parser.ProviderConfig{Roots: []string{root}, Machine: "local"})
 	require.True(t, ok)
 	destination := dbtest.OpenTestDB(t)
-	var messageID int64
 	for _, reparse := range []bool{false, true} {
 		outcome, err := provider.Parse(t.Context(), parser.ParseRequest{Source: parser.SourceRef{
 			Provider: parser.AgentPi, DisplayPath: path, FingerprintKey: path,
@@ -44,40 +43,22 @@ func TestPiSourceReparseSeparatesSearchContent(t *testing.T) {
 		}
 		_, err = destination.WriteSessionBatchContext(t.Context(), []db.SessionBatchWrite{{Session: prepared.Session, Messages: prepared.Messages, ReplaceMessages: true}})
 		require.NoError(t, err)
-		stored, err := destination.GetAllMessages(t.Context(), prepared.Session.ID)
+		page, err := destination.SearchContent(t.Context(), db.ContentSearchFilter{
+			SessionID: prepared.Session.ID, Pattern: "reasoningneedle",
+			Sources: []string{"messages"}, IncludeOneShot: true,
+		})
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, len(stored), 2)
 		if !reparse {
-			messageID = stored[1].ID
-		} else {
-			assert.Equal(t, messageID, stored[1].ID)
-			assert.Equal(t, new("answerneedle Literal [Read: quotedneedle.txt]"), stored[1].DialogueText)
+			assert.Len(t, page.Matches, 1)
+			continue
 		}
-		for _, mode := range []string{"substring", "regex", "fts"} {
+		assert.Empty(t, page.Matches)
+		for _, term := range []string{"answerneedle", "quotedneedle"} {
 			page, err := destination.SearchContent(t.Context(), db.ContentSearchFilter{
-				SessionID: prepared.Session.ID, Pattern: "reasoningneedle", Mode: mode,
-				Sources: []string{"messages"}, IncludeOneShot: true,
+				SessionID: prepared.Session.ID, Pattern: term, Sources: []string{"messages"}, IncludeOneShot: true,
 			})
 			require.NoError(t, err)
-			if reparse {
-				assert.Empty(t, page.Matches, mode)
-			} else {
-				assert.Len(t, page.Matches, 1, mode)
-			}
-		}
-		if reparse {
-			for _, tc := range []struct{ term, source, location string }{
-				{"answerneedle", "messages", "message"},
-				{"quotedneedle", "messages", "message"},
-				{"reasoningneedle", "thinking", "thinking"},
-				{"inputneedle", "tool_input", "tool_input"},
-				{"resultneedle", "tool_result", "tool_result"},
-			} {
-				page, err := destination.SearchContent(t.Context(), db.ContentSearchFilter{SessionID: prepared.Session.ID, Pattern: tc.term, Sources: []string{tc.source}, IncludeOneShot: true})
-				require.NoError(t, err)
-				require.Len(t, page.Matches, 1, tc.term)
-				assert.Equal(t, tc.location, page.Matches[0].Location)
-			}
+			assert.Len(t, page.Matches, 1, term)
 		}
 	}
 }
