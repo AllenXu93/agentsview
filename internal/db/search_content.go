@@ -1509,11 +1509,10 @@ func (db *DB) appendHybridFTSHits(
 // fused-score order. When the FTS leg contributed to a unit, its display
 // wins: the match anchors on the FTS-matched message's ordinal and centers
 // on the FTS snippet (the vector leg's chunk anchor may be a different run
-// member). Either way the returned snippet itself is built (and redacted)
-// from the anchor message's full content via SemanticSnippet, the same
-// guarantee mode "semantic" gives. Unit-less FTS rows arrive with their
-// derived range and subordinate flag already assigned pre-merge
-// (classifyUnitlessHybridHits), so no derivation runs here.
+// member). SemanticSnippet redacts the full dialogue projection for FTS hits
+// and the full content for vector-only hits before cutting a window.
+// Unit-less FTS rows already have their range and subordinate flag from
+// classifyUnitlessHybridHits, so no derivation runs here.
 func (db *DB) enrichHybridMatches(
 	ctx context.Context, f ContentSearchFilter, merged []FusedUnit,
 	vecDisplay, ftsDisplay map[string]hybridDisplay,
@@ -1540,6 +1539,10 @@ func (db *DB) enrichHybridMatches(
 		if !ok {
 			continue
 		}
+		content := info.content
+		if _, fromFTS := ftsDisplay[m.Unit.Key]; fromFTS {
+			content = info.dialogueContent
+		}
 		score := m.Score
 		out = append(out, ContentMatch{
 			SessionID:          d.sessionID,
@@ -1557,7 +1560,7 @@ func (db *DB) enrichHybridMatches(
 			ParentSessionID:    info.parentSessionID,
 			Sidechain:          info.isSidechain,
 			Timestamp:          info.timestamp,
-			Snippet:            f.SemanticSnippet(info.content, d.snippet),
+			Snippet:            f.SemanticSnippet(content, d.snippet),
 			Score:              &score,
 		})
 	}
@@ -1648,9 +1651,9 @@ type semanticHitKey struct {
 }
 
 // semanticHitInfo is the session/message metadata enrichSemanticHits attaches
-// to a surviving hit. content is the message's full, un-truncated content:
-// semantic/hybrid snippets are built from it (see SemanticSnippet) rather
-// than from the searcher's pre-truncated chunk/snippet text, so secret
+// to a surviving hit. content is the message's full, un-truncated content;
+// dialogueContent is its full dialogue projection for FTS-contributed hits.
+// Snippets use these bodies rather than pre-truncated searcher text, so secret
 // redaction sees the same whole-body context the substring/regex/fts paths
 // give it instead of a fragment that can split a secret at the truncation
 // boundary. relationshipType, parentSessionID, and isSidechain carry the
@@ -1658,6 +1661,7 @@ type semanticHitKey struct {
 // store lineage per hit); isSidechain is the ANCHOR ordinal's message flag.
 type semanticHitInfo struct {
 	project, agent, role, timestamp, content string
+	dialogueContent                          string
 	machine                                  string
 	displayName                              *string
 	transcriptRevision                       string
@@ -1694,7 +1698,7 @@ func (db *DB) enrichSemanticHits(
 			query := "WITH hits(session_id, ordinal) AS (VALUES " +
 				strings.Join(values, ", ") + ") " +
 				"SELECT m.session_id, s.project, s.agent, s.machine, COALESCE(s.display_name, s.session_name), m.role, m.ordinal, " +
-				"COALESCE(m.timestamp, ''), m.content, " +
+				"COALESCE(m.timestamp, ''), m.content, COALESCE(m.dialogue_text, m.content), " +
 				"COALESCE(s.transcript_revision, ''), " +
 				"COALESCE(s.relationship_type, ''), " +
 				"COALESCE(s.parent_session_id, ''), m.is_sidechain " +
@@ -1711,7 +1715,7 @@ func (db *DB) enrichSemanticHits(
 				var key semanticHitKey
 				var info semanticHitInfo
 				if err := rows.Scan(&key.sessionID, &info.project, &info.agent, &info.machine, &info.displayName,
-					&info.role, &key.ordinal, &info.timestamp, &info.content,
+					&info.role, &key.ordinal, &info.timestamp, &info.content, &info.dialogueContent,
 					&info.transcriptRevision,
 					&info.relationshipType, &info.parentSessionID,
 					&info.isSidechain); err != nil {
@@ -1770,9 +1774,9 @@ func approxSnippetSpan(content, approx string) (start, end int, ok bool) {
 }
 
 // SemanticSnippet builds the returned snippet for "semantic" and "hybrid"
-// matches from the message's full content, not from the searcher's
-// pre-truncated approx (chunk or FTS snippet() text): redaction
-// (BuildSnippet -> secrets.RedactWindow) must see the whole message so a
+// matches from the full message body, using its dialogue projection for FTS
+// hits. The searcher's pre-truncated approx only locates the window:
+// redaction (BuildSnippet -> secrets.RedactWindow) must see the whole body so a
 // secret straddling approx's truncation boundary cannot leak a fragment that
 // full-content redaction would otherwise catch. approx is used only to
 // center the window; when it cannot be located in content, FTSSnippetRange
