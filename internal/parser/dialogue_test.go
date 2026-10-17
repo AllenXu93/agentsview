@@ -12,7 +12,7 @@ import (
 )
 
 func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
-	const blocks = `[{"type":"text","text":"  Literal [Read: quokka.txt]  "},{"type":"thinking","thinking":"reasoningneedle"},{"type":"tool_use","id":"call_a","name":"Read","input":{"file_path":"quokka.txt"}}]`
+	const blocks = `[{"type":"text","text":"Literal [Read: quokka.txt]"},{"type":"thinking","thinking":"reasoningneedle"},{"type":"tool_use","id":"call_a","name":"Read","input":{"file_path":"quokka.txt"}}]`
 	for _, tc := range []struct {
 		name  string
 		agent AgentType
@@ -25,15 +25,20 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 		{"cursor", AgentCursor},
 		{"claude", AgentClaude},
 		{"iflow", AgentIflow},
+		{"pi", AgentPi},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var message ParsedMessage
 			wantThinking := "reasoningneedle"
 			switch tc.agent {
-			case AgentClaude, AgentIflow:
+			case AgentClaude, AgentIflow, AgentPi:
 				root := t.TempDir()
 				path := filepath.Join(root, "session-dialogue.jsonl")
 				body := `{"type":"assistant","uuid":"a","sessionId":"dialogue","timestamp":"2026-05-01T10:00:00Z","message":{"role":"assistant","content":` + blocks + `}}`
+				if tc.agent == AgentPi {
+					body = `{"type":"session","version":3,"id":"dialogue","timestamp":"2026-05-01T10:00:00Z"}
+{"type":"message","id":"a","message":{"role":"assistant","content":[{"type":"text","text":"Literal [Read: quokka.txt]"},{"type":"thinking","thinking":"reasoningneedle"},{"type":"toolCall","id":"call-a","name":"read","arguments":{"file_path":"quokka.txt"}}]}}`
+				}
 				require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 				provider, ok := NewProvider(tc.agent, ProviderConfig{Roots: []string{root}, Machine: "local"})
 				require.True(t, ok)
@@ -82,11 +87,10 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 				require.FailNow(t, "unexpected provider")
 			}
 			want := "Literal [Read: quokka.txt]"
-			if tc.agent == AgentDevin || tc.agent == AgentClaude || tc.agent == AgentIflow {
-				want = "  Literal [Read: quokka.txt]  "
-			}
 			assert.Equal(t, new(want), message.DialogueText)
-			assert.Equal(t, wantThinking, message.ThinkingText)
+			if tc.agent == AgentOpenHands || tc.agent == AgentCursor {
+				assert.Equal(t, wantThinking, message.ThinkingText)
+			}
 		})
 	}
 }

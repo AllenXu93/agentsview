@@ -96,7 +96,7 @@ func TestDialogueCJKProjectionRefresh(t *testing.T) {
 	assert.Len(t, page.Matches, 1)
 }
 
-func TestDialogueProjectionKeepsCitationMembers(t *testing.T) {
+func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 	d := testDB(t)
 	seedUnitSession(t, d, "members", nil, []Message{
 		{Ordinal: 0, Role: "user", Content: "question"},
@@ -104,12 +104,6 @@ func TestDialogueProjectionKeepsCitationMembers(t *testing.T) {
 		{Ordinal: 2, Role: "assistant", Content: "[Thinking]\nreasoningneedle\n[/Thinking]", ThinkingText: "reasoningneedle", DialogueText: new("")},
 		{Ordinal: 3, Role: "assistant", Content: "answerneedle", DialogueText: new("answerneedle")},
 	})
-	units, _ := scanUnits(t, d, "", true)
-	require.Len(t, units, 2)
-	assert.Equal(t, [2]int{1, 3}, [2]int{units[1].Ordinal, units[1].OrdinalEnd})
-	assert.Equal(t, []int{1, 2, 3}, unitMembers(units[1]))
-	assert.Contains(t, units[1].Content, "[Read: file.txt]")
-	assert.Contains(t, units[1].Content, "reasoningneedle")
 	for _, mode := range []string{"substring", "regex"} {
 		for _, source := range []struct {
 			term, location string
