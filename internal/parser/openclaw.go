@@ -124,7 +124,7 @@ func (b *openClawRecordBuilder) consume(line string, rejectInvalid bool) error {
 	switch role {
 	case "user":
 		content := msg.Get("content")
-		text, thinkingText, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
+		text, thinkingText, _, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
 		text = strings.TrimSpace(text)
 		if text == "" && len(tcs) == 0 && len(trs) == 0 {
 			return nil
@@ -150,7 +150,7 @@ func (b *openClawRecordBuilder) consume(line string, rejectInvalid bool) error {
 
 	case "assistant":
 		content := msg.Get("content")
-		text, thinkingText, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
+		text, thinkingText, _, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
 		text = strings.TrimSpace(text)
 		if text == "" && len(tcs) == 0 && len(trs) == 0 {
 			return nil

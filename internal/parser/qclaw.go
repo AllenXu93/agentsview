@@ -95,7 +95,7 @@ func (p *qClawProvider) parseSession(
 		switch role {
 		case "user":
 			content := msg.Get("content")
-			text, thinkingText, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
+			text, thinkingText, _, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
 			text = strings.TrimSpace(text)
 			if text == "" && len(tcs) == 0 && len(trs) == 0 {
 				continue
@@ -127,7 +127,7 @@ func (p *qClawProvider) parseSession(
 
 		case "assistant":
 			content := msg.Get("content")
-			text, thinkingText, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
+			text, thinkingText, _, hasThinking, hasToolUse, tcs, trs := ExtractTextContent(context.Background(), content)
 			text = strings.TrimSpace(text)
 			if text == "" && len(tcs) == 0 && len(trs) == 0 {
 				continue

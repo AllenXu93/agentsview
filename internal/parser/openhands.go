@@ -275,7 +275,7 @@ func parseOpenHandsMessageEvent(
 		return ParsedMessage{}, false, ""
 	}
 
-	content, _, _, _, toolCalls, toolResults := ExtractTextContent(context.Background(), llmMessage.Get("content"))
+	content, _, _, _, _, toolCalls, toolResults := ExtractTextContent(context.Background(), llmMessage.Get("content"))
 	content, hasThinking := openHandsAppendThinking(
 		content, ev,
 	)
@@ -430,7 +430,7 @@ func openHandsBaseStateCwd(base gjson.Result) string {
 }
 
 func openHandsText(content gjson.Result) string {
-	text, _, _, _, _, _ := ExtractTextContent(context.Background(), content)
+	text, _, _, _, _, _, _ := ExtractTextContent(context.Background(), content)
 	return strings.TrimSpace(text)
 }
 

@@ -579,7 +579,7 @@ func parseDevinDBMessageNode(
 		return ParsedMessage{}, false, nil
 	}
 
-	content, thinking, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), root.Get("content"))
+	content, thinking, _, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), root.Get("content"))
 	topThinking := strings.TrimSpace(root.Get("thinking").Str)
 	if topThinking != "" && topThinking != thinking {
 		thinking = joinNonEmpty(thinking, topThinking)
@@ -971,7 +971,7 @@ func parseDevinStep(rawSessionID string, step gjson.Result, ordinal int, model s
 		return ParsedMessage{}, false
 	}
 
-	content, thinking, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), step.Get("message"))
+	content, thinking, _, hasThinking, hasToolUse, toolCalls, toolResults := ExtractTextContent(context.Background(), step.Get("message"))
 	topLevelToolText, topLevelToolCalls := formatTopLevelToolUses(step.Get("tool_use"))
 	if topLevelToolText != "" {
 		content = joinNonEmpty(content, topLevelToolText)

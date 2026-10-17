@@ -140,6 +140,10 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against the shared block parser
+  and ingest fixtures. Text blocks retain literal thinking and tool markers;
+  separate thinking blocks remain available as reasoning. Cowork, iCodeMate CLI,
+  and Qoder share this parser. Amp and OpenClaude use the same block extraction.
 - **Launch evidence (2026-10-07):** Claude Code 2.1.293's bundled CLI launch
   initializer records `entrypoint=sdk-cli` for print-mode launches and `cli`
   for interactive terminal launches; SDK libraries use `sdk-py` or `sdk-ts`.
@@ -2172,6 +2176,9 @@ schemas keep their existing ordering behavior.
 
 ## Cursor (`cursor`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against the JSONL parser and
+  shared block fixtures. Assistant text and thinking blocks remain separate.
+  Cursor IDE uses a different parser.
 - **Format:** Legacy text and newer JSONL transcripts under per-project
   `agent-transcripts` directories in three layouts: flat (`<id>.ext`), nested
   (`<id>/<id>.ext`), and subagent (`<parent>/subagents/<id>.ext`), where a
@@ -2554,6 +2561,10 @@ schemas keep their existing ordering behavior.
 
 ## Pi (`pi`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against Pi block-order and
+  ingest fixtures. Text blocks retain quoted markers, thinking blocks populate
+  `thinking_text`, and tool calls retain their separate inputs and results. OMP,
+  OMO, Prime Agent, and StepCode share this parser.
 - **Format:** A tree-structured JSONL log with a session header and entries
   connected by `id` and `parentId`.
 - **Evidence:** `source`.
@@ -3842,6 +3853,9 @@ schemas keep their existing ordering behavior.
 
 ## iFlow CLI (`iflow`)
 
+- **Dialogue projection:** Reverified 2026-10-17 against the observed-format
+  ingest fixture. Assistant thinking blocks populate `thinking_text`; text
+  blocks supply dialogue. This adds no upstream format claim.
 - **Format:** Claude-like JSONL with UUID/parent UUID links and streaming
   message records.
 - **Evidence:** `no-public-source`.
