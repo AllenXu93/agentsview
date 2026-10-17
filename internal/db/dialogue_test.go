@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -91,12 +92,14 @@ func TestDialogueFTSUpgradeReportsProgress(t *testing.T) {
 
 func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 	for _, classified := range []bool{true, false} {
-		t.Run(fmt.Sprint(classified), func(t *testing.T) {
+		t.Run(strconv.FormatBool(classified), func(t *testing.T) {
 			d := testDB(t)
 			insertSession(t, d, "search", "project", func(s *Session) { s.UserMessageCount = 2 })
-			message := Message{SessionID: "search", Ordinal: 1, Role: "assistant",
+			message := Message{
+				SessionID: "search", Ordinal: 1, Role: "assistant",
 				Content:      "answerneedle [Thinking] reasoningneedle [/Thinking] [Read: file.txt]",
-				ThinkingText: "reasoningneedle"}
+				ThinkingText: "reasoningneedle",
+			}
 			if classified {
 				message.DialogueText = new("answerneedle")
 			}
@@ -153,10 +156,11 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 			insertMessages(t, d, messages...)
 			for _, phase := range []string{"insert", "update", "delete"} {
 				t.Run(phase, func(t *testing.T) {
-					if phase == "update" {
+					switch phase {
+					case "update":
 						messages[1].Content = tc.dialogue + " [Thinking] " + tc.replacement
 						require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", messages))
-					} else if phase == "delete" {
+					case "delete":
 						require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", nil))
 					}
 					for _, term := range []string{tc.dialogue, tc.hidden, tc.replacement} {

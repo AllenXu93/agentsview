@@ -1414,7 +1414,8 @@ func TestTranscriptsToolPathRemainsSearchable(t *testing.T) {
 	d := testDB(t)
 	d.SetArchiveContent(config.ArchiveContentTranscripts)
 	insertSession(t, d, "paths", "project", func(s *Session) { s.UserMessageCount = 2 })
-	insertMessages(t, d, Message{SessionID: "paths", Role: "assistant",
+	insertMessages(t, d, Message{
+		SessionID: "paths", Role: "assistant",
 		Content:   "Reading",
 		ToolCalls: []ToolCall{{ToolName: "Read", Category: "Read", InputJSON: `{"file_path":"retainedneedle.txt"}`, FilePath: "retainedneedle.txt"}},
 	})
