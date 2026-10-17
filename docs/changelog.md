@@ -177,6 +177,10 @@ The latest release is
   whenever the archive's database id changes, so any full rebuild causes one.
 - Hidden tabs release their live connections so new tabs load, and catch up when
   shown again.
+- Codex rollouts that carry another thread's metadata stay under their own
+  thread. Upgrading runs a one-time full archive rebuild at data version 137.
+  Pins, Recall entries, and export message IDs move from misfiled rows when a
+  fresh parse at the stored source path proves the corrected thread.
 - DeepSeek Harness v4 sessions now appear after sync, with tool results and
   recorded token usage.
 - ClickHouse usage reports read prepared usage again for a machine whose
