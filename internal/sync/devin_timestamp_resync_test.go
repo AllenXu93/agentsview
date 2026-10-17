@@ -125,7 +125,7 @@ const staleStartedAt = "1970-01-20T16:13:20Z"
 // or a current archive that a version bump never reached.
 func staleUserVersion(demandResync bool) int {
 	if demandResync {
-		return 93 // The Devin epoch-seconds fix shipped in data version 94.
+		return 77 // The Devin timestamp reparse shipped in data version 78.
 	}
 	return db.CurrentDataVersion()
 }

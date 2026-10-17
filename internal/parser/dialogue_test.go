@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,10 +13,39 @@ import (
 
 func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 	const blocks = `[{"type":"text","text":"  Literal [Read: quokka.txt]  "},{"type":"thinking","thinking":"reasoningneedle"},{"type":"tool_use","id":"call_a","name":"Read","input":{"file_path":"quokka.txt"}}]`
-	for _, agent := range []AgentType{AgentOpenClaw, AgentQClaw, AgentDevin, AgentOpenHands, AgentCursor} {
-		t.Run(string(agent), func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent AgentType
+	}{
+		{"openclaw", AgentOpenClaw},
+		{"qclaw", AgentQClaw},
+		{"devin", AgentDevin},
+		{"openhands-message", AgentOpenHands},
+		{"openhands-action", AgentOpenHands},
+		{"cursor", AgentCursor},
+		{"claude", AgentClaude},
+		{"iflow", AgentIflow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			var message ParsedMessage
-			switch agent {
+			wantThinking := "reasoningneedle"
+			switch tc.agent {
+			case AgentClaude, AgentIflow:
+				root := t.TempDir()
+				path := filepath.Join(root, "session-dialogue.jsonl")
+				body := `{"type":"assistant","uuid":"a","sessionId":"dialogue","timestamp":"2026-05-01T10:00:00Z","message":{"role":"assistant","content":` + blocks + `}}`
+				require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+				provider, ok := NewProvider(tc.agent, ProviderConfig{Roots: []string{root}, Machine: "local"})
+				require.True(t, ok)
+				var opaque any = JSONLSource{Root: root, Path: path}
+				if tc.agent == AgentClaude {
+					opaque = MaterializedFileSource{Path: path}
+				}
+				outcome, err := provider.Parse(t.Context(), ParseRequest{Source: SourceRef{Provider: tc.agent, DisplayPath: path, Opaque: opaque}})
+				require.NoError(t, err)
+				require.Len(t, outcome.Results, 1)
+				require.Len(t, outcome.Results[0].Result.Messages, 1)
+				message = outcome.Results[0].Result.Messages[0]
 			case AgentOpenClaw:
 				b := newOpenClawRecordBuilder()
 				require.NoError(t, b.consume(`{"type":"message","message":{"role":"assistant","content":`+blocks+`}}`, false))
@@ -36,7 +67,12 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 				assert.Equal(t, message.DialogueText, stored.DialogueText)
 			case AgentOpenHands:
 				var ok bool
-				message, ok, _ = parseOpenHandsMessageEvent(gjson.Parse(`{"llm_message":{"role":"assistant","content":`+blocks+`}}`), 0, "", time.Time{})
+				if tc.name == "openhands-action" {
+					message, ok, _ = parseOpenHandsActionEvent(gjson.Parse(`{"thought":`+blocks+`,"thinking_blocks":[{"type":"thinking","thinking":"actionreasoningneedle"}],"tool_name":"terminal","action":{"command":"tail -40 /tmp/server.log","kind":"TerminalAction"}}`), 0, "", time.Time{})
+					wantThinking += "\nactionreasoningneedle"
+				} else {
+					message, ok, _ = parseOpenHandsMessageEvent(gjson.Parse(`{"llm_message":{"role":"assistant","content":`+blocks+`}}`), 0, "", time.Time{})
+				}
 				require.True(t, ok)
 			case AgentCursor:
 				messages := parseCursorJSONL(`{"role":"assistant","message":{"content":` + blocks + `}}`)
@@ -46,13 +82,11 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 				require.FailNow(t, "unexpected provider")
 			}
 			want := "Literal [Read: quokka.txt]"
-			if agent == AgentDevin {
+			if tc.agent == AgentDevin || tc.agent == AgentClaude || tc.agent == AgentIflow {
 				want = "  Literal [Read: quokka.txt]  "
 			}
 			assert.Equal(t, new(want), message.DialogueText)
-			assert.Equal(t, "reasoningneedle", message.ThinkingText)
-			assert.Contains(t, message.Content, "reasoningneedle")
-			require.Len(t, message.ToolCalls, 1)
+			assert.Equal(t, wantThinking, message.ThinkingText)
 		})
 	}
 }

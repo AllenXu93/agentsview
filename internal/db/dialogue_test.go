@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -11,13 +12,16 @@ import (
 func TestDialogueColumnUpgradeKeepsArchiveInPlace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "archive.db")
 	d := testDBAtPath(t, path, "source")
-	insertSession(t, d, "pi:kept", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 2 })
+	insertSession(t, d, "pi:kept", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 1 })
 	const content = "[Thinking]\nreasoningneedle\n[/Thinking]\nAnswer"
-	insertMessages(t, d, Message{SessionID: "pi:kept", Role: "assistant", Content: content, ThinkingText: "reasoningneedle", HasThinking: true})
+	insertMessages(t, d,
+		Message{SessionID: "pi:kept", Ordinal: 0, Role: "user", Content: "Question"},
+		Message{SessionID: "pi:kept", Ordinal: 1, Role: "assistant", Content: content, ThinkingText: "reasoningneedle", HasThinking: true},
+	)
 	before, err := d.GetAllMessages(t.Context(), "pi:kept")
 	require.NoError(t, err)
 	require.NoError(t, d.DropFTS(t.Context()))
-	_, err = d.getWriter().Exec(t.Context(), `DROP VIEW message_search_content;
+	_, err = d.getWriter().Exec(t.Context(), fmt.Sprintf(`DROP VIEW message_search_content;
  ALTER TABLE messages DROP COLUMN dialogue_text;
  CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id', tokenize='porter unicode61');
  CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,content) VALUES(new.id,new.content); END;
@@ -26,7 +30,7 @@ func TestDialogueColumnUpgradeKeepsArchiveInPlace(t *testing.T) {
  INSERT INTO messages_fts(messages_fts,rowid,content) VALUES('delete',old.id,old.content);
  INSERT INTO messages_fts(rowid,content) VALUES(new.id,new.content); END;
  INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
- PRAGMA user_version=137; UPDATE sessions SET data_version=137;`)
+ PRAGMA user_version=%d; UPDATE sessions SET data_version=%d;`, CurrentDataVersion()-1, CurrentDataVersion()-1))
 	require.NoError(t, err)
 	require.NoError(t, d.Close())
 	d, err = Open(t.Context(), path)
@@ -35,30 +39,32 @@ func TestDialogueColumnUpgradeKeepsArchiveInPlace(t *testing.T) {
 	assert.False(t, d.NeedsResync())
 	stored, err := d.GetAllMessages(t.Context(), "pi:kept")
 	require.NoError(t, err)
-	require.Len(t, stored, 1)
-	assert.Equal(t, before[0].ID, stored[0].ID)
-	assert.Equal(t, content, stored[0].Content)
-	assert.Nil(t, stored[0].DialogueText)
-	assert.Equal(t, "reasoningneedle", stored[0].ThinkingText)
+	require.Len(t, stored, 2)
+	assert.Equal(t, before[1].ID, stored[1].ID)
+	assert.Equal(t, content, stored[1].Content)
+	assert.Nil(t, stored[1].DialogueText)
+	assert.Equal(t, "reasoningneedle", stored[1].ThinkingText)
 	session, err := d.GetSession(t.Context(), "pi:kept")
 	require.NoError(t, err)
-	assert.Equal(t, 137, session.DataVersion)
-	for _, mode := range []string{"substring", "regex", "fts"} {
-		page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: "reasoningneedle", Mode: mode})
+	assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
+	for _, mode := range []string{"fts", "terms"} {
+		page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: "reasoningneedle", Mode: mode, IncludeOneShot: true})
 		require.NoError(t, err)
 		require.Len(t, page.Matches, 1)
 		assert.Equal(t, "message", page.Matches[0].Location)
 	}
 	// A source-backed reparse replaces the projection without changing message IDs.
-	stored[0].DialogueText = new("Answer")
+	stored[1].DialogueText = new("Answer")
 	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "pi:kept", stored))
-	for _, query := range []struct {
-		term    string
-		matches int
-	}{{"reasoningneedle", 0}, {"Answer", 1}} {
-		page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: query.term, Mode: "fts", Sources: []string{"messages"}})
-		require.NoError(t, err)
-		assert.Len(t, page.Matches, query.matches)
+	for _, mode := range []string{"fts", "terms"} {
+		for _, query := range []struct {
+			term    string
+			matches int
+		}{{"reasoningneedle", 0}, {"Answer", 1}} {
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{SessionID: "pi:kept", Pattern: query.term, Mode: mode, Sources: []string{"messages"}, IncludeOneShot: true})
+			require.NoError(t, err)
+			assert.Len(t, page.Matches, query.matches, mode)
+		}
 	}
 }
 
@@ -104,18 +110,27 @@ func TestDialogueProjectionKeepsCitationMembers(t *testing.T) {
 	assert.Equal(t, []int{1, 2, 3}, unitMembers(units[1]))
 	assert.Contains(t, units[1].Content, "[Read: file.txt]")
 	assert.Contains(t, units[1].Content, "reasoningneedle")
-	for _, source := range []struct {
-		term, location string
-		sources        []string
-	}{
-		{"answerneedle", "message", []string{"messages"}},
-		{"reasoningneedle", "thinking", []string{"thinking"}},
-	} {
-		page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: source.term, Sources: source.sources})
-		require.NoError(t, err)
-		require.Len(t, page.Matches, 1)
-		assert.Equal(t, source.location, page.Matches[0].Location)
-		assert.Equal(t, [2]int{1, 3}, page.Matches[0].OrdinalRange)
+	for _, mode := range []string{"substring", "regex"} {
+		for _, source := range []struct {
+			term, location string
+			sources        []string
+		}{
+			{"answerneedle", "message", []string{"messages"}},
+			{"reasoningneedle", "thinking", []string{"thinking"}},
+			{"reasoningneedle", "thinking", nil},
+			{"reasoningneedle", "", []string{"messages"}},
+			{"file.txt", "", []string{"messages"}},
+		} {
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: source.term, Mode: mode, Sources: source.sources})
+			require.NoError(t, err)
+			if source.location == "" {
+				assert.Empty(t, page.Matches, "%s messages matched %s", mode, source.term)
+				continue
+			}
+			require.Len(t, page.Matches, 1)
+			assert.Equal(t, source.location, page.Matches[0].Location)
+			assert.Equal(t, [2]int{1, 3}, page.Matches[0].OrdinalRange)
+		}
 	}
 }
 
@@ -132,5 +147,10 @@ func TestThinkingSourceSearchesUnclassifiedArchiveRows(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, all.Matches, 1)
 		assert.Equal(t, "message", all.Matches[0].Location)
+	}
+	for _, mode := range []string{"terms", "semantic", "hybrid"} {
+		_, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "archivedneedle", Mode: mode, Sources: []string{"thinking"}})
+		var inputErr *SearchInputError
+		require.ErrorAs(t, err, &inputErr)
 	}
 }

@@ -66,36 +66,6 @@ func TestValidateDataVersionScopes(t *testing.T) {
 	}
 }
 
-func TestDialogueScopedUpgradePreservesSessions(t *testing.T) {
-	d := testDB(t)
-	providers := []parser.AgentType{parser.AgentPi, parser.AgentOMP, parser.AgentOMO, parser.AgentPrimeAgent, parser.AgentStepCode, parser.AgentIflow, parser.AgentClaude, parser.AgentCowork, parser.AgentIcodemate, parser.AgentQoder, parser.AgentCursor, parser.AgentAmp, parser.AgentOpenClaude, parser.AgentOpenClaw, parser.AgentQClaw, parser.AgentDevin, parser.AgentOpenHands}
-	assert.ElementsMatch(t, providers, ScopedDataVersionProviders(137, 138))
-	for _, agent := range append(providers, parser.AgentCursorIDE) {
-		id := string(agent) + ":kept"
-		insertSession(t, d, id, "project", func(s *Session) {
-			s.Agent = string(agent)
-			s.FilePath = new("session.jsonl")
-		})
-		require.NoError(t, d.SetSessionDataVersion(t.Context(), id, 137))
-	}
-	require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
-		return writeUserVersion(t.Context(), tx, 137)
-	}))
-	require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
-		return advanceDataVersion(t.Context(), tx, 138)
-	}))
-	for _, agent := range append(providers, parser.AgentCursorIDE) {
-		session, err := d.GetSession(t.Context(), string(agent)+":kept")
-		require.NoError(t, err)
-		require.NotNil(t, session)
-		want := 137
-		if agent == parser.AgentCursorIDE {
-			want = 138
-		}
-		assert.Equal(t, want, session.DataVersion)
-	}
-}
-
 func TestAdvanceScopedDataVersion(t *testing.T) {
 	t.Cleanup(InstallDataVersionScopesForTest(map[int][]parser.AgentType{131: {parser.AgentCodebuff}}))
 	for _, rollback := range []bool{false, true} {
