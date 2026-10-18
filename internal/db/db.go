@@ -649,26 +649,16 @@ const ClassifierHashKey = "is_automated_classifier_hash"
 //go:embed schema.sql
 var schemaSQL string
 
-// messageRenderedTextSQL is the full rendered text indexed in the rendered FTS
-// column. It is NULL for rows without a stored dialogue projection; those rows
-// index their content once, in the content column.
-const messageRenderedTextSQL = `CASE WHEN %[1]s.dialogue_text IS NULL THEN NULL ELSE %[1]s.content END`
-
-var (
-	oldRenderedTextSQL = fmt.Sprintf(messageRenderedTextSQL, "old")
-	newRenderedTextSQL = fmt.Sprintf(messageRenderedTextSQL, "new")
-)
-
 // messagesADTriggerDDL is the AFTER DELETE trigger that mirrors row
 // removals into the FTS5 shadow tables. ReplaceSessionMessages drops
 // this trigger inside its transaction (replacing N per-row FTS deletes
 // with a single bulk INSERT...SELECT) and then re-runs this DDL to
 // restore it before commit. Keeping the statement in one place keeps
 // the two installation sites byte-identical.
-var messagesADTriggerDDL = `
+const messagesADTriggerDDL = `
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, rendered, content)
-        VALUES('delete', old.id, ` + oldRenderedTextSQL + `, COALESCE(old.dialogue_text, old.content));
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
 END;
 `
 
@@ -678,18 +668,19 @@ const cjkFTSRuntimeMatchesSQL = `EXISTS (
       AND CAST(value AS TEXT) = agentsview_cjk_fts_fingerprint()
 )`
 
-var messagesCJKADTriggerDDL = `
+const messagesCJKADTriggerDDL = `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_ad
 AFTER DELETE ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
     INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, rendered, content)
-        VALUES('delete', old.id, ` + oldRenderedTextSQL + `, COALESCE(old.dialogue_text, old.content));
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
 END;
 `
 
-var schemaFTS = `
+// Each row indexes its full transcript in rendered and its dialogue in content.
+const schemaFTS = `
 CREATE VIEW IF NOT EXISTS message_search_content AS
-SELECT id, session_id, ` + fmt.Sprintf(messageRenderedTextSQL, "messages") + ` AS rendered,
+SELECT id, session_id, content AS rendered,
     COALESCE(dialogue_text, content) AS content FROM messages;
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content, rendered,
@@ -699,13 +690,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, rendered, content) VALUES (new.id, ` + newRenderedTextSQL + `, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_fts(rowid, rendered, content) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 ` + messagesADTriggerDDL + `
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, rendered, content)
-        VALUES('delete', old.id, ` + oldRenderedTextSQL + `, COALESCE(old.dialogue_text, old.content));
-    INSERT INTO messages_fts(rowid, rendered, content) VALUES (new.id, ` + newRenderedTextSQL + `, COALESCE(new.dialogue_text, new.content));
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_fts(rowid, rendered, content) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 `
 
@@ -718,19 +709,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_cjk_fts USING fts5(
 );
 `
 
-var schemaCJKFTSTriggers = `
+const schemaCJKFTSTriggers = `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_ai
 AFTER INSERT ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
-    INSERT INTO messages_cjk_fts(rowid, rendered, content) VALUES (new.id, ` + newRenderedTextSQL + `, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_cjk_fts(rowid, rendered, content) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 ` + messagesCJKADTriggerDDL + `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_au
 AFTER UPDATE ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
     INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, rendered, content)
-        VALUES('delete', old.id, ` + oldRenderedTextSQL + `, COALESCE(old.dialogue_text, old.content));
-    INSERT INTO messages_cjk_fts(rowid, rendered, content) VALUES (new.id, ` + newRenderedTextSQL + `, COALESCE(new.dialogue_text, new.content));
+        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_cjk_fts(rowid, rendered, content) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
 END;
 
 -- The persistent BEFORE triggers mark a session pending without consulting

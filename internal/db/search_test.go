@@ -179,6 +179,7 @@ func TestSearchRenderedTranscript(t *testing.T) {
 		{`"alpha beta"`, "", ""},
 		{`"alpha beta" OR absent`, "", ""},
 		{`"alpha beta" NOT absent`, "", ""},
+		{`"alpha" NOT "alpha beta"`, "classified", "<mark>alpha</mark>"},
 		{`"alpha beta" AND gamma`, "", ""},
 		{`alpha`, "classified", "<mark>alpha</mark>"},
 		{`"alpha" AND content:alpha`, "classified", "<mark>alpha</mark>"},
@@ -200,7 +201,7 @@ func TestSearchRenderedTranscript(t *testing.T) {
 			require.Len(t, page.Results, 1)
 			assert.Equal(t, tc.id, page.Results[0].SessionID)
 			assert.Contains(t, page.Results[0].Snippet, tc.snippet)
-			if tc.id == "classified" {
+			if tc.id == "classified" && tc.query != `"alpha" AND content:alpha` {
 				assert.Contains(t, page.Results[0].Snippet, "[Thinking]")
 			}
 		})

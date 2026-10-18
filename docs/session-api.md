@@ -818,8 +818,11 @@ available. Other providers and parser paths, sessions without source files,
 imported v4 artifacts, and unpaired OpenHands observations keep searching their
 stored content as `message` hits.
 The first writable open refreshes SQLite's full-text indexes once. Startup waits
-for this scan; later opens reuse the indexes. Classified messages index dialogue
-and rendered text separately, so ordinary session-search ordering may shift.
+for this scan; later opens reuse the indexes. Every message indexes its full
+rendered text in `rendered` and `COALESCE(dialogue_text, content)` in `content`.
+Ordinary session search matches `rendered` unless the query names an FTS column;
+FTS content search and hybrid's keyword search match `content`. Session-search
+ordering may shift.
 Artifact transport and PostgreSQL, DuckDB, and ClickHouse dialogue search are a
 separate follow-up. Transcript display, block order, and artifact format v4
 remain unchanged.

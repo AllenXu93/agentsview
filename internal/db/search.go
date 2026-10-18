@@ -392,22 +392,17 @@ func (db *DB) Search(
 
 	// innerWhere is used in the ROW_NUMBER inner subquery and the NOT IN
 	// subquery for the name branch.
+	matchSQL := "messages_fts.rendered MATCH ?"
+	if hasFTSColumnFilter(f.Query) {
+		matchSQL = "messages_fts MATCH ?"
+	}
 	innerWhere := []string{
-		"messages_fts MATCH ?",
+		matchSQL,
 		"s2.deleted_at IS NULL",
 		"m2.is_system = 0",
 		SystemPrefixSQL("m2.content", "m2.role"),
 	}
 	ftsArgs := []any{f.Query} // args for one copy of innerWhere
-	// Removing thinking blocks can create phrases in dialogue alone. Guard
-	// unscoped expressions against the transcript; explicit column filters
-	// keep their requested scope instead of intersecting it with rendered.
-	if !hasFTSColumnFilter(f.Query) {
-		innerWhere = append(innerWhere, `(m2.dialogue_text IS NULL OR m2.id IN (
-			SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?
-		))`)
-		ftsArgs = append(ftsArgs, "rendered : ("+f.Query+")")
-	}
 
 	nameProjectClause := ""
 	var nameProjectArgs []any
@@ -441,13 +436,7 @@ func (db *DB) Search(
 	}
 	likePattern := "%" + escapeLike(plainQuery) + "%"
 
-	// Build args in the order the SQL placeholders appear.
-	// Position 0 (? AS best_query in the ROW_NUMBER SELECT) is
-	// prepended after this block — see args2 below.
-	//
-	// Each inner WHERE copy has the main MATCH, a rendered MATCH only when
-	// guarded, then optional project/date args. The remaining placeholders
-	// are the outer MATCH, four LIKEs, name project/date args, LIMIT, and OFFSET.
+	// Build args in SQL order, with best_query prepended below.
 	args := make([]any, 0, 2*len(ftsArgs)+7+len(nameProjectArgs))
 	args = append(args, ftsArgs...)          // (1) ROW_NUMBER WHERE
 	args = append(args, f.Query)             // (2) outer MATCH re-filter
@@ -468,7 +457,7 @@ func (db *DB) Search(
 				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at, '') AS session_ended_at,
 				best.best_ordinal AS ordinal,
-				snippet(messages_fts, CASE WHEN m.dialogue_text IS NULL THEN 0 ELSE 1 END, '<mark>', '</mark>',
+				snippet(messages_fts, -1, '<mark>', '</mark>',
 					'...', %d) AS snippet,
 				best.best_rank AS rank,
 				instr(LOWER(m.content), LOWER(best.best_query))
@@ -496,7 +485,7 @@ func (db *DB) Search(
 			JOIN messages_fts ON messages_fts.rowid = best.best_rowid
 			JOIN messages m ON m.id = best.best_rowid
 			JOIN sessions s ON m.session_id = s.id
-			WHERE messages_fts MATCH ?
+			WHERE %s
 
 			UNION ALL
 
@@ -537,6 +526,7 @@ func (db *DB) Search(
 		LIMIT ? OFFSET ?`,
 		snippetTokenLength,
 		innerWhereSQL,     // ROW_NUMBER inner WHERE (%s at rn subquery)
+		matchSQL,          // outer MATCH re-filter (%s)
 		nameProjectClause, // optional project filter for name branch (%s)
 		innerWhereSQL,     // NOT IN subquery WHERE (%s)
 		orderBy,           // ORDER BY (%s)

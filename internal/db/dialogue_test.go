@@ -184,6 +184,16 @@ func TestDialogueFTSTriggerSync(t *testing.T) {
 						assert.Empty(t, page.Matches, "%s %s", phase, term)
 					}
 				}
+				for _, term := range []string{"Question", tc.hidden, tc.replacement} {
+					page, err := d.Search(t.Context(), SearchFilter{Query: term})
+					require.NoError(t, err, "%s %s", phase, term)
+					if phase != "delete" && (term == "Question" || phase == "insert" && term == tc.hidden || phase == "update" && term == tc.replacement) {
+						require.Len(t, page.Results, 1, "%s %s", phase, term)
+						assert.Equal(t, "search", page.Results[0].SessionID, "%s %s", phase, term)
+					} else {
+						assert.Empty(t, page.Results, "%s %s", phase, term)
+					}
+				}
 			}
 		})
 	}
