@@ -130,6 +130,34 @@ real prompt'),
 	}, got)
 }
 
+func TestHasFTSColumnFilter(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"words", "alpha beta", false},
+		{"phrase", `"alpha beta"`, false},
+		{"quoted colon", `"content:alpha"`, false},
+		{"escaped quote before colon", `"alpha"":beta"`, false},
+		{"escaped quotes around colon", `"alpha"":""beta"`, false},
+		{"or expression", `"alpha beta" OR absent`, false},
+		{"and expression", `"alpha beta" AND gamma`, false},
+		{"not expression", `"alpha beta" NOT absent`, false},
+		{"column", `content:alpha`, true},
+		{"column after phrase", `"alpha" AND content:alpha`, true},
+		{"column before phrase", `rendered:"alpha beta"`, true},
+		{"column set", `{content rendered}:alpha`, true},
+		{"column after escaped quote", `"alpha""beta" AND content:gamma`, true},
+		{"empty phrase then colon", `"":alpha`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, hasFTSColumnFilter(tc.query))
+		})
+	}
+}
+
 func TestSearchRenderedTranscript(t *testing.T) {
 	d := testDB(t)
 	requireFTS(t, d)
@@ -153,7 +181,7 @@ func TestSearchRenderedTranscript(t *testing.T) {
 		{`"alpha beta" NOT absent`, "", ""},
 		{`"alpha beta" AND gamma`, "", ""},
 		{`alpha`, "classified", "<mark>alpha</mark>"},
-		{`"alpha" AND content:alpha`, "", ""},
+		{`"alpha" AND content:alpha`, "classified", "<mark>alpha</mark>"},
 		{`"go test"`, "classified", "[Bash: <mark>go test</mark> ./widget]"},
 		{`"gamma delta"`, "classified", "<mark>gamma delta</mark>"},
 		{`"gamma delta" AND alpha`, "classified", "<mark>gamma delta</mark>"},

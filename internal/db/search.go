@@ -333,6 +333,26 @@ type SearchPage struct {
 	NextCursor int            `json:"next_cursor,omitempty"`
 }
 
+// hasFTSColumnFilter reports whether query contains a colon outside FTS quotes.
+func hasFTSColumnFilter(query string) bool {
+	quoted := false
+	for i := 0; i < len(query); i++ {
+		switch query[i] {
+		case '"':
+			if quoted && i+1 < len(query) && query[i+1] == '"' {
+				i++
+				continue
+			}
+			quoted = !quoted
+		case ':':
+			if !quoted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Search performs FTS5 full-text search across messages, grouped by session,
 // plus a LIKE-based search on session display names and first messages.
 //
@@ -371,19 +391,23 @@ func (db *DB) Search(
 	}
 
 	// innerWhere is used in the ROW_NUMBER inner subquery and the NOT IN
-	// subquery for the name branch. Classified rows must match the transcript,
-	// since removing thinking blocks can create phrases in dialogue alone.
+	// subquery for the name branch.
 	innerWhere := []string{
 		"messages_fts MATCH ?",
-		`(m2.dialogue_text IS NULL OR m2.id IN (
-			SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?
-		))`,
 		"s2.deleted_at IS NULL",
 		"m2.is_system = 0",
 		SystemPrefixSQL("m2.content", "m2.role"),
 	}
-	// Raw palette column filters address indexed columns (content is conversation text, rendered is the full transcript), so classified rows match only through the rendered scope.
-	ftsArgs := []any{f.Query, "rendered : (" + f.Query + ")"} // args for one copy of innerWhere
+	ftsArgs := []any{f.Query} // args for one copy of innerWhere
+	// Removing thinking blocks can create phrases in dialogue alone. Guard
+	// unscoped expressions against the transcript; explicit column filters
+	// keep their requested scope instead of intersecting it with rendered.
+	if !hasFTSColumnFilter(f.Query) {
+		innerWhere = append(innerWhere, `(m2.dialogue_text IS NULL OR m2.id IN (
+			SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?
+		))`)
+		ftsArgs = append(ftsArgs, "rendered : ("+f.Query+")")
+	}
 
 	nameProjectClause := ""
 	var nameProjectArgs []any
@@ -421,25 +445,10 @@ func (db *DB) Search(
 	// Position 0 (? AS best_query in the ROW_NUMBER SELECT) is
 	// prepended after this block — see args2 below.
 	//
-	// Positions below omit optional project/date arguments. Each inner WHERE
-	// adds its project/date arguments after its two MATCH arguments; the name
-	// branch adds its own project/date arguments after its LIKE arguments.
-	//
-	// pos | SQL clause                                      | value
-	// ----+-------------------------------------------------+-----------------
-	// 0   | SELECT ? AS best_query (ROW_NUMBER)              | plainQuery (args2)
-	// 1   | MATCH ? (ROW_NUMBER)                             | ftsArgs[0]
-	// 2   | MATCH ? (ROW_NUMBER rendered)                    | ftsArgs[1]
-	// 3   | MATCH ? (outer JOIN)                             | f.Query
-	// 4   | display_name/session_name LIKE ? (CASE)           | likePattern
-	// 5   | first_message LIKE ? (CASE)                       | likePattern
-	// 6   | display_name/session_name LIKE ? (name WHERE)     | likePattern
-	// 7   | first_message LIKE ? (name WHERE)                 | likePattern
-	// 8   | MATCH ? (NOT IN)                                 | ftsArgs[0]
-	// 9   | MATCH ? (NOT IN rendered)                        | ftsArgs[1]
-	// 10  | LIMIT ?                                         | f.Limit+1
-	// 11  | OFFSET ?                                        | f.Cursor
-	args := make([]any, 0, 11+3*len(nameProjectArgs))
+	// Each inner WHERE copy has the main MATCH, a rendered MATCH only when
+	// guarded, then optional project/date args. The remaining placeholders
+	// are the outer MATCH, four LIKEs, name project/date args, LIMIT, and OFFSET.
+	args := make([]any, 0, 2*len(ftsArgs)+7+len(nameProjectArgs))
 	args = append(args, ftsArgs...)          // (1) ROW_NUMBER WHERE
 	args = append(args, f.Query)             // (2) outer MATCH re-filter
 	args = append(args, likePattern)         // (3) CASE COALESCE(display_name,session_name) LIKE
@@ -534,13 +543,7 @@ func (db *DB) Search(
 	)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
 
-	// Replace the ROW_NUMBER inner subquery's ? for best_query with args
-	// re-ordered: the first innerWhere param (f.Query) was already included in
-	// ftsArgs above at position (1); best_query needs a second copy of f.Query
-	// injected at the right position. Re-build args with the extra copy.
-	//
-	// The inner subquery's SELECT has `? AS best_query` before the WHERE, so
-	// its ? comes before innerWhere's ?s. Rebuild:
+	// The ROW_NUMBER SELECT's best_query placeholder precedes its WHERE args.
 	args2 := make([]any, 0, len(args)+1)
 	args2 = append(args2, plainQuery) // best_query: plain text for instr()
 	args2 = append(args2, args...)

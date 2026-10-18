@@ -724,7 +724,7 @@ func (t *toolset) getMessageBodyContinuation(
 // --- search_content ---
 
 type searchContentIn struct {
-	Pattern          string `json:"pattern" jsonschema:"Natural-language query for semantic/hybrid, whitespace-separated literals for terms, or exact substring/regex for lexical search across message text and tool inputs/results."`
+	Pattern          string `json:"pattern" jsonschema:"Natural-language query for semantic/hybrid, whitespace-separated literals for terms, or exact substring/regex for lexical search across message text, thinking, and tool inputs/results."`
 	Mode             string `json:"mode,omitempty" jsonschema:"substring (default), regex, terms, semantic, or hybrid. Prefer hybrid or semantic for contextual questions when a vector search index is configured."`
 	Scope            string `json:"scope,omitempty" jsonschema:"Semantic/hybrid/terms result scope: top, all, or subordinate (default all)."`
 	Project          string `json:"project,omitempty" jsonschema:"Restrict to one project."`

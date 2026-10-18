@@ -767,7 +767,7 @@ ______________________________________________________________________
 
 ### `agentsview session search`
 
-Substring, RE2 regex, or FTS5 search across message bodies, tool inputs, and
+Substring, RE2 regex, or FTS5 search across message bodies, thinking, tool inputs, and
 tool result content. Response shape matches `GET /api/v1/search/content`.
 
 ```bash

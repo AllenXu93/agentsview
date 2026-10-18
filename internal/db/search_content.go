@@ -551,7 +551,7 @@ func (db *DB) searchContentRegex(
 	defer rows.Close()
 
 	out := make([]ContentMatch, 0)
-	messageMatches := make(map[int64]bool)
+	var lastMessageMatchRowID int64
 	// Regex paging has no SQL OFFSET: each page re-fetches and re-matches
 	// candidates from the start, discarding the first f.Cursor confirmed
 	// matches. Ordering is deterministic so paging stays correct; deep pages
@@ -575,8 +575,8 @@ func (db *DB) searchContentRegex(
 		// Message candidates sort before thinking for the same row. Record
 		// matches before cursor filtering so later pages dedupe them too.
 		if m.Location == "message" {
-			messageMatches[rowID] = true
-		} else if legacyThinking && messageMatches[rowID] {
+			lastMessageMatchRowID = rowID
+		} else if m.Location == "thinking" && legacyThinking && lastMessageMatchRowID == rowID {
 			continue
 		}
 		if seen < f.Cursor {
