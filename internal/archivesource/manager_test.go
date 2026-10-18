@@ -197,3 +197,54 @@ func drainError(manager *Manager, ctx context.Context, progress syncer.ProgressF
 	_, err := manager.Drain(ctx, progress)
 	return err
 }
+
+func TestArchiveDrainDoesNotRepeatRebuiltSources(t *testing.T) {
+	source, inputs := archiveFixture(t)
+	require.NoError(t, os.RemoveAll(inputs))
+	receiver := dbtest.OpenTestDB(t)
+	cfg := config.Config{DataDir: filepath.Dir(receiver.Path()), ArchiveSources: []config.ArchiveSource{source}}
+	engine := syncer.NewEngine(t.Context(), receiver, syncer.EngineConfig{Ephemeral: true, Machine: "receiver", RebuildSources: func(ctx context.Context) (syncer.RebuildOptions, error) { return RebuildContributors(ctx, cfg) }})
+	defer engine.Close()
+	boundary, release := make(chan struct{}), make(chan struct{})
+	var handoffs atomic.Int32
+	manager, err := NewManager(t.Context(), cfg, receiver, engine, func(ctx context.Context) error {
+		if handoffs.Add(1) == 1 {
+			close(boundary)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	done := make(chan error, 1)
+	var drainCopies atomic.Int32
+	go func() {
+		done <- drainError(manager, t.Context(), func(p syncer.Progress) {
+			if p.Detail == "Reading archived session" {
+				drainCopies.Add(1)
+			}
+		})
+	}()
+	<-boundary
+	rebuilt, err := engine.ResyncAllWithOptions(t.Context(), nil, syncer.RebuildOptions{})
+	before, readErr := receiver.GetAllMessages(t.Context(), sourceDevice+"~codex:019eb791-cf7d-75c1-8439-9ed74c122e02")
+	moveErr := os.Rename(source.Repository, source.Repository+"-offline")
+	close(release)
+	require.NoError(t, moveErr)
+	require.NoError(t, readErr)
+	require.NoError(t, err)
+	require.False(t, rebuilt.Aborted)
+	require.Equal(t, 2, rebuilt.Synced)
+	require.NoError(t, <-done)
+	after, readErr := receiver.GetAllMessages(t.Context(), sourceDevice+"~codex:019eb791-cf7d-75c1-8439-9ed74c122e02")
+	require.NoError(t, readErr)
+	assert.Equal(t, before, after, "redundant reparse preserved transcript and message identities")
+	var pending int
+	require.NoError(t, receiver.Reader().QueryRow(t.Context(), `SELECT sum(pending_count) FROM archive_attachments`).Scan(&pending))
+	assert.Zero(t, pending)
+	assert.Zero(t, drainCopies.Load(), "the successful rebuild completed every pending source")
+}

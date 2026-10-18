@@ -63,6 +63,8 @@ func TestAttachedSourceMatchesProviderHistory(t *testing.T) {
 		_, err = receiver.PinMessage(t.Context(), session.ID, messages[0].ID, new("kept note"))
 		require.NoError(t, err)
 		require.NoError(t, receiver.RenameSession(t.Context(), session.ID, new("kept title")))
+		targets[n].Target += "-reparse"
+		require.NoError(t, receiver.SetArchiveAttachmentTargets(t.Context(), key, "current", targets))
 		_, err = index.syncSource(t.Context(), source.Repository, item, cfg, engine, scratch, targets[n].Target, nil)
 		require.NoError(t, err)
 		retried, err := receiver.GetAllMessages(t.Context(), session.ID)
@@ -80,6 +82,8 @@ func TestAttachedSourceMatchesProviderHistory(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, stars, session.ID)
 		require.NoError(t, receiver.SoftDeleteSession(t.Context(), session.ID))
+		targets[n].Target += "-reparse"
+		require.NoError(t, receiver.SetArchiveAttachmentTargets(t.Context(), key, "current", targets))
 		_, err = index.syncSource(t.Context(), source.Repository, item, cfg, engine, scratch, targets[n].Target, nil)
 		require.NoError(t, err)
 		trashed, err := receiver.GetSessionFull(t.Context(), session.ID)
@@ -87,6 +91,8 @@ func TestAttachedSourceMatchesProviderHistory(t *testing.T) {
 		require.NotNil(t, trashed)
 		assert.NotNil(t, trashed.DeletedAt)
 		require.NoError(t, receiver.DeleteSession(t.Context(), session.ID))
+		targets[n].Target += "-reparse"
+		require.NoError(t, receiver.SetArchiveAttachmentTargets(t.Context(), key, "current", targets))
 		_, err = index.syncSource(t.Context(), source.Repository, item, cfg, engine, scratch, targets[n].Target, nil)
 		require.NoError(t, err)
 		deleted, err := receiver.GetSessionFull(t.Context(), session.ID)

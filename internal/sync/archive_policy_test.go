@@ -114,19 +114,25 @@ func TestAttachedSourceCleanupFailureStaysPending(t *testing.T) {
 	parent := NewEngine(t.Context(), database, EngineConfig{Ephemeral: true})
 	defer parent.Close()
 	path := filepath.Join(root, "2024", "01", "01", "rollout-2024-01-01T10-00-00-"+id+".jsonl")
-	_, err := parent.SyncAttachedSource(t.Context(), cfg, path, p, "target", func() error { return errors.New("scratch removal failed") }, nil)
+	_, err := parent.SyncAttachedSource(t.Context(), p, "target", func() (EngineConfig, string, func() error, error) {
+		return cfg, path, func() error { return errors.New("scratch removal failed") }, nil
+	}, nil)
 	require.ErrorContains(t, err, "scratch removal failed")
 	status, err := database.ArchiveAttachmentStatus(t.Context(), key)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), status.Pending)
-	_, err = parent.SyncAttachedSource(t.Context(), cfg, path, p, "target", func() error { return nil }, nil)
+	_, err = parent.SyncAttachedSource(t.Context(), p, "target", func() (EngineConfig, string, func() error, error) {
+		return cfg, path, func() error { return nil }, nil
+	}, nil)
 	require.NoError(t, err)
 	status, err = database.ArchiveAttachmentStatus(t.Context(), key)
 	require.NoError(t, err)
 	assert.Zero(t, status.Pending)
 	require.NoError(t, database.SetArchiveAttachmentTargets(t.Context(), key, "suppressed", []db.ArchiveSourceTarget{{Provenance: p, Target: "suppressed"}}))
 	cfg.ArchiveSessionPolicy = func(context.Context, *db.Session, string) (bool, error) { return false, nil }
-	_, err = parent.SyncAttachedSource(t.Context(), cfg, path, p, "suppressed", func() error { return nil }, nil)
+	_, err = parent.SyncAttachedSource(t.Context(), p, "suppressed", func() (EngineConfig, string, func() error, error) {
+		return cfg, path, func() error { return nil }, nil
+	}, nil)
 	require.NoError(t, err)
 	status, err = database.ArchiveAttachmentStatus(t.Context(), key)
 	require.NoError(t, err)

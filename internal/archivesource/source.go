@@ -45,62 +45,70 @@ func (i *Index) provenance(source Source) db.ArchiveSourceProvenance {
 func (i *Index) syncSource(ctx context.Context, repository string, source Source, cfg config.Config,
 	engine *syncer.Engine, scratch, target string, progress syncer.ProgressFunc,
 ) (_ syncer.SyncStats, retErr error) {
-	identity, err := rawsync.NewAuthIdentity(i.ArchiveID, source.Root.DeviceID)
-	if err != nil {
-		return syncer.SyncStats{}, err
-	}
-	manifest, err := rawsync.ParseCanonicalManifest(identity, source.ManifestID, source.CanonicalJSON, rawsync.DefaultManifestLimits())
-	if err != nil {
-		return syncer.SyncStats{}, err
-	}
-	reader, err := i.OpenReader(ctx, repository)
-	if err != nil {
-		return syncer.SyncStats{}, err
-	}
-	materialized, err := (rawderive.Materializer{Store: snapshotObjects{reader}, BaseDir: scratch, MaxTotalBytes: sourceScratchBytes}).Materialize(ctx, manifest)
-	closeErr := reader.Close()
-	if err != nil {
-		return syncer.SyncStats{}, errors.Join(err, closeErr)
-	}
-	defer func() { retErr = errors.Join(retErr, materialized.Cleanup()) }()
-	if closeErr != nil {
-		return syncer.SyncStats{}, closeErr
-	}
-	storedPath := "archive://" + source.Root.ID + "/" + url.PathEscape(source.SourceKey)
-	prepared, err := rawderive.PrepareLocalSource(ctx, manifest, materialized, source.Root.DeviceID, storedPath)
-	if err != nil {
-		return syncer.SyncStats{}, err
-	}
+	var cleanup func() error
+	defer func() {
+		if cleanup != nil {
+			retErr = errors.Join(retErr, cleanup())
+		}
+	}()
 	p := i.provenance(source)
-	suppressions, err := i.Suppressions(ctx, source.Root.DeviceID)
-	if err != nil {
-		return syncer.SyncStats{}, err
-	}
-	policy := make(map[string]db.RawArchiveSuppression, len(suppressions))
-	for _, suppression := range suppressions {
-		policy[suppression.ParserID] = suppression
-	}
-	prepared.Config.IDPrefix = source.Root.DeviceID + "~"
-	prepared.Config.ArchiveContent = cfg.ArchiveContent
-	prepared.Config.ToolResultImages = cfg.ToolResultImages
-	prepared.Config.BlockedResultCategories = cfg.ResultContentBlockedCategories
-	prepared.Config.AssetsDir = filepath.Join(cfg.DataDir, "assets")
-	prepared.Config.ArchiveSessionPolicy = func(_ context.Context, s *db.Session, native string) (bool, error) {
-		if strings.Contains(native, "~") {
-			return false, errors.New("parser returned a transport-qualified session identity")
+	return engine.SyncAttachedSource(ctx, p, target, func() (syncer.EngineConfig, string, func() error, error) {
+		identity, err := rawsync.NewAuthIdentity(i.ArchiveID, source.Root.DeviceID)
+		if err != nil {
+			return syncer.EngineConfig{}, "", nil, err
 		}
-		if d, ok := rawderive.SuppressionFor(policy, native); ok && (d.Provider == "" || d.Provider == source.Root.Provider) {
-			return false, nil
+		manifest, err := rawsync.ParseCanonicalManifest(identity, source.ManifestID, source.CanonicalJSON, rawsync.DefaultManifestLimits())
+		if err != nil {
+			return syncer.EngineConfig{}, "", nil, err
 		}
-		if s.Machine != source.Root.DeviceID || s.ID != source.Root.DeviceID+"~"+native {
-			return false, fmt.Errorf("%w: parser source identity differs", db.ErrArchiveSourceConflict)
+		reader, err := i.OpenReader(ctx, repository)
+		if err != nil {
+			return syncer.EngineConfig{}, "", nil, err
 		}
-		// Continuations and forks share the accepted source, never its scratch paths.
-		s.FilePath = new(storedPath)
-		return true, nil
-	}
-	prepared.Config.ArchiveWriteProvenance = func(_ *db.Session, native string) (db.ArchiveSessionProvenance, error) {
-		return db.ArchiveSessionProvenance{ArchiveSourceProvenance: p, NativeSessionID: native}, nil
-	}
-	return engine.SyncAttachedSource(ctx, prepared.Config, prepared.Path, p, target, materialized.Cleanup, progress)
+		materialized, err := (rawderive.Materializer{Store: snapshotObjects{reader}, BaseDir: scratch, MaxTotalBytes: sourceScratchBytes}).Materialize(ctx, manifest)
+		closeErr := reader.Close()
+		if err != nil {
+			return syncer.EngineConfig{}, "", nil, errors.Join(err, closeErr)
+		}
+		cleanup = materialized.Cleanup
+		if closeErr != nil {
+			return syncer.EngineConfig{}, "", nil, closeErr
+		}
+		storedPath := "archive://" + source.Root.ID + "/" + url.PathEscape(source.SourceKey)
+		prepared, err := rawderive.PrepareLocalSource(ctx, manifest, materialized, source.Root.DeviceID, storedPath)
+		if err != nil {
+			return syncer.EngineConfig{}, "", nil, err
+		}
+		suppressions, err := i.Suppressions(ctx, source.Root.DeviceID)
+		if err != nil {
+			return syncer.EngineConfig{}, "", nil, err
+		}
+		policy := make(map[string]db.RawArchiveSuppression, len(suppressions))
+		for _, suppression := range suppressions {
+			policy[suppression.ParserID] = suppression
+		}
+		prepared.Config.IDPrefix = source.Root.DeviceID + "~"
+		prepared.Config.ArchiveContent = cfg.ArchiveContent
+		prepared.Config.ToolResultImages = cfg.ToolResultImages
+		prepared.Config.BlockedResultCategories = cfg.ResultContentBlockedCategories
+		prepared.Config.AssetsDir = filepath.Join(cfg.DataDir, "assets")
+		prepared.Config.ArchiveSessionPolicy = func(_ context.Context, s *db.Session, native string) (bool, error) {
+			if strings.Contains(native, "~") {
+				return false, errors.New("parser returned a transport-qualified session identity")
+			}
+			if d, ok := rawderive.SuppressionFor(policy, native); ok && (d.Provider == "" || d.Provider == source.Root.Provider) {
+				return false, nil
+			}
+			if s.Machine != source.Root.DeviceID || s.ID != source.Root.DeviceID+"~"+native {
+				return false, fmt.Errorf("%w: parser source identity differs", db.ErrArchiveSourceConflict)
+			}
+			// Continuations and forks share the accepted source, never its scratch paths.
+			s.FilePath = new(storedPath)
+			return true, nil
+		}
+		prepared.Config.ArchiveWriteProvenance = func(_ *db.Session, native string) (db.ArchiveSessionProvenance, error) {
+			return db.ArchiveSessionProvenance{ArchiveSourceProvenance: p, NativeSessionID: native}, nil
+		}
+		return prepared.Config, prepared.Path, cleanup, nil
+	}, progress)
 }

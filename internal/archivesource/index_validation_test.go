@@ -27,6 +27,7 @@ func TestArchiveSourceRejectsInvalidSavedIndex(t *testing.T) {
 		{"missing object", "source object"},
 		{"object size", "recorded size"},
 		{"suppression policy", "suppression policy"},
+		{"qualified native identity", "inconsistent saved archive references"},
 	} {
 		t.Run(tc.fault, func(t *testing.T) {
 			source, inputs := archiveFixture(t)
@@ -82,6 +83,9 @@ func invalidIndexSnapshot(t *testing.T, source config.ArchiveSource, inputs, fau
 func mutateSavedIndex(t *testing.T, conn *sql.DB, fault string) {
 	t.Helper()
 	queries := map[string]string{
+		"qualified native identity": `INSERT INTO raw_archive_sessions(device_id,provider,parser_id,session_id,root_id,source_key)
+        SELECT r.device_id,r.provider,'foreign~native','foreign~native',r.id,s.source_key
+        FROM raw_archive_sources s JOIN raw_archive_roots r ON r.id=s.root_id WHERE r.provider='claude' LIMIT 1`,
 		"missing table":      `DROP TABLE raw_archive_root_aliases`,
 		"missing column":     `ALTER TABLE raw_archive_files RENAME COLUMN covered TO unsupported`,
 		"wrong column type":  `ALTER TABLE raw_archive_devices RENAME TO old_devices; CREATE TABLE raw_archive_devices(device_id TEXT,suppressions TEXT)`,

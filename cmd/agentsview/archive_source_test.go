@@ -13,6 +13,9 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/rawarchive"
+	"go.kenn.io/agentsview/internal/rawcapture"
+	"go.kenn.io/agentsview/internal/rawcheckpoint"
+	"go.kenn.io/agentsview/internal/rawwatch"
 	"go.kenn.io/agentsview/internal/service"
 	"go.kenn.io/agentsview/internal/sync"
 	"go.kenn.io/agentsview/internal/testjsonl"
@@ -80,6 +83,28 @@ func TestArchiveSourceDirectSyncAndWorkerRebuild(t *testing.T) {
 	_, stats, err := runLocalSyncResult(t.Context(), cfg, database, false)
 	require.NoError(t, err)
 	assert.Equal(t, 4, stats.Synced, "the command result includes attached history")
+	// The actual raw capture audit queues only the three local sources.
+	providers, _, err := rawSyncProvidersAndRoots(t.Context(), cfg)
+	require.NoError(t, err)
+	checkpoint, err := rawcheckpoint.Open(t.Context(), filepath.Join(t.TempDir(), "checkpoint.db"))
+	require.NoError(t, err)
+	defer checkpoint.Close()
+	require.NoError(t, checkpoint.EnsureDevice(t.Context(), "receiver-device"))
+	capturer := rawcapture.New(checkpoint)
+	auditor := rawwatch.NewAuditor(checkpoint, capturer, 128)
+	defer auditor.Close()
+	captured := 0
+	for _, provider := range providers {
+		result, err := auditor.AuditProviderFull(t.Context(), provider)
+		require.NoError(t, err)
+		require.Zero(t, result.Degraded)
+		captured += result.Captured
+	}
+	assert.Equal(t, 3, captured)
+	queued, err := checkpoint.ClientStatus(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 3, queued.PendingGenerations)
+
 	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
 	before, err := database.GetAllMessages(t.Context(), id)
 	require.NoError(t, err)

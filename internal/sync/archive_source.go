@@ -32,17 +32,27 @@ func (e *Engine) writeAttachedStaged(ctx context.Context, prepared ingest.Prepar
 	return e.writeStagedFullParse(ctx, prepared.Session, prepared.Messages, pw, &write)
 }
 
-// SyncAttachedSource holds the receiver's sync lock only for this source. Cleanup
-// precedes completion, so a failed scratch removal remains pending for retry.
-func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig, path string,
-	source db.ArchiveSourceProvenance, target string, cleanup func() error, progress ProgressFunc,
+// SyncAttachedSource checks completion and prepares one source under the sync
+// lock, so a concurrent rebuild cannot make the selected pending work stale.
+func (e *Engine) SyncAttachedSource(ctx context.Context, source db.ArchiveSourceProvenance, target string,
+	prepare func() (EngineConfig, string, func() error, error), progress ProgressFunc,
 ) (stats SyncStats, retErr error) {
-	if cfg.ArchiveWriteProvenance == nil || cleanup == nil {
-		return stats, errors.New("archive source ownership and cleanup are required")
-	}
 	retErr = e.RunExclusive(func() error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if e.archiveStore == nil {
+			pending, err := e.db.ArchiveSourcePending(ctx, source, target)
+			if err != nil || !pending {
+				return err
+			}
+		}
+		cfg, path, cleanup, err := prepare()
+		if err != nil {
+			return err
+		}
+		if cfg.ArchiveWriteProvenance == nil || cleanup == nil {
+			return errors.New("archive source ownership and cleanup are required")
 		}
 		baseline := e.db
 		if old, ok := e.archiveStore.(*db.DB); ok {
@@ -110,7 +120,7 @@ func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig, path 
 		}
 		return e.db.CompleteArchiveSource(ctx, source, target)
 	})
-	if retErr == nil {
+	if retErr == nil && stats.Synced > 0 {
 		e.emit("sessions")
 	}
 	return stats, retErr

@@ -1,9 +1,8 @@
 # Attached Archive Source Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> superpowers:subagent-driven-development or superpowers:executing-plans to
-> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for
-> tracking.
+This is the execution record for the reviewed design. The task contracts below
+remain as the implementation rationale; the status section records what was
+actually verified and what remains.
 
 **Goal:** Use a Docbank-backed session archive alongside current local sessions,
 with original machine attribution. The first source reader uses existing
@@ -25,6 +24,39 @@ Design baseline: `3f340991`; code baseline: `ba819a4e`.
 Implementation starts from `176a0a49`, with the reviewed design preserved. Kit's
 reader is released and Docbank's wrapper is merged in #988. A Docbank release
 containing that wrapper is still required before this PR is mergeable.
+
+## Implementation status
+
+A1–A5 are implemented: pinned sources, compact indexing, transactional
+ownership, per-source parsing, ordinary sync scheduling, and atomic rebuild
+integration. A6's local rehearsal passed against a disposable copy of a real
+archive, with no restored vault or permanent extracted transcript tree. Full
+rebuild kept message content, session identities, machine labels, and ownership
+unchanged. API browsing, offline history, restart, relocation, source retries,
+repository verification, and independently hashed files over 4 GiB also passed.
+Synthetic tests cover receiver curation, ownership conflicts across import
+routes, artifact export, raw capture, and a DuckDB mirror.
+
+The final review found two issues, both covered by failing-then-passing tests:
+stale pending work could repeat after a rebuild, and bootstrap accepted a
+transport-qualified native identity. Completion is now checked under the sync
+lock before copying a source; rebuilds still deliberately reparse. Saved native
+identities are checked before publishing the compact index.
+
+Remaining gates and limits:
+
+- Pin a tagged Docbank release containing #988 before merging.
+- The broad local suite has native watcher and script-harness failures. Focused
+  archive, worker, ownership, and race checks pass. Record CI results
+  separately; the full suite is not reported green.
+- Network-share performance and remote database replicas were not exercised.
+  Disk and heap sampling covered one large source on a local repository copy,
+  not the peak of an entire initial import.
+- Single-session refresh directs users to `agentsview sync --full`; scoped
+  parser-version changes still drain only pending sources.
+
+The first implementation uses Docbank's merged reader commit for development. No
+installed binary, live archive, release, or remote branch was changed.
 
 ## Delivery order
 
@@ -149,10 +181,10 @@ normalized receiver content/image/blocked-category policy. Persist errors
 separately; they never advance completion. Source ownership is durable even if
 the compact index is deleted.
 
-- [ ] Write `TestArchiveSourceBootstrapFromRepository`. Create a synthetic
-  archive using production capture/import/backup with one Claude source and
-  one Codex source. Make capture/vault paths unavailable. Bootstrap only from
-  the backup, then assert two accepted sources, original root/device IDs and
+- Write `TestArchiveSourceBootstrapFromRepository`. Create a synthetic archive
+  using production capture/import/backup with one Claude source and one Codex
+  source. Make capture/vault paths unavailable. Bootstrap only from the
+  backup, then assert two accepted sources, original root/device IDs and
   suppression records. Include an unaccepted manifest in the vault and an
   unsupported provider's originals; neither becomes an accepted source. Report
   unsupported coverage separately. Do not copy messages into the compact
@@ -168,17 +200,17 @@ the compact index is deleted.
     assert.Equal(t, beforeSessions, afterSessions)
     ```
 
-- [ ] Write configuration and DB tests for an empty snapshot, repeated labels,
+- Write configuration and DB tests for an empty snapshot, repeated labels,
   equivalent copied repository paths, changed repository UUID, immutable
   source bindings and completion targets. Verify archive-only installations
   reject attachments. Verify schema additions preserve existing sessions and
   never rewrite a shipped migration or increment parser versions needlessly.
 
-- [ ] Run
+- Run
   `CGO_ENABLED=1 go test -tags fts5 ./internal/config ./internal/db ./internal/archivesource -run 'TestArchiveSource|TestArchiveAttachment'`
   and confirm the missing feature fails.
 
-- [ ] Implement bootstrap with D1's reader. Verify `application/inventory.json`,
+- Implement bootstrap with D1's reader. Verify `application/inventory.json`,
   `application/sessions.db`, saved identity and recovery settings as needed;
   use schema capability checks from the spec. Close the reader before
   read-only immutable SQLite inspection; its retained membership metadata can
@@ -186,7 +218,7 @@ the compact index is deleted.
   accepted manifests before publishing the index. Reject receiver
   identity/alias/publication-authority matches.
 
-- [ ] Keep the compact SQLite index under the receiving data directory, keyed by
+- Keep the compact SQLite index under the receiving data directory, keyed by
   repository UUID, snapshot and index version 1. Close/checkpoint it before
   atomic publication. Under the existing data-directory owner, remove only
   this feature's abandoned bootstrap temporaries on restart. Report expected
@@ -194,8 +226,8 @@ the compact index is deleted.
   error. An unchanged attachment uses registry/index metadata, not
   transcripts.
 
-- [ ] Run focused tests including cancellation and interrupted bootstrap
-  cleanup, formatting, vet and required lint. Commit with the tagged Docbank
+- Run focused tests including cancellation and interrupted bootstrap cleanup,
+  formatting, vet and required lint. Commit with the tagged Docbank
   dependency; no application feature is claimed usable yet.
 
 ### Task A2: Publish session ownership with its content
@@ -223,7 +255,7 @@ session-row update, ownership check, provenance, checkpoint and content in one
 transaction; do not call `UpsertSessionPendingContent` first for this path. Keep
 `ArchiveSessionPolicy` for suppression decisions, without provenance writes.
 
-- [ ] Write `TestArchiveProvenanceCommitsWithContent`, table-driven across the
+- Write `TestArchiveProvenanceCommitsWithContent`, table-driven across the
   ordinary batch writer and real staged Codex writer. Force a conflicting
   resulting ID and a transaction failure after the provenance write. Query
   persisted rows to show that neither content nor provenance was partially
@@ -238,18 +270,18 @@ transaction; do not call `UpsertSessionPendingContent` first for this path. Keep
     assert.Equal(t, originalProvenance, storedProvenance)
     ```
 
-- [ ] Run the focused tests and confirm the missing transactional behavior
-  fails. Trace every caller of the changed writers before editing signatures.
+- Run the focused tests and confirm the missing transactional behavior fails.
+  Trace every caller of the changed writers before editing signatures.
 
-- [ ] Bind provenance inside each session savepoint/transaction and check
-  receiver ownership there before any update. Wire the engine producer through
-  ordinary bulk and staged paths. `PrepareLocalSource` already requests
+- Bind provenance inside each session savepoint/transaction and check receiver
+  ownership there before any update. Wire the engine producer through ordinary
+  bulk and staged paths. `PrepareLocalSource` already requests
   cancellation-aware bulk writes; do not add unrelated hooks to every local
   incremental path. Check staged no-change fast paths still bind or verify
   provenance. Preserve curation, message IDs, export-index writes, policy,
   images, usage and secret scanning through the existing writer.
 
-- [ ] Run
+- Run
   `CGO_ENABLED=1 go test -tags fts5 ./internal/db ./internal/sync -run 'ArchiveProvenance|Staged|SessionBatch'`,
   then formatting, vet and required lint. Commit.
 
@@ -262,18 +294,22 @@ transaction; do not call `UpsertSessionPendingContent` first for this path. Keep
 using D1's reader. Add:
 
 ```go
-func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig,
-    path string, source db.ArchiveSourceProvenance, target string,
+func (e *Engine) SyncAttachedSource(ctx context.Context,
+    source db.ArchiveSourceProvenance, target string,
+    prepare func() (EngineConfig, string, func() error, error),
     progress ProgressFunc) (SyncStats, error)
 ```
 
 This operation holds the receiving engine's `syncMu` for one source, creates an
 ephemeral parser engine with the supplied verified paths, uses
 `ReparsePathsContext`, and records completion before releasing the mutex only
-after checking all expected sessions and intentional suppressions. A rebuild
-parent supplies the old-archive reconciliation context to the child engine.
+after checking all expected sessions and intentional suppressions and removing
+the temporary source tree. Preparation runs under this same lock after checking
+that the source is still pending; deliberate rebuilds bypass that check. A
+rebuild parent supplies the old-archive reconciliation context to the child
+engine.
 
-- [ ] Write `TestAttachedSourceMatchesProviderHistory`: real Claude
+- Write `TestAttachedSourceMatchesProviderHistory`: real Claude
   continuation/subagent files and a staged Codex source, including a parent in
   another captured root. Assert exact transcript values, original machine,
   prefixed parent IDs, stable message IDs on retry, suppression, retained
@@ -287,29 +323,29 @@ parent supplies the old-archive reconciliation context to the child engine.
     assert.Equal(t, receiverPinsBefore, receiverPinsAfter)
     ```
 
-- [ ] Add missing/corrupt-object cases with existing receiver content. A failed
+- Add missing/corrupt-object cases with existing receiver content. A failed
   materialization must leave it unchanged. Test the 16 GiB aggregate limit
   through declared manifests before allocation; companions count toward it.
   Add parse cancellation and cleanup failure cases. The source stays pending
   on either failure; successful earlier sessions can remain committed.
 
-- [ ] Run
+- Run
   `CGO_ENABLED=1 go test -tags fts5 ./internal/archivesource ./internal/sync -run 'TestAttachedSource'`
   and observe the missing path.
 
-- [ ] Implement one-source copy/verify using `Materializer`, release the reader,
+- Implement one-source copy/verify using `Materializer`, release the reader,
   then call `PrepareLocalSource` and the new engine operation. Use captured
   installation ID and `installation~` prefix, including fork parents. Apply
   source suppressions before prefixing and receiver suppressions afterward.
   Persist `archive://` paths using the existing rewriting rules. Include
   original cross-root dependencies; never scan the receiver's provider homes.
 
-- [ ] Require every accepted session to be written or intentionally suppressed
+- Require every accepted session to be written or intentionally suppressed
   before `CompleteArchiveSource`. Close parser/scratch handles, then clean the
   source tree before another source starts. Close errors remain errors.
 
-- [ ] Run focused tests and the existing rawarchive/rawderive tests, formatting,
-  vet and required lint. Commit.
+- Run focused tests and the existing rawarchive/rawderive tests, formatting, vet
+  and required lint. Commit.
 
 ### Task A4: Give local sync priority and make archive draining single-flight
 
@@ -324,7 +360,7 @@ retained retries under existing backoff. Add:
 ```go
 func NewManager(ownerCtx context.Context, cfg config.Config, database *db.DB,
     engine *sync.Engine, beforeSource func(context.Context) error) (*Manager, error)
-func (m *Manager) Drain(ctx context.Context, progress sync.ProgressFunc) error
+func (m *Manager) Drain(ctx context.Context, progress sync.ProgressFunc) (sync.SyncStats, error)
 ```
 
 The active drain belongs to `ownerCtx`; concurrent callers join its result.
@@ -332,8 +368,8 @@ Cancelling a joining caller ends only that wait. A direct CLI uses its command
 context as owner. Single-flight ownership is distinct from `syncMu` and does not
 add a polling service. Durable pending state remains authoritative.
 
-- [ ] Write `TestArchiveDrainYieldsToPendingLocalWork` with real watcher batches
-  and at least three archive sources. Queue a local update between sources and
+- Write `TestArchiveDrainYieldsToPendingLocalWork` with real watcher batches and
+  at least three archive sources. Queue a local update between sources and
   record persisted-write order, not elapsed speed. Assert the local update is
   visible before the second archive source starts. Cover an in-flight
   callback, retained retry, new arrivals after the handoff snapshot and stop.
@@ -342,26 +378,25 @@ add a polling service. Durable pending state remains authoritative.
     assert.Equal(t, []string{"archive-1", "local", "archive-2", "archive-3"}, publicationOrder)
     ```
 
-- [ ] Write `TestArchiveDrainSingleFlight`: overlap periodic/requested calls,
-  cancel one joiner, and assert each source is read once and the owner can
-  finish. Compare unchanged passes with small/large source counts: zero
-  transcript reads and no source enumeration per watcher event.
+- Write `TestArchiveDrainSingleFlight`: overlap periodic/requested calls, cancel
+  one joiner, and assert each source is read once and the owner can finish.
+  Compare unchanged passes with small/large source counts: zero transcript
+  reads and no source enumeration per watcher event.
 
-- [ ] Run focused tests before implementation. Implement the dispatch request
+- Run focused tests before implementation. Implement the dispatch request
   without a second queue consumer. Never wait for the handoff while holding
   `syncMu`. Open watcher dispatch after local startup reconciliation, before
   starting the archive drain. Preserve callback error/retry ownership.
 
-- [ ] Wire one manager into daemon initial, periodic and requested sync and
-  direct CLI sync after local work. Named `sync --host` remains remote-only.
-  Run the drain outside `SyncThenRun` and other pass-wide mutex holders.
-  Reconcile pending targets using `ProviderStoredAgents`/`AgentDataVersion`
-  and receiver policy independently of global resync markers. On a busy
-  ordinary read, retain pending work and report unavailable; retry next normal
-  sync.
+- Wire one manager into daemon initial, periodic and requested sync and direct
+  CLI sync after local work. Named `sync --host` remains remote-only. Run the
+  drain outside `SyncThenRun` and other pass-wide mutex holders. Reconcile
+  pending targets using `ProviderStoredAgents`/`AgentDataVersion` and receiver
+  policy independently of global resync markers. On a busy ordinary read,
+  retain pending work and report unavailable; retry next normal sync.
 
-- [ ] Add command tests for archive-only refusal, no configured attachment,
-  named remote scope and offline browsing. Run
+- Add command tests for archive-only refusal, no configured attachment, named
+  remote scope and offline browsing. Run
   `CGO_ENABLED=1 go test -tags fts5 ./internal/archivesource ./internal/sync ./cmd/agentsview -run 'ArchiveDrain|ArchiveSource|Watcher'`,
   focused race tests, formatting, vet and required lint. Commit.
 
@@ -374,7 +409,7 @@ add a polling service. Durable pending state remains authoritative.
 **Interfaces:** Extend `sync.RebuildContributor` with:
 
 ```go
-Run func(context.Context, *Engine, ProgressFunc) (SyncStats, error)
+Run func(context.Context, *Engine, *db.DB, ProgressFunc) (SyncStats, error)
 IDPrefixes []string
 ```
 
@@ -383,18 +418,18 @@ and original archive reconciliation context. An archive `Run` uses A3 source
 execution against that engine; existing filesystem contributors keep their
 current path. `IDPrefixes` supplies original-session safety accounting for an
 archive whose paths do not exist locally. Add
-`func (m *Manager) RebuildContributors(ctx context.Context) (sync.RebuildOptions, error)`.
+`func RebuildContributors(ctx context.Context, cfg config.Config) (sync.RebuildOptions, error)`.
 
-- [ ] Write `TestAttachedArchiveRebuild`: trigger a full parser upgrade through
-  the real worker, then a scoped provider upgrade. Assert exact IDs, curation,
+- Write `TestAttachedArchiveRebuild`: trigger a full parser upgrade through the
+  real worker, then a scoped provider upgrade. Assert exact IDs, curation,
   policy and pending fingerprints. Repeat offline and detached; reconnect
   after global markers clear and prove only pending sources are reparsed.
   Explicit full resync must reparse all available selected sources.
 
-- [ ] Write `TestAttachedArchiveRebuildWaitsForBackup`. Complete one source,
-  start a real backup before the next reader, observe waiting progress, then
-  release the backup and prove the same replacement finishes without rereading
-  the first source. Cancel a separate wait and compare the untouched live DB.
+- Write `TestAttachedArchiveRebuildWaitsForBackup`. Complete one source, start a
+  real backup before the next reader, observe waiting progress, then release
+  the backup and prove the same replacement finishes without rereading the
+  first source. Cancel a separate wait and compare the untouched live DB.
   Remove the pinned snapshot before retry; it must fail, not wait forever.
 
     ```go
@@ -403,21 +438,21 @@ archive whose paths do not exist locally. Add
     assert.Equal(t, beforeCancellationDigest, liveDigestAfterCancellation)
     ```
 
-- [ ] Run these tests before implementing the hook. Preserve coordinator safety
+- Run these tests before implementing the hook. Preserve coordinator safety
   counts and failure checks for custom contributors. Copy registration,
   provenance and completion with explicit columns; never use `SELECT *`. Keep
   old completion when copying unavailable/orphaned rows. Publish new
   completion only with the replacement swap.
 
-- [ ] Prepare available contributors without a pass-wide repository lease.
-  Initial unavailability permits carry-forward. After a contributor starts,
-  retry only `docbank.ErrBackupRepositoryLocked` through the existing backoff
-  dependency, bounded by rebuild cancellation rather than elapsed time. Report
-  attachment, completed sources and elapsed wait; hold no SQLite transaction
-  or reader while waiting. Reopen and revalidate placement on each attempt.
-  Integrity, missing snapshot and other errors abort replacement.
+- Prepare available contributors without a pass-wide repository lease. Initial
+  unavailability permits carry-forward. After a contributor starts, retry only
+  `docbank.ErrBackupRepositoryLocked` through the existing backoff dependency,
+  bounded by rebuild cancellation rather than elapsed time. Report attachment,
+  completed sources and elapsed wait; hold no SQLite transaction or reader
+  while waiting. Reopen and revalidate placement on each attempt. Integrity,
+  missing snapshot and other errors abort replacement.
 
-- [ ] Wire daemon startup and the separate worker, including target policy and
+- Wire daemon startup and the separate worker, including target policy and
   snapshot config. Suspend ordinary draining during the existing rebuild/write
   barrier and resume it after that lifecycle ends. Assert old history remains
   browsable and writes return 503 during rebuild/wait, then resume after
@@ -433,9 +468,9 @@ Private real-data commands, identifiers and results stay outside Git.
 **Interfaces:** Use production backup creation, D1, the real CLI/daemon, and
 existing browse/export APIs. No new migration command or source-management API.
 
-- [ ] Add a synthetic end-to-end test that creates a backup, makes capture and
-  vault inputs inaccessible, attaches it to an ordinary installation with
-  local sessions, syncs, browses and reparses. Assert transcript and machine
+- Add a synthetic end-to-end test that creates a backup, makes capture and vault
+  inputs inaccessible, attaches it to an ordinary installation with local
+  sessions, syncs, browses and reparses. Assert transcript and machine
   identity, receiver telemetry/config unchanged, no permanent transcript tree,
   and unchanged-sync zero transcript reads. Include assets and curation.
 
@@ -445,16 +480,16 @@ existing browse/export APIs. No new migration command or source-management API.
     assert.Zero(t, unchangedPassTranscriptReads)
     ```
 
-- [ ] Exercise artifact/HTTP imports in both orders: separate namespaces may
+- Exercise artifact/HTTP imports in both orders: separate namespaces may
   coexist; exact-ID conflicts fail unchanged. Verify raw-sync and artifact
   export do not publish attached originals. Exercise configured parsed-data
   mirror paths with original attribution and receiver policy intact.
 
-- [ ] Run the relevant package suites and race tests, repository `make vet` and
+- Run the relevant package suites and race tests, repository `make vet` and
   `make lint-ci`. Run the standard broader suite once the connected paths
   pass. Resolve failures before the real-data rehearsal.
 
-- [ ] Rehearse on a private disposable copy of the preserved backup, using a
+- Rehearse on a private disposable copy of the preserved backup, using a
   worktree binary and isolated ordinary data directory. Record exact binary,
   repository UUID and snapshot ID privately. Make original capture/restored
   vault paths unavailable. First copy and independently hash the saved
@@ -466,13 +501,13 @@ existing browse/export APIs. No new migration command or source-management API.
   and machine attribution against the preserved evidence. Browse
   representative large sessions through the API.
 
-- [ ] Repeat unchanged sync, restart, repository relocation, disconnection,
+- Repeat unchanged sync, restart, repository relocation, disconnection,
   reconnect, selective/scoped reparse and a full rebuild. Measure first/warm
   duration, peak disk, live heap and network-share reads. Include a concurrent
   local update and backup. Check temporary cleanup and repository verification
   afterward. Do not treat synthetic success as real-data acceptance.
 
-- [ ] Document the three-line `[[archive_sources]]` configuration and existing
+- Document the three-line `[[archive_sources]]` configuration and existing
   `agentsview sync` workflow. Explain reader releases, temporary bootstrap
   space, offline browsing, delayed local updates during one large parse,
   rebuild write pauses, duplicate namespaces and capture-time deletions. State

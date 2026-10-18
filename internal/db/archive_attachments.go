@@ -225,6 +225,21 @@ func archiveMembershipArgs(p ArchiveSourceProvenance) []any {
 	return []any{p.Attachment.RepositoryID, p.Attachment.SnapshotID, s.ArchiveID, s.DeviceID, s.RootID, s.SourceKey}
 }
 
+// ArchiveSourcePending checks the target again after acquiring the sync lock.
+// A rebuild can finish a source after the drainer selected its pending page.
+func (d *DB) ArchiveSourcePending(ctx context.Context, p ArchiveSourceProvenance, target string) (bool, error) {
+	var wanted, completed string
+	err := d.getReader().QueryRowContext(ctx, `SELECT target,completed_target FROM archive_attachment_sources WHERE `+archiveMembershipWhere,
+		archiveMembershipArgs(p)...).Scan(&wanted, &completed)
+	if err != nil {
+		return false, err
+	}
+	if target == "" || wanted != target {
+		return false, ErrArchiveSourceConflict
+	}
+	return completed != target, nil
+}
+
 func (d *DB) CompleteArchiveSource(ctx context.Context, p ArchiveSourceProvenance, target string) error {
 	return d.Update(ctx, func(tx *sql.Tx) error {
 		if err := checkArchiveSourceBindingTx(ctx, tx, p); err != nil {

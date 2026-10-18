@@ -1,8 +1,10 @@
 # Use a compressed archive as a session source
 
-Status: reviewed design; implementation planning authorized on 2026-10-16. The
-[component plans](../plans/2026-10-16-archive-source.md) describe work not yet
-implemented. Revised after reviews of `3acf86f0`, `d1c0fd79`, and `c8c7e53a`.
+Status: implemented in the working branch, with a repository-only rehearsal on
+real data. The [implementation record](../plans/2026-10-16-archive-source.md)
+lists completed work and remaining release checks. A tagged Docbank release
+containing its snapshot reader is still required before merging. This design was
+revised after reviews of `3acf86f0`, `d1c0fd79`, and `c8c7e53a`.
 
 ## What users get
 
@@ -18,7 +20,7 @@ not restore a vault, keep an extracted transcript tree, or run a separate
 archive server. Parsing uses temporary files for one source at a time. Opening a
 live Docbank vault directly remains a separate source-reader integration.
 
-Proposed configuration, followed by the existing `agentsview sync` command:
+Configuration, followed by the existing `agentsview sync` command:
 
 ```toml
 [[archive_sources]]
@@ -389,7 +391,7 @@ ambient provider directory as a substitute.
 | Artifact folder sync                 | Exchange parsed sessions and curation between publishers.                      | Existing artifact ownership stays separate. Attaching originals does not adopt the old publisher or grant republishing authority.        |
 | Hosted raw sync                      | Upload originals and authenticated source generations for server-side parsing. | Reuses manifest validation and materialization. An offline snapshot is not a hosted receipt, tenant, device credential, or upload queue. |
 | Archive capture, backup, and restore | Preserve originals and recover a complete archive-only installation.           | Remains the recovery workflow. Attaching is an additional way to read the backup from a normal installation.                             |
-| Attached archive source (proposed)   | Index a fixed saved snapshot alongside live sessions.                          | Reads originals as needed and stores parsed results locally.                                                                             |
+| Attached archive source              | Index a fixed saved snapshot alongside live sessions.                          | Reads originals as needed and stores parsed results locally.                                                                             |
 
 Do not add attached roots to raw-sync watch/backfill or artifact export.
 Existing guards against exporting foreign sessions must still hold. Database
@@ -401,8 +403,9 @@ this feature.
 
 ## Evidence and implementation boundaries
 
-Baseline: AgentsView `ba819a4e`, Docbank v0.15.2, Kit v0.34.1. Docbank main
-`c71cab86` and Kit main `4609e13f` were also inspected for the reader boundary.
+Design review baseline: AgentsView `ba819a4e`, Docbank v0.15.2, Kit v0.34.1.
+Docbank main `c71cab86` and Kit main `4609e13f` were also inspected for the
+reader boundary.
 
 | Existing code                                                                                                             | What it supplies; what remains new                                                                                                                       |
 | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -417,11 +420,11 @@ Baseline: AgentsView `ba819a4e`, Docbank v0.15.2, Kit v0.34.1. Docbank main
 | [Remote transport](../../../internal/remotesync/source.go)                                                                | Fetches tar streams. It is not an object-reader API.                                                                                                     |
 | Docbank `backup.go`; Kit `backup/object_recipe.go`, `stream.go`, `lock.go`, `verify.go`                                   | Plain `BlobStream` and private verified chunk streams exist. Snapshot-scoped reads, chunk-aware API exposure, and pack-reader cache integration are new. |
 
-Build and release the small Kit reader API first, then the Docbank wrapper.
-AgentsView consumes tagged releases. Its changes reach config validation,
-snapshot indexing, session write/provenance storage, all sync entry points,
-rebuild carry-forward, source status reporting, and the user guides. Do not land
-a dependency on an untagged commit.
+Kit's reader is released in v0.37.0. Docbank's wrapper is merged in #988; its
+release is pending. AgentsView consumes tagged releases. Its changes reach
+config validation, snapshot indexing, session write/provenance storage, all sync
+entry points, rebuild carry-forward, source status reporting, and the user
+guides. Do not land a dependency on an untagged commit.
 
 ## Acceptance before calling this usable
 

@@ -173,7 +173,7 @@ func validateSavedRecords(ctx context.Context, source *sql.DB, archiveID string,
 		 OR NOT EXISTS(SELECT 1 FROM raw_archive_roots r WHERE r.id=f.root_id))`,
 		`SELECT EXISTS(SELECT 1 FROM raw_archive_root_aliases a WHERE trim(alias)=''
 		 OR NOT EXISTS(SELECT 1 FROM raw_archive_roots r WHERE r.id=a.root_id))`,
-		`SELECT EXISTS(SELECT 1 FROM raw_archive_sessions a WHERE trim(parser_id)='' OR trim(session_id)=''
+		`SELECT EXISTS(SELECT 1 FROM raw_archive_sessions a WHERE trim(parser_id)='' OR instr(parser_id,'~')>0 OR trim(session_id)=''
 		 OR NOT EXISTS(SELECT 1 FROM raw_archive_sources s JOIN raw_archive_roots r ON r.id=s.root_id
 		 WHERE s.root_id=a.root_id AND s.source_key=a.source_key AND r.device_id=a.device_id AND r.provider=a.provider))`,
 	} {
