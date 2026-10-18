@@ -28,11 +28,10 @@ const (
 // mirror SessionFilter; they are mapped through buildSessionFilter so the
 // include-children / one-shot / orphan logic is shared, not reimplemented.
 type ContentSearchFilter struct {
-	Pattern        string
-	Mode           string   // "substring" (default) | "regex" | "fts" | "terms" | "semantic" | "hybrid"
-	Sources        []string // subset of {"messages","thinking","tool_input","tool_result"}
-	ExcludeSystem  bool
-	defaultSources bool
+	Pattern       string
+	Mode          string   // "substring" (default) | "regex" | "fts" | "terms" | "semantic" | "hybrid"
+	Sources       []string // subset of {"messages","thinking","tool_input","tool_result"}
+	ExcludeSystem bool
 
 	Project, ExcludeProject, Machine, Agent           string
 	SessionID, GitBranchExact                         string
@@ -276,7 +275,6 @@ func (db *DB) SearchContent(
 	}
 
 	if len(f.Sources) == 0 {
-		f.defaultSources = true
 		f.Sources = []string{"messages", "tool_input", "tool_result"}
 		if f.Mode == "" || f.Mode == "substring" || f.Mode == "regex" {
 			f.Sources = append(f.Sources, "thinking")
@@ -363,7 +361,7 @@ func (db *DB) searchContentSubstring(
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
 			WHERE (%t OR m.dialogue_text IS NOT NULL) AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
-			snippetExpr("m.thinking_text"), !f.defaultSources, sysPred, scope))
+			snippetExpr("m.thinking_text"), !hasSource(f, "messages"), sysPred, scope))
 		args = append(args, like)
 		args = append(args, scopeArgs...)
 	}
@@ -655,7 +653,7 @@ func (db *DB) regexCandidateRows(
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE (%t OR m.dialogue_text IS NOT NULL) AND %s AND m.thinking_text <> '' AND %s AND m.%s`, !f.defaultSources, w, sysPred, scope))
+			WHERE (%t OR m.dialogue_text IS NOT NULL) AND %s AND m.thinking_text <> '' AND %s AND m.%s`, !hasSource(f, "messages"), w, sysPred, scope))
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {

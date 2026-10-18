@@ -30,6 +30,38 @@ func seedSearchSession(t *testing.T, d *DB, id, project string, msgs [][2]string
 	require.NoError(t, d.ReplaceSessionMessages(t.Context(), id, out), "ReplaceSessionMessages")
 }
 
+func TestSearchContentLegacyThinkingSources(t *testing.T) {
+	for _, mode := range []string{"substring", "regex"} {
+		t.Run(mode, func(t *testing.T) {
+			d := testDB(t)
+			seedSearchSession(t, d, "legacy", "proj", nil)
+			insertMessages(t, d, Message{
+				SessionID: "legacy", Ordinal: 0, Role: "assistant",
+				Content: "Answer [Thinking] needle", ThinkingText: "needle",
+			})
+			for _, tc := range []struct {
+				name     string
+				sources  []string
+				location string
+			}{
+				{"messages_and_thinking", []string{"messages", "thinking"}, "message"},
+				{"thinking_only", []string{"thinking"}, "thinking"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					got, err := d.SearchContent(t.Context(), ContentSearchFilter{
+						Pattern: "needle", Mode: mode, Sources: tc.sources,
+					})
+					require.NoError(t, err)
+					require.Len(t, got.Matches, 1)
+					assert.Equal(t, "legacy", got.Matches[0].SessionID)
+					assert.Equal(t, tc.location, got.Matches[0].Location)
+					assert.Contains(t, got.Matches[0].Snippet, "needle")
+				})
+			}
+		})
+	}
+}
+
 func TestSearchContentSubstringMessages(t *testing.T) {
 	d := testDB(t)
 	seedSearchSession(t, d, "s1", "proj", [][2]string{
