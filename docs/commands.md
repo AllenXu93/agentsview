@@ -700,6 +700,7 @@ agentsview prune [flags]
 
 | Flag              | Default | Description                                         |
 | ----------------- | ------- | --------------------------------------------------- |
+| `--agent`         |         | Exact agent name, including matching trash          |
 | `--project`       |         | Sessions whose project contains this substring      |
 | `--max-messages`  | `-1`    | Sessions with at most N messages                    |
 | `--before`        |         | Sessions that ended before this date (`YYYY-MM-DD`) |
@@ -707,11 +708,23 @@ agentsview prune [flags]
 | `--dry-run`       | `false` | Show what would be pruned without deleting          |
 | `--yes`           | `false` | Skip confirmation prompt                            |
 
+Filters combine with AND. With `--agent`, one prune removes matching parents
+and descendants, including matching sessions in trash. A descendant that fails
+any filter keeps all its ancestors. Without `--agent`, prune skips trash and
+parents. The summary shows how many matches are in trash.
+
+Prune keeps deleted sessions out of later syncs. To keep new sessions from
+that agent out of the archive, add it to
+[`disabled_agents`](/docs/configuration/#disabling-session-providers).
+
 **Examples:**
 
 ```bash
 # Preview what would be deleted
 agentsview prune --project "scratch" --dry-run
+
+# Preview cleanup of an agent after stopping the daemon
+agentsview prune --agent mimocode --dry-run
 
 # Delete short sessions from before 2025
 agentsview prune --max-messages 2 --before 2025-01-01

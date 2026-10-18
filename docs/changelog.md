@@ -188,6 +188,12 @@ The latest release is
   `discarded an unfinished rebuild` the same way.
   A summary that reports ownership conflicts now also shows how many sessions
   were unchanged, already pushed by the interrupted run, or removed.
+- `agentsview prune --agent <name>` removes an agent you no longer use from
+  search and the archive in one pass, including its sessions in trash and their
+  subagent sessions. Like other prunes, it also deletes each session's source
+  file from disk, except shared app databases such as Hermes `state.db`. A
+  parent session stays when a session outside the filters still belongs to it.
+  The prune summary now shows how many matches are in trash.
 
 **Bug fixes**
 
