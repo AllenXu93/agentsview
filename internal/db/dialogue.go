@@ -10,7 +10,7 @@ import (
 
 // The same corpus version invalidates ordinary FTS and the CJK fingerprint.
 const (
-	searchCorpusVersion         = "2"
+	searchCorpusVersion         = "1"
 	searchCorpusVersionStatsKey = "message_search_corpus_version"
 )
 

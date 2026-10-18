@@ -70,45 +70,6 @@ func TestDialogueFTSUpgradePreservesMessages(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestDialogueFTSColumnRenameUpgrade(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "archive.db")
-	d := testDBAtPath(t, path, "previous corpus")
-	seedSearchSession(t, d, "upgrade", "proj", nil)
-	insertMessages(t, d, Message{
-		SessionID: "upgrade", Role: "assistant",
-		Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
-	})
-	require.NoError(t, d.DropFTS(t.Context()))
-	_, err := d.getWriter().Exec(t.Context(), `
- DROP VIEW message_search_content;
- CREATE VIEW message_search_content AS
- SELECT id, session_id, COALESCE(dialogue_text, content) AS dialogue,
-   CASE WHEN dialogue_text IS NULL THEN NULL ELSE content END AS content FROM messages;
- CREATE VIRTUAL TABLE messages_fts USING fts5(dialogue, content,
-   content='message_search_content', content_rowid='id', tokenize='porter unicode61');
- INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
- INSERT INTO stats(key, value) VALUES('message_search_corpus_version', '1');`)
-	require.NoError(t, err)
-	require.NoError(t, d.Close())
-	d, err = OpenWithProgress(t.Context(), path, config.ArchiveContentFull, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, d.Close()) })
-	page, err := d.SearchContent(t.Context(), ContentSearchFilter{
-		Pattern: `"needle" AND content:needle`, Mode: "fts", Sources: []string{"messages"},
-	})
-	require.NoError(t, err)
-	require.Len(t, page.Matches, 1)
-	assert.Equal(t, "needle", page.Matches[0].Snippet)
-	stored, err := d.GetAllMessages(t.Context(), "upgrade")
-	require.NoError(t, err)
-	require.Len(t, stored, 1)
-	assert.Equal(t, "needle [Thinking] hiddenneedle", stored[0].Content)
-	assert.Equal(t, new("needle"), stored[0].DialogueText)
-	ordinary, err := d.Search(t.Context(), SearchFilter{Query: "hiddenneedle"})
-	require.NoError(t, err)
-	assert.Len(t, ordinary.Results, 1)
-}
-
 func TestDialogueFTSCorpusVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name, marker string
