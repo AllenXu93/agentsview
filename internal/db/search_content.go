@@ -360,9 +360,9 @@ func (db *DB) searchContentSubstring(
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE (%t OR m.dialogue_text IS NOT NULL OR instr(m.content, substr(m.thinking_text, 1, 64)) = 0) AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
+			WHERE (%t OR m.dialogue_text IS NOT NULL OR m.content NOT LIKE ? ESCAPE '\') AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
 			snippetExpr("m.thinking_text"), !hasSource(f, "messages"), sysPred, scope))
-		args = append(args, like)
+		args = append(args, like, like)
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {
@@ -551,6 +551,7 @@ func (db *DB) searchContentRegex(
 	defer rows.Close()
 
 	out := make([]ContentMatch, 0)
+	messageMatches := make(map[int64]bool)
 	// Regex paging has no SQL OFFSET: each page re-fetches and re-matches
 	// candidates from the start, discarding the first f.Cursor confirmed
 	// matches. Ordering is deterministic so paging stays correct; deep pages
@@ -559,14 +560,23 @@ func (db *DB) searchContentRegex(
 	for rows.Next() {
 		var m ContentMatch
 		var body string
+		var rowID int64
+		var legacyThinking bool
 		if err := rows.Scan(&m.SessionID, &m.Project, &m.Agent,
 			&m.TranscriptRevision,
 			&m.Location, &m.Role, &m.ToolName, &m.Ordinal,
-			&m.Timestamp, &body); err != nil {
+			&m.Timestamp, &body, &rowID, &legacyThinking); err != nil {
 			return ContentSearchPage{}, fmt.Errorf("scan candidate: %w", err)
 		}
 		loc := re.FindStringIndex(body)
 		if loc == nil {
+			continue
+		}
+		// Message candidates sort before thinking for the same row. Record
+		// matches before cursor filtering so later pages dedupe them too.
+		if m.Location == "message" {
+			messageMatches[rowID] = true
+		} else if legacyThinking && messageMatches[rowID] {
 			continue
 		}
 		if seen < f.Cursor {
@@ -599,7 +609,8 @@ func (db *DB) searchContentRegex(
 // regexCandidateRows returns full-body rows for the selected sources,
 // LIKE-prefiltered by lit when non-empty, ordered for stable paging.
 // Each branch selects: session_id, project, agent, transcript_revision,
-// location, role, tool_name, ordinal, ts AS ts, body, sort_ts, src, row_id.
+// location, role, tool_name, ordinal, ts AS ts, body, sort_ts, src, row_id,
+// legacy_thinking.
 func (db *DB) regexCandidateRows(
 	ctx context.Context, f ContentSearchFilter, lit string,
 ) (*sql.Rows, error) {
@@ -633,7 +644,7 @@ func (db *DB) regexCandidateRows(
 				m.ordinal AS ordinal, COALESCE(m.timestamp,'') AS ts,
 				%s AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
-				0 AS src, m.id AS row_id
+				0 AS src, m.id AS row_id, 0 AS legacy_thinking
 			FROM messages m
 			JOIN sessions s ON s.id = m.session_id
 			WHERE %s AND %s AND m.%s`,
@@ -651,9 +662,9 @@ func (db *DB) regexCandidateRows(
 				m.ordinal AS ordinal, COALESCE(m.timestamp,'') AS ts,
 				m.thinking_text AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
-				4 AS src, m.id AS row_id
+				4 AS src, m.id AS row_id, m.dialogue_text IS NULL AS legacy_thinking
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE (%t OR m.dialogue_text IS NOT NULL OR instr(m.content, substr(m.thinking_text, 1, 64)) = 0) AND %s AND m.thinking_text <> '' AND %s AND m.%s`, !hasSource(f, "messages"), w, sysPred, scope))
+			WHERE %s AND m.thinking_text <> '' AND %s AND m.%s`, w, sysPred, scope))
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {
@@ -667,7 +678,7 @@ func (db *DB) regexCandidateRows(
 				mm.ordinal AS ordinal, COALESCE(mm.timestamp,'') AS ts,
 				tc.input_json AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
-				1 AS src, tc.id AS row_id
+				1 AS src, tc.id AS row_id, 0 AS legacy_thinking
 			FROM tool_calls tc JOIN messages mm ON mm.id = tc.message_id
 			JOIN sessions s ON s.id = tc.session_id
 			WHERE %s AND tc.%s`, w, scope))
@@ -684,7 +695,7 @@ func (db *DB) regexCandidateRows(
 				mm.ordinal AS ordinal, COALESCE(mm.timestamp,'') AS ts,
 				tc.result_content AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
-				2 AS src, tc.id AS row_id
+				2 AS src, tc.id AS row_id, 0 AS legacy_thinking
 			FROM tool_calls tc JOIN messages mm ON mm.id = tc.message_id
 			JOIN sessions s ON s.id = tc.session_id
 			WHERE %s AND NOT EXISTS (SELECT 1 FROM tool_result_events tre
@@ -703,7 +714,7 @@ func (db *DB) regexCandidateRows(
 				COALESCE(tre.timestamp,'') AS ts,
 				tre.content AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
-				3 AS src, tre.id AS row_id
+				3 AS src, tre.id AS row_id, 0 AS legacy_thinking
 			FROM tool_result_events tre JOIN sessions s ON s.id = tre.session_id
 			WHERE %s AND tre.%s`, wEv, scope))
 		args = append(args, scopeArgs...)
@@ -712,13 +723,14 @@ func (db *DB) regexCandidateRows(
 		// Return an empty result set.
 		q := "SELECT '' AS session_id, '' AS project, '' AS agent, " +
 			"'' AS transcript_revision, '' AS location, " +
-			"'' AS role, '' AS tool_name, 0 AS ordinal, '' AS ts, '' AS body " +
+			"'' AS role, '' AS tool_name, 0 AS ordinal, '' AS ts, '' AS body, " +
+			"0 AS row_id, 0 AS legacy_thinking " +
 			"WHERE 0"
 		return db.getReader().QueryContext(ctx, q)
 	}
 
 	query := "SELECT session_id, project, agent, transcript_revision, location, role, tool_name, " +
-		"ordinal, ts, body FROM (" +
+		"ordinal, ts, body, row_id, legacy_thinking FROM (" +
 		strings.Join(branches, " UNION ALL ") +
 		") ORDER BY julianday(sort_ts) DESC, session_id ASC, ordinal ASC, src ASC, row_id ASC"
 	return db.getReader().QueryContext(ctx, query, args...)
@@ -853,26 +865,6 @@ func LiteralPrefix(pattern string) string {
 // failed to load), so both modes report the same capability gate.
 var errFTSUnavailable = errors.New("search: full-text search is unavailable")
 
-// prepareContentFTSQuery validates the expression before restricting it to
-// dialogue. Wrapping an unbalanced expression can make it valid and let an OR
-// branch escape the content column filter.
-func (db *DB) prepareContentFTSQuery(ctx context.Context, pattern string) (messageFTSQuery, error) {
-	query, err := db.prepareMessageFTSQuery(ctx, pattern)
-	if err != nil {
-		return messageFTSQuery{}, err
-	}
-	var rowid int64
-	err = db.getReader().QueryRowContext(ctx,
-		"SELECT rowid FROM "+query.table+" WHERE "+query.table+" MATCH ? LIMIT 1",
-		query.match,
-	).Scan(&rowid)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return messageFTSQuery{}, classifyFTSError(err)
-	}
-	query.match = "content : (" + query.match + ")"
-	return query, nil
-}
-
 // searchContentFTS uses messages_fts for fast tokenized matching over
 // message content only. The caller (service/CLI) guarantees Sources is
 // messages-only for fts mode.
@@ -886,7 +878,7 @@ func (db *DB) searchContentFTS(
 	if !db.HasFTS(ctx) {
 		return ContentSearchPage{}, errFTSUnavailable
 	}
-	ftsQuery, err := db.prepareContentFTSQuery(ctx, f.Pattern)
+	ftsQuery, err := db.prepareMessageFTSQuery(ctx, f.Pattern)
 	if err != nil {
 		return ContentSearchPage{}, err
 	}
@@ -904,7 +896,7 @@ func (db *DB) searchContentFTS(
 		FROM messages_fts
 		JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ? AND %s AND m.%s
+		WHERE messages_fts.content MATCH ? AND %s AND m.%s
 		ORDER BY rank ASC, m.ordinal ASC, m.id ASC
 		LIMIT ? OFFSET ?`, sysPred, scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
@@ -1425,7 +1417,7 @@ func (db *DB) hybridFTSLeg(
 func (db *DB) fetchHybridFTSBatch(
 	ctx context.Context, f ContentSearchFilter, k, offset int,
 ) ([]hybridDisplay, error) {
-	ftsQuery, err := db.prepareContentFTSQuery(ctx, f.Pattern)
+	ftsQuery, err := db.prepareMessageFTSQuery(ctx, f.Pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1434,7 +1426,7 @@ func (db *DB) fetchHybridFTSBatch(
 		SELECT m.session_id, m.ordinal,
 		       snippet(messages_fts, 0, '', '', '...', 32) AS snip
 		FROM messages_fts f JOIN messages m ON m.id = f.rowid
-		WHERE messages_fts MATCH ? AND m.role IN ('user','assistant')
+		WHERE f.content MATCH ? AND m.role IN ('user','assistant')
 		  AND m.is_system = 0 AND %s
 		  AND m.%s
 		ORDER BY f.rank, m.id LIMIT ? OFFSET ?`,
@@ -1460,7 +1452,7 @@ func (db *DB) fetchHybridFTSBatch(
 		hits = append(hits, hit)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, classifyFTSError(err)
 	}
 	return hits, nil
 }

@@ -76,6 +76,62 @@ func TestSearchContentLegacyThinkingSources(t *testing.T) {
 	}
 }
 
+func TestSearchContentThinkingDedupeMatches(t *testing.T) {
+	for _, mode := range []string{"substring", "regex"} {
+		for _, tc := range []struct {
+			name      string
+			content   string
+			thinking  string
+			dialogue  *string
+			pattern   string
+			locations []string
+		}{
+			{"multiple_inline_blocks", "[Thinking]\nab\n[/Thinking]\n[Thinking]\ncd\n[/Thinking]\nanswer", "ab\n\ncd", nil, "cd", []string{"message"}},
+			{"shared_start", strings.Repeat("shared ", 12) + "answer", strings.Repeat("shared ", 12) + "reasoningneedle", nil, "reasoningneedle", []string{"thinking"}},
+			{"projected_dialogue", "answerneedle [Thinking]\nanswerneedle\n[/Thinking]", "answerneedle", new("answerneedle"), "answerneedle", []string{"message", "thinking"}},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				d := testDB(t)
+				seedSearchSession(t, d, "s1", "proj", nil)
+				insertMessages(t, d, Message{
+					SessionID: "s1", Ordinal: 0, Role: "assistant",
+					Content: tc.content, ThinkingText: tc.thinking, DialogueText: tc.dialogue,
+				})
+				for _, sources := range []struct {
+					name    string
+					sources []string
+				}{
+					{"default", nil},
+					{"messages_and_thinking", []string{"messages", "thinking"}},
+					{"thinking_only", []string{"thinking"}},
+				} {
+					t.Run(sources.name, func(t *testing.T) {
+						pattern := tc.pattern
+						if mode == "regex" && tc.name == "shared_start" {
+							// Both fields pass the literal-prefix prefilter, but
+							// only reasoning matches the complete expression.
+							pattern = "shared.*reasoningneedle"
+						}
+						got, err := d.SearchContent(t.Context(), ContentSearchFilter{
+							Pattern: pattern, Mode: mode, Sources: sources.sources,
+						})
+						require.NoError(t, err)
+						locations := tc.locations
+						if sources.name == "thinking_only" {
+							locations = []string{"thinking"}
+						}
+						require.Len(t, got.Matches, len(locations))
+						for i, location := range locations {
+							assert.Equal(t, location, got.Matches[i].Location)
+							assert.Contains(t, got.Matches[i].Snippet, tc.pattern)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
 func TestSearchContentSubstringMessages(t *testing.T) {
 	d := testDB(t)
 	seedSearchSession(t, d, "s1", "proj", [][2]string{
