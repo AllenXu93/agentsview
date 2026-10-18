@@ -195,6 +195,13 @@ func transcriptMessages(messages []Message) []Message {
 			stored[i].Content = redacted
 			stored[i].ContentLength = len(redacted)
 		}
+		if stored[i].DialogueText != nil {
+			if redacted, changed := redactToolUseRenderings(
+				*stored[i].DialogueText, stored[i].ToolCalls,
+			); changed {
+				stored[i].DialogueText = &redacted
+			}
+		}
 		calls := slices.Clone(stored[i].ToolCalls)
 		for j := range calls {
 			calls[j].InputJSON = ""
@@ -738,7 +745,7 @@ func redactCopiedToolUseRenderingsTx(
 	ctx context.Context, tx *sql.Tx, tempIDsTable string,
 ) error {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT m.id, m.content, tc.tool_name, tc.category,
+		SELECT m.id, m.content, m.dialogue_text, tc.tool_name, tc.category,
 		       COALESCE(tc.input_json, '')
 		  FROM messages m
 		  JOIN tool_calls tc ON tc.message_id = m.id
@@ -749,9 +756,10 @@ func redactCopiedToolUseRenderingsTx(
 	}
 	defer rows.Close()
 	type pending struct {
-		id      int64
-		content string
-		calls   []ToolCall
+		id       int64
+		content  string
+		dialogue sql.NullString
+		calls    []ToolCall
 	}
 	// Rows arrive ordered by message, so each message's calls are
 	// contiguous and the last entry is the one being extended.
@@ -759,15 +767,16 @@ func redactCopiedToolUseRenderingsTx(
 	for rows.Next() {
 		var id int64
 		var content string
+		var dialogue sql.NullString
 		var call ToolCall
 		if err := rows.Scan(
-			&id, &content, &call.ToolName, &call.Category, &call.InputJSON,
+			&id, &content, &dialogue, &call.ToolName, &call.Category, &call.InputJSON,
 		); err != nil {
 			rows.Close()
 			return fmt.Errorf("scanning copied tool rendering: %w", err)
 		}
 		if len(entries) == 0 || entries[len(entries)-1].id != id {
-			entries = append(entries, pending{id: id, content: content})
+			entries = append(entries, pending{id: id, content: content, dialogue: dialogue})
 		}
 		last := &entries[len(entries)-1]
 		last.calls = append(last.calls, call)
@@ -780,12 +789,17 @@ func redactCopiedToolUseRenderingsTx(
 	for _, entry := range entries {
 		content := redactCopiedUnrecoverableToolRenderings(entry.content, entry.calls)
 		redacted, _ := redactToolUseRenderings(content, entry.calls)
-		if redacted == entry.content {
+		dialogue := entry.dialogue
+		if dialogue.Valid {
+			dialogue.String = redactCopiedUnrecoverableToolRenderings(dialogue.String, entry.calls)
+			dialogue.String, _ = redactToolUseRenderings(dialogue.String, entry.calls)
+		}
+		if redacted == entry.content && dialogue == entry.dialogue {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE messages SET content = ?, content_length = ? WHERE id = ?",
-			redacted, len(redacted), entry.id,
+			"UPDATE messages SET content = ?, content_length = ?, dialogue_text = ? WHERE id = ?",
+			redacted, len(redacted), dialogue, entry.id,
 		); err != nil {
 			return fmt.Errorf(
 				"redacting copied tool rendering %d: %w", entry.id, err,
