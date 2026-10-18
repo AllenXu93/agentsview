@@ -44,6 +44,11 @@ func TestSearchContentLegacyThinkingSources(t *testing.T) {
 				SessionID: "codebuddy", Ordinal: 0, Role: "assistant",
 				Content: "Answer", ThinkingText: "needle",
 			})
+			seedSearchSession(t, d, "codebuddy_literal_marker", "proj", nil)
+			insertMessages(t, d, Message{
+				SessionID: "codebuddy_literal_marker", Ordinal: 0, Role: "assistant",
+				Content: "The literal marker is [Thinking]", ThinkingText: "needle",
+			})
 			for _, tc := range []struct {
 				name     string
 				sources  []string
@@ -58,13 +63,13 @@ func TestSearchContentLegacyThinkingSources(t *testing.T) {
 						Pattern: "needle", Mode: mode, Sources: tc.sources,
 					})
 					require.NoError(t, err)
-					require.Len(t, got.Matches, 2)
+					require.Len(t, got.Matches, 3)
 					locations := make(map[string]string)
 					for _, match := range got.Matches {
 						locations[match.SessionID] = match.Location
 						assert.Contains(t, match.Snippet, "needle")
 					}
-					assert.Equal(t, map[string]string{"legacy": tc.location, "codebuddy": "thinking"}, locations)
+					assert.Equal(t, map[string]string{"legacy": tc.location, "codebuddy": "thinking", "codebuddy_literal_marker": "thinking"}, locations)
 				})
 			}
 		})

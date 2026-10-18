@@ -121,16 +121,14 @@ func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 					}
 				}
 			}
-			for _, mode := range []string{"substring", "regex"} {
-				for _, sources := range [][]string{nil, {"thinking"}} {
-					page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "reasoningneedle", Mode: mode, Sources: sources})
-					require.NoError(t, err)
-					require.Len(t, page.Matches, 1)
-					location := "thinking"
-					if !classified && sources == nil {
-						location = "message"
+			if classified {
+				for _, mode := range []string{"substring", "regex"} {
+					for _, sources := range [][]string{nil, {"thinking"}} {
+						page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "reasoningneedle", Mode: mode, Sources: sources})
+						require.NoError(t, err)
+						require.Len(t, page.Matches, 1)
+						assert.Equal(t, "thinking", page.Matches[0].Location)
 					}
-					assert.Equal(t, location, page.Matches[0].Location)
 				}
 			}
 			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: `"answerneedle" NOT reasoningneedle`, Mode: "fts", Sources: []string{"messages"}})

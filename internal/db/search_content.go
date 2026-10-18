@@ -360,7 +360,7 @@ func (db *DB) searchContentSubstring(
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE (%t OR m.dialogue_text IS NOT NULL OR instr(m.content, '[Thinking]') = 0) AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
+			WHERE (%t OR m.dialogue_text IS NOT NULL OR instr(m.content, substr(m.thinking_text, 1, 64)) = 0) AND m.thinking_text LIKE ? ESCAPE '\' AND %s AND m.%s`,
 			snippetExpr("m.thinking_text"), !hasSource(f, "messages"), sysPred, scope))
 		args = append(args, like)
 		args = append(args, scopeArgs...)
@@ -653,7 +653,7 @@ func (db *DB) regexCandidateRows(
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				4 AS src, m.id AS row_id
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE (%t OR m.dialogue_text IS NOT NULL OR instr(m.content, '[Thinking]') = 0) AND %s AND m.thinking_text <> '' AND %s AND m.%s`, !hasSource(f, "messages"), w, sysPred, scope))
+			WHERE (%t OR m.dialogue_text IS NOT NULL OR instr(m.content, substr(m.thinking_text, 1, 64)) = 0) AND %s AND m.thinking_text <> '' AND %s AND m.%s`, !hasSource(f, "messages"), w, sysPred, scope))
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {
