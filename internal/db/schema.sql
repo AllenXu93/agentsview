@@ -1643,3 +1643,5 @@ CREATE TABLE IF NOT EXISTS archive_session_provenance (
     manifest_id TEXT NOT NULL, native_session_id TEXT NOT NULL,
     FOREIGN KEY(archive_id,device_id,root_id,source_key) REFERENCES archive_source_bindings(archive_id,device_id,root_id,source_key)
 );
+CREATE INDEX IF NOT EXISTS idx_archive_session_source
+    ON archive_session_provenance(archive_id,device_id,root_id,source_key);

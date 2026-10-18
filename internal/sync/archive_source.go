@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/ingest"
@@ -28,4 +30,78 @@ func (e *Engine) writeAttachedStaged(ctx context.Context, prepared ingest.Prepar
 		ReplaceMessages: true, DataVersion: dataVersionForWrite(pw), SkipSignalUpdates: e.disableSignalRecompute,
 	}
 	return e.writeStagedFullParse(ctx, prepared.Session, prepared.Messages, pw, &write)
+}
+
+// SyncAttachedSource holds the receiver's sync lock only for this source. Cleanup
+// precedes completion, so a failed scratch removal remains pending for retry.
+func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig, path string,
+	source db.ArchiveSourceProvenance, target string, cleanup func() error, progress ProgressFunc,
+) (stats SyncStats, retErr error) {
+	if cfg.ArchiveWriteProvenance == nil || cleanup == nil {
+		return stats, errors.New("archive source ownership and cleanup are required")
+	}
+	retErr = e.RunExclusive(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		active, err := e.db.ArchiveSourceSessionIDs(ctx, source.Source)
+		if err != nil {
+			return err
+		}
+		seen := make(map[string]bool)
+		policy := cfg.ArchiveSessionPolicy
+		cfg.ArchiveSessionPolicy = func(ctx context.Context, session *db.Session, native string) (bool, error) {
+			seen[session.ID] = true
+			if policy != nil {
+				keep, err := policy(ctx, session, native)
+				if err != nil || !keep {
+					return keep, err
+				}
+			}
+			p, err := cfg.ArchiveWriteProvenance(session, native)
+			if err != nil {
+				return false, err
+			}
+			return true, e.db.CheckArchiveSessionProvenance(ctx, *session, p)
+		}
+		cfg.ParserExclusionPolicy = func(ctx context.Context, ids []string) error {
+			for _, id := range ids {
+				existing, err := e.db.GetSessionFull(ctx, id)
+				if err != nil {
+					return err
+				}
+				if existing != nil {
+					return errors.New("archive parser exclusion conflicts with an existing session")
+				}
+			}
+			return nil
+		}
+		child := NewEngine(ctx, e.db, cfg)
+		defer child.Close()
+		child.archiveStore, child.archiveRebuildIndex = e.archiveStore, e.archiveRebuildIndex
+		child.deferredSourceCwd, child.deferredAntigravityTitles = e.deferredSourceCwd, e.deferredAntigravityTitles
+		if progress != nil {
+			progress(Progress{Phase: PhaseSyncing, Detail: "Reading archived session"})
+		}
+		if err := child.ReparsePathsContext(ctx, []string{path}); err != nil {
+			return err
+		}
+		stats = child.LastSyncStats()
+		if stats.TotalSessions == 0 || !stats.ProcessingComplete() {
+			return errors.New("archive source parse incomplete")
+		}
+		for _, id := range active {
+			if !seen[id] {
+				return fmt.Errorf("archive parser did not retain active session %s", id)
+			}
+		}
+		if err := cleanup(); err != nil {
+			return err
+		}
+		return e.db.CompleteArchiveSource(ctx, source, target)
+	})
+	if retErr == nil {
+		e.emit("sessions")
+	}
+	return stats, retErr
 }

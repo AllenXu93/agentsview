@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,4 +91,44 @@ func TestArchiveProvenanceCodexPublication(t *testing.T) {
 			assert.Equal(t, messages, afterMessages)
 		})
 	}
+}
+
+func TestAttachedSourceCleanupFailureStaysPending(t *testing.T) {
+	const id = "019eb791-cf7d-75c1-8439-9ed74c122b13"
+	const device = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	root := writeCodexParityRoot(t, id)
+	database := openTestDB(t)
+	key := db.ArchiveAttachmentKey{RepositoryID: "repository", SnapshotID: "snapshot"}
+	p := db.ArchiveSourceProvenance{Attachment: key, ManifestID: "manifest", Source: db.ArchiveSourceIdentity{
+		ArchiveID: "archive", DeviceID: device, RootID: "root", SourceKey: "source",
+	}}
+	require.NoError(t, database.RegisterArchiveAttachment(t.Context(), key, "archive"))
+	require.NoError(t, database.SetArchiveAttachmentTargets(t.Context(), key, "target", []db.ArchiveSourceTarget{{Provenance: p, Target: "target"}}))
+	cfg := EngineConfig{
+		AgentDirs: map[parser.AgentType][]string{parser.AgentCodex: {root}}, Machine: device, IDPrefix: device + "~",
+		Ephemeral: true, ArchiveReparse: true, DiscardPendingWritesOnCancel: true, StagedCodexParseMinBytes: 1,
+		ArchiveWriteProvenance: func(_ *db.Session, native string) (db.ArchiveSessionProvenance, error) {
+			return db.ArchiveSessionProvenance{ArchiveSourceProvenance: p, NativeSessionID: native}, nil
+		},
+	}
+	parent := NewEngine(t.Context(), database, EngineConfig{Ephemeral: true})
+	defer parent.Close()
+	path := filepath.Join(root, "2024", "01", "01", "rollout-2024-01-01T10-00-00-"+id+".jsonl")
+	_, err := parent.SyncAttachedSource(t.Context(), cfg, path, p, "target", func() error { return errors.New("scratch removal failed") }, nil)
+	require.ErrorContains(t, err, "scratch removal failed")
+	status, err := database.ArchiveAttachmentStatus(t.Context(), key)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), status.Pending)
+	_, err = parent.SyncAttachedSource(t.Context(), cfg, path, p, "target", func() error { return nil }, nil)
+	require.NoError(t, err)
+	status, err = database.ArchiveAttachmentStatus(t.Context(), key)
+	require.NoError(t, err)
+	assert.Zero(t, status.Pending)
+	require.NoError(t, database.SetArchiveAttachmentTargets(t.Context(), key, "suppressed", []db.ArchiveSourceTarget{{Provenance: p, Target: "suppressed"}}))
+	cfg.ArchiveSessionPolicy = func(context.Context, *db.Session, string) (bool, error) { return false, nil }
+	_, err = parent.SyncAttachedSource(t.Context(), cfg, path, p, "suppressed", func() error { return nil }, nil)
+	require.NoError(t, err)
+	status, err = database.ArchiveAttachmentStatus(t.Context(), key)
+	require.NoError(t, err)
+	assert.Zero(t, status.Pending)
 }

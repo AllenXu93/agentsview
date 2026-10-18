@@ -17,7 +17,7 @@ import (
 
 const sourceDevice = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-func archiveFixture(t *testing.T) (config.ArchiveSource, string) {
+func archiveFixture(t *testing.T, excluded ...string) (config.ArchiveSource, string) {
 	t.Helper()
 	ctx := t.Context()
 	const device = sourceDevice
@@ -28,6 +28,11 @@ func archiveFixture(t *testing.T) (config.ArchiveSource, string) {
 	database, err := db.OpenIsolatedContext(ctx, filepath.Join(data, "sessions.db"))
 	require.NoError(t, err)
 	require.NoError(t, database.Update(ctx, func(tx *sql.Tx) error {
+		for _, id := range excluded {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO excluded_sessions(id) VALUES(?)`, id); err != nil {
+				return err
+			}
+		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO excluded_sessions(id) VALUES('claude:deleted-session')`)
 		return err
 	}))
