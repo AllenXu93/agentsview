@@ -35,6 +35,7 @@ func TestArchiveAttachmentOwnershipAndCompletion(t *testing.T) {
 	require.NoError(t, err)
 	key := ArchiveAttachmentKey{RepositoryID: "repository-one", SnapshotID: "snapshot-one"}
 	require.NoError(t, database.RegisterArchiveAttachment(ctx, key, "archive-one"))
+	require.ErrorIs(t, database.RegisterArchiveAttachment(ctx, ArchiveAttachmentKey{"replacement", key.SnapshotID}, "archive-one"), ErrArchiveSourceConflict)
 	require.NoError(t, database.RegisterArchiveAttachment(ctx, key, "archive-one"))
 	require.ErrorIs(t, database.RegisterArchiveAttachment(ctx, key, "another-archive"), ErrArchiveSourceConflict)
 	provenance := ArchiveSourceProvenance{
@@ -63,7 +64,7 @@ func TestArchiveAttachmentOwnershipAndCompletion(t *testing.T) {
 	assert.Equal(t, int64(1), status.Pending)
 	// Re-registering a current source does not clear an error or advance completion.
 	require.NoError(t, database.SetArchiveAttachmentTargets(ctx, key, "summary-two", targets))
-	pending, err := database.PendingArchiveSources(ctx, key, 10)
+	pending, err := database.PendingArchiveSources(ctx, key, ArchiveSourceIdentity{}, 10)
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, "archive unavailable", pending[0].LastError)
@@ -81,7 +82,7 @@ func TestArchiveAttachmentOwnershipAndCompletion(t *testing.T) {
 	require.NoError(t, database.SetArchiveAttachmentTargets(ctx, other, "summary-two", targets))
 	targets[0].Provenance.ManifestID = "conflicting-manifest"
 	require.ErrorIs(t, database.SetArchiveAttachmentTargets(ctx, other, "summary-three", targets), ErrArchiveSourceConflict)
-	pending, err = database.PendingArchiveSources(ctx, other, 10)
+	pending, err = database.PendingArchiveSources(ctx, other, ArchiveSourceIdentity{}, 10)
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, "manifest-one", pending[0].Provenance.ManifestID)
@@ -118,7 +119,7 @@ func TestArchiveAttachmentRefusesLocalAuthority(t *testing.T) {
 			}
 			require.ErrorIs(t, database.SetArchiveAttachmentTargets(ctx, key, "summary-one",
 				[]ArchiveSourceTarget{{Provenance: provenance, Target: "version-one"}}), ErrArchiveSourceConflict)
-			pending, err := database.PendingArchiveSources(ctx, key, 10)
+			pending, err := database.PendingArchiveSources(ctx, key, ArchiveSourceIdentity{}, 10)
 			require.NoError(t, err)
 			assert.Empty(t, pending)
 		})

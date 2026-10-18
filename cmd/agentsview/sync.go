@@ -17,6 +17,7 @@ import (
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
 
 	"go.kenn.io/agentsview/internal/apiclient"
+	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/parser"
@@ -883,6 +884,11 @@ func coordinateLocalSync(
 
 	engine := sync.NewEngine(ctx, database, localSyncEngineConfig(appCfg))
 	defer engine.Close()
+	attached, err := archivesource.NewManager(ctx, appCfg, database, engine, nil)
+	if err != nil {
+		return didResync, stats, err
+	}
+	defer attached.Close()
 
 	if fallbackOnAbort {
 		stats, err = engine.SyncThenRun(
@@ -907,7 +913,7 @@ func coordinateLocalSync(
 	if !stats.ProcessingComplete() {
 		return didResync, stats, errors.New("local sync processing incomplete")
 	}
-	return didResync, stats, nil
+	return didResync, stats, attached.Drain(ctx, progress)
 }
 
 func localSyncEngineConfig(appCfg config.Config) sync.EngineConfig {

@@ -27,9 +27,10 @@ type ArchiveSessionProvenance struct {
 	NativeSessionID string
 }
 type ArchiveSourceTarget struct {
-	Provenance ArchiveSourceProvenance
-	Target     string
-	LastError  string
+	Provenance   ArchiveSourceProvenance
+	Target       string
+	LastError    string
+	MachineLabel string
 }
 type ArchiveAttachmentStatus struct {
 	ArchiveID string
@@ -44,6 +45,13 @@ func (d *DB) RegisterArchiveAttachment(ctx context.Context, key ArchiveAttachmen
 	return d.Update(ctx, func(tx *sql.Tx) error {
 		if err := archiveReceiverTx(ctx, tx); err != nil {
 			return err
+		}
+		var replaced bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_attachments WHERE snapshot_id=? AND repository_id!=?)`, key.SnapshotID, key.RepositoryID).Scan(&replaced); err != nil {
+			return err
+		}
+		if replaced {
+			return fmt.Errorf("%w: snapshot repository identity changed", ErrArchiveSourceConflict)
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO archive_attachments(repository_id,snapshot_id,archive_id)
 			VALUES(?,?,?) ON CONFLICT DO NOTHING`, key.RepositoryID, key.SnapshotID, archiveID)
@@ -152,6 +160,11 @@ func setArchiveSourceTargetTx(ctx context.Context, tx *sql.Tx, source ArchiveSou
 	if err := checkArchiveSourceBindingTx(ctx, tx, p); err != nil {
 		return err
 	}
+	if source.MachineLabel != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING`, MachineLabelKeyPrefix+s.DeviceID, source.MachineLabel); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO archive_attachment_sources(repository_id,snapshot_id,archive_id,device_id,root_id,source_key,target)
 		VALUES(?,?,?,?,?,?,?) ON CONFLICT(repository_id,snapshot_id,archive_id,device_id,root_id,source_key)
 		DO UPDATE SET target=excluded.target`, p.Attachment.RepositoryID, p.Attachment.SnapshotID,
@@ -181,14 +194,14 @@ func (d *DB) ArchiveAttachmentStatus(ctx context.Context, key ArchiveAttachmentK
 	return result, err
 }
 
-func (d *DB) PendingArchiveSources(ctx context.Context, key ArchiveAttachmentKey, limit int) ([]ArchiveSourceTarget, error) {
+func (d *DB) PendingArchiveSources(ctx context.Context, key ArchiveAttachmentKey, after ArchiveSourceIdentity, limit int) ([]ArchiveSourceTarget, error) {
 	if limit <= 0 || limit > 10000 {
 		return nil, errors.New("invalid pending archive source page size")
 	}
 	rows, err := d.getReader().QueryContext(ctx, `SELECT s.archive_id,s.device_id,s.root_id,s.source_key,b.manifest_id,s.target,s.last_error
 		FROM archive_attachment_sources s JOIN archive_source_bindings b USING(archive_id,device_id,root_id,source_key)
-		WHERE s.repository_id=? AND s.snapshot_id=? AND s.completed_target!=s.target ORDER BY s.root_id,s.source_key LIMIT ?`,
-		key.RepositoryID, key.SnapshotID, limit)
+		WHERE s.repository_id=? AND s.snapshot_id=? AND s.completed_target!=s.target AND (s.root_id,s.source_key)>(?,?) ORDER BY s.root_id,s.source_key LIMIT ?`,
+		key.RepositoryID, key.SnapshotID, after.RootID, after.SourceKey, limit)
 	if err != nil {
 		return nil, err
 	}
