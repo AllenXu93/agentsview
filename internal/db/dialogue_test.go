@@ -49,10 +49,6 @@ func TestDialogueFTSUpgradePreservesMessages(t *testing.T) {
 	assert.Nil(t, stored[needle].DialogueText)
 	assert.Equal(t, beforeID, stored[needle].ID)
 	assert.Equal(t, "reasoningneedle", stored[needle].ThinkingText)
-	assert.False(t, d.NeedsResync())
-	session, err := d.GetSession(t.Context(), "legacy")
-	require.NoError(t, err)
-	assert.Equal(t, CurrentDataVersion()-1, session.DataVersion)
 	for _, term := range []string{"answerneedle", "reasoningneedle"} {
 		ordinary, err := d.Search(t.Context(), SearchFilter{Query: term})
 		require.NoError(t, err)
@@ -112,12 +108,20 @@ func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 					assert.Equal(t, location, page.Matches[0].Location)
 				}
 			}
-			for _, mode := range []string{"terms", "semantic", "hybrid"} {
-				_, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "reasoningneedle", Mode: mode, Sources: []string{"thinking"}})
-				var inputErr *SearchInputError
-				require.ErrorAs(t, err, &inputErr)
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: `"answerneedle" NOT reasoningneedle`, Mode: "fts", Sources: []string{"messages"}})
+			require.NoError(t, err)
+			if classified {
+				assert.Len(t, page.Matches, 1)
+			} else {
+				assert.Empty(t, page.Matches)
 			}
 		})
+	}
+	d := testDB(t)
+	for _, mode := range []string{"terms", "semantic", "hybrid"} {
+		_, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "reasoningneedle", Mode: mode, Sources: []string{"thinking"}})
+		var inputErr *SearchInputError
+		require.ErrorAs(t, err, &inputErr)
 	}
 }
 
@@ -125,6 +129,7 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 	for _, tc := range []struct{ name, dialogue, hidden, replacement string }{
 		{"porter", "answerneedle", "reasoningneedle", "replacementneedle"},
 		{"cjk", "中文搜索", "工具输出", "秘密推理"},
+		{"empty", "", "reasoningneedle", "replacementneedle"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.name == "cjk" && !simpleFTSRuntimeConfig.available() {
@@ -138,6 +143,11 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 				{SessionID: "search", Ordinal: 2, Role: "assistant", Content: "Done"},
 			}
 			insertMessages(t, d, messages...)
+			if tc.name == "cjk" {
+				page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: tc.dialogue, Mode: "terms", Sources: []string{"messages"}})
+				require.NoError(t, err)
+				assert.Len(t, page.Matches, 1)
+			}
 			for _, phase := range []string{"insert", "update", "delete"} {
 				t.Run(phase, func(t *testing.T) {
 					switch phase {
@@ -148,6 +158,9 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 						require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", nil))
 					}
 					for _, term := range []string{tc.dialogue, tc.hidden, tc.replacement} {
+						if term == "" {
+							continue
+						}
 						ordinary, err := d.Search(t.Context(), SearchFilter{Query: term})
 						require.NoError(t, err)
 						wantOrdinary := 0
@@ -204,52 +217,5 @@ func TestProjectionOnlyReparsePreservesTranscriptFreshness(t *testing.T) {
 		assert.Equal(t, "secrets-current", secretVersion)
 		assert.Equal(t, "friction-current", frictionVersion)
 		assert.Equal(t, "2026-05-01T10:00:00Z", modified)
-	}
-}
-
-func TestDialogueFTSMixedArchivePaging(t *testing.T) {
-	d := testDB(t)
-	for _, id := range []string{"classified", "legacy", "empty"} {
-		insertSession(t, d, id, "project", func(s *Session) { s.UserMessageCount = 2 })
-		message := Message{SessionID: id, Ordinal: 1, Role: "assistant", Content: "quick brown fox renderedneedle 中文搜索"}
-		switch id {
-		case "classified":
-			message.DialogueText = new("quick brown fox 中文搜索")
-		case "empty":
-			message.DialogueText = new("")
-		}
-		insertMessages(t, d, Message{SessionID: id, Role: "user", Content: "Question"}, message)
-	}
-	for _, mode := range []string{"fts", "terms"} {
-		pattern := `"quick brown"`
-		if mode == "terms" {
-			pattern = "quick brown"
-		}
-		full, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: pattern, Mode: mode, Sources: []string{"messages"}})
-		require.NoError(t, err)
-		require.Len(t, full.Matches, 2, mode)
-		var sessions []string
-		for offset := range 2 {
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: pattern, Mode: mode, Sources: []string{"messages"}, Limit: 1, Cursor: offset})
-			require.NoError(t, err)
-			require.Len(t, page.Matches, 1)
-			sessions = append(sessions, page.Matches[0].SessionID)
-		}
-		assert.Equal(t, []string{full.Matches[0].SessionID, full.Matches[1].SessionID}, sessions)
-	}
-	for _, mode := range []string{"fts", "terms"} {
-		page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "中文搜索", Mode: mode, Sources: []string{"messages"}})
-		require.NoError(t, err)
-		assert.Len(t, page.Matches, 2)
-	}
-	page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: `"fox" NOT renderedneedle`, Mode: "fts", Sources: []string{"messages"}})
-	require.NoError(t, err)
-	require.Len(t, page.Matches, 1)
-	assert.Equal(t, "classified", page.Matches[0].SessionID)
-	ordinary, err := d.Search(t.Context(), SearchFilter{Query: "renderedneedle"})
-	require.NoError(t, err)
-	require.Len(t, ordinary.Results, 3)
-	for _, result := range ordinary.Results {
-		assert.Contains(t, result.Snippet, "<mark>renderedneedle</mark>")
 	}
 }

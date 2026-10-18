@@ -790,24 +790,28 @@ func TestSearchContentToolResultDedup(t *testing.T) {
 
 func TestSearchContentCursorPagination(t *testing.T) {
 	d := testDB(t)
-	seedSearchSession(t, d, "pg", "proj", [][2]string{
-		{"user", "alpha NEEDLE one"},
-		{"user", "beta NEEDLE two"},
-		{"user", "gamma NEEDLE three"},
-	})
-	first, err := d.SearchContent(t.Context(), ContentSearchFilter{
-		Pattern: "NEEDLE", Mode: "substring", Sources: []string{"messages"}, Limit: 2,
-	})
-	require.NoError(t, err, "SearchContent page1")
-	require.Len(t, first.Matches, 2, "page1 matches")
-	require.Equal(t, 2, first.NextCursor, "page1 cursor")
-	second, err := d.SearchContent(t.Context(), ContentSearchFilter{
-		Pattern: "NEEDLE", Mode: "substring", Sources: []string{"messages"},
-		Limit: 2, Cursor: first.NextCursor,
-	})
-	require.NoError(t, err, "SearchContent page2")
-	require.Len(t, second.Matches, 1, "page2 matches")
-	require.Equal(t, 0, second.NextCursor, "page2 cursor")
+	insertSession(t, d, "pg", "proj", func(s *Session) { s.UserMessageCount = 2 })
+	insertMessages(t, d,
+		Message{SessionID: "pg", Ordinal: 0, Role: "user", Content: "alpha NEEDLE one"},
+		Message{SessionID: "pg", Ordinal: 1, Role: "user", Content: "beta NEEDLE two [Thinking] reasoning", DialogueText: new("beta NEEDLE two")},
+		Message{SessionID: "pg", Ordinal: 2, Role: "user", Content: "gamma NEEDLE three"},
+	)
+	for _, mode := range []string{"substring", "fts"} {
+		first, err := d.SearchContent(t.Context(), ContentSearchFilter{
+			Pattern: "NEEDLE", Mode: mode, Sources: []string{"messages"}, Limit: 2,
+		})
+		require.NoError(t, err, "SearchContent page1")
+		require.Len(t, first.Matches, 2, "page1 matches")
+		require.Equal(t, 2, first.NextCursor, "page1 cursor")
+		second, err := d.SearchContent(t.Context(), ContentSearchFilter{
+			Pattern: "NEEDLE", Mode: mode, Sources: []string{"messages"},
+			Limit: 2, Cursor: first.NextCursor,
+		})
+		require.NoError(t, err, "SearchContent page2")
+		require.Len(t, second.Matches, 1, "page2 matches")
+		require.Equal(t, 0, second.NextCursor, "page2 cursor")
+		assert.ElementsMatch(t, []int{0, 1, 2}, []int{first.Matches[0].Ordinal, first.Matches[1].Ordinal, second.Matches[0].Ordinal})
+	}
 }
 
 func TestSearchContentMultiSourceWithProjectFilter(t *testing.T) {
