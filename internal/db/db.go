@@ -589,8 +589,11 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (138: preserve the repository URL recorded in Codex-format session_meta.
 // Re-parse those sources in place to repair missing session identity evidence
 // even when the original checkout is gone. Source and session IDs are unchanged.)
-// (139: reparse classified dialogue in place.)
-const dataVersion = 139
+// (139: a Codex cloud session with no token records and no plan usage
+// records gets an empty plan usage row, so usage reports count it as
+// billed as plan usage. Re-parse unchanged Codex cloud sources in place.)
+// (140: reparse classified dialogue in place.)
+const dataVersion = 140
 
 const archiveOnlyVersionBase = 1 << 20
 
@@ -1899,6 +1902,7 @@ var readOnlyRequiredTables = []string{
 	"messages",
 	"stats",
 	"usage_events",
+	"session_plan_usage",
 	"tool_calls",
 	"tool_result_events",
 	"insights",

@@ -18513,6 +18513,20 @@ func (e *Engine) writeBatchWithOutcomeContext(
 			outcome.failedSessions++
 			continue
 		}
+		if err := e.db.ReplaceSessionPlanUsage(ctx,
+			s.ID, prepared.PlanUsage,
+		); err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
+			log.Printf(
+				"write plan usage for %s: %v",
+				s.ID, err,
+			)
+			e.markStaleFailedMemberWrite(ctx, pw)
+			outcome.failedSessions++
+			continue
+		}
 		if ctx.Err() != nil {
 			return outcome
 		}
@@ -18695,6 +18709,16 @@ func (e *Engine) prepareSessionNormalizedContext(
 	if err != nil {
 		return ingest.PreparedSession{}, sessionWritePreserved, err
 	}
+	if prepared.PlanUsage != nil {
+		prepared.PlanUsage.CountedUnder = applyIDPrefixToID(
+			e.idPrefix, prepared.PlanUsage.CountedUnder,
+		)
+	}
+	if candidate.Parsed.Session.Agent == parser.AgentCodexCloud {
+		if err := e.keepCodexCloudUsage(ctx, &prepared); err != nil {
+			return ingest.PreparedSession{}, sessionWritePreserved, err
+		}
+	}
 	if derive && pw.staged == nil && !e.disableSignalRecompute {
 		prepared.Signals, prepared.Findings = e.computeSignalsAndSecretsForStorage(
 			prepared.Session, prepared.Messages,
@@ -18735,6 +18759,39 @@ func hasUnresolvedPersistedToolResult(messages []parser.ParsedMessage) bool {
 		}
 	}
 	return false
+}
+
+// keepCodexCloudUsage copies onto prepared the token counts and plan usage
+// its mirror file lost; see ingest.CarryCodexCloudUsage.
+func (e *Engine) keepCodexCloudUsage(
+	ctx context.Context, prepared *ingest.PreparedSession,
+) error {
+	store := e.historyStore()
+	stored, err := store.GetSessionFull(ctx, prepared.Session.ID)
+	if err != nil || stored == nil {
+		return err
+	}
+	reader, ok := store.(interface {
+		GetUsageEvents(context.Context, string) ([]db.UsageEvent, error)
+	})
+	if !ok {
+		return fmt.Errorf("keep token counts of %s: the archive cannot read usage events", prepared.Session.ID)
+	}
+	events, err := reader.GetUsageEvents(ctx, prepared.Session.ID)
+	if err != nil {
+		return err
+	}
+	plan, err := store.GetSessionPlanUsage(ctx, prepared.Session.ID)
+	if err != nil {
+		return err
+	}
+	if ingest.CarryCodexCloudUsage(prepared, ingest.CodexCloudPrior{
+		Session: *stored, UsageEvents: events, PlanUsage: plan,
+		Current: stored.DataVersion >= db.AgentDataVersion(parser.AgentCodexCloud),
+	}) {
+		log.Printf("codex-cloud: kept saved usage figures of %s that the mirror file no longer holds", prepared.Session.ID)
+	}
+	return nil
 }
 
 func (e *Engine) historyStore() db.Store {
@@ -18806,6 +18863,22 @@ func (e *Engine) reconcileProviderHistoryContext(
 				len(candidate.Messages) < stored.MessageCount {
 				// A shortened copy of the same legacy file is incomplete history.
 				// Different sources and SQLite members remain authoritative.
+				return ingest.HistoryResult{Action: ingest.HistoryPreserve}, nil
+			}
+		case parser.AgentCodexCloud:
+			stored, err := e.historyStore().GetSessionFull(ctx, candidate.Session.ID)
+			if err != nil {
+				return ingest.HistoryResult{}, err
+			}
+			if stored == nil {
+				break
+			}
+			if reason := ingest.CodexCloudKeepReason(len(candidate.Messages), ingest.CodexCloudPrior{
+				Session: *stored,
+				Current: stored.DataVersion >= db.AgentDataVersion(parser.AgentCodexCloud),
+			}); reason != "" {
+				log.Printf("codex-cloud: kept the saved copy of %s because %s; the saved copy stays until a copy with as many messages replaces it",
+					candidate.Session.ID, reason)
 				return ingest.HistoryResult{Action: ingest.HistoryPreserve}, nil
 			}
 		case parser.AgentRooCode, parser.AgentKiloLegacy, parser.AgentCline:
@@ -19101,6 +19174,16 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 				outcome.failedSessions++
 				continue
 			}
+			if err := e.db.ReplaceSessionPlanUsage(ctx,
+				s.ID, prepared.PlanUsage,
+			); err != nil {
+				log.Printf(
+					"write plan usage for %s: %v", s.ID, err,
+				)
+				e.markStaleFailedMemberWrite(ctx, pw)
+				outcome.failedSessions++
+				continue
+			}
 			if err := e.db.SetSessionDataVersion(ctx,
 				s.ID, dataVersionForWrite(pw),
 			); err != nil {
@@ -19167,6 +19250,7 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 			Session:          s,
 			Messages:         msgs,
 			UsageEvents:      prepared.UsageEvents,
+			PlanUsage:        prepared.PlanUsage,
 			ToolResultImages: &e.toolResultImages,
 			IdentityObservation: identityObservationOrZero(
 				identityObservation, hasIdentityObservation,
@@ -20191,6 +20275,15 @@ func (e *Engine) writeSessionFullWithResolver(
 	); err != nil {
 		log.Printf(
 			"replace usage events for %s: %v",
+			s.ID, err,
+		)
+		return err
+	}
+	if err := e.db.ReplaceSessionPlanUsage(ctx,
+		s.ID, prepared.PlanUsage,
+	); err != nil {
+		log.Printf(
+			"replace plan usage for %s: %v",
 			s.ID, err,
 		)
 		return err
