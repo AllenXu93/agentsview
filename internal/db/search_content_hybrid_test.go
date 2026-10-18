@@ -136,7 +136,7 @@ func TestSearchContentHybridContentColumnFilter(t *testing.T) {
 		want    int
 	}{
 		{`"needle" AND content:needle`, 1},
-		{`content:hiddenneedle`, 0},
+		{`"hiddenneedle" AND content:hiddenneedle`, 0},
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			page, err := d.SearchContent(t.Context(), ContentSearchFilter{

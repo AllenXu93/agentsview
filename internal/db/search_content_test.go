@@ -37,13 +37,19 @@ func TestSearchContentLegacyThinkingSources(t *testing.T) {
 			seedSearchSession(t, d, "legacy", "proj", nil)
 			insertMessages(t, d, Message{
 				SessionID: "legacy", Ordinal: 0, Role: "assistant",
-				Content: "Answer [Thinking] needle", ThinkingText: "needle",
+				Content: "Answer [Thinking]\nneedle\n[/Thinking]", ThinkingText: "needle",
+			})
+			seedSearchSession(t, d, "codebuddy", "proj", nil)
+			insertMessages(t, d, Message{
+				SessionID: "codebuddy", Ordinal: 0, Role: "assistant",
+				Content: "Answer", ThinkingText: "needle",
 			})
 			for _, tc := range []struct {
 				name     string
 				sources  []string
 				location string
 			}{
+				{"default", nil, "message"},
 				{"messages_and_thinking", []string{"messages", "thinking"}, "message"},
 				{"thinking_only", []string{"thinking"}, "thinking"},
 			} {
@@ -52,10 +58,13 @@ func TestSearchContentLegacyThinkingSources(t *testing.T) {
 						Pattern: "needle", Mode: mode, Sources: tc.sources,
 					})
 					require.NoError(t, err)
-					require.Len(t, got.Matches, 1)
-					assert.Equal(t, "legacy", got.Matches[0].SessionID)
-					assert.Equal(t, tc.location, got.Matches[0].Location)
-					assert.Contains(t, got.Matches[0].Snippet, "needle")
+					require.Len(t, got.Matches, 2)
+					locations := make(map[string]string)
+					for _, match := range got.Matches {
+						locations[match.SessionID] = match.Location
+						assert.Contains(t, match.Snippet, "needle")
+					}
+					assert.Equal(t, map[string]string{"legacy": tc.location, "codebuddy": "thinking"}, locations)
 				})
 			}
 		})
@@ -403,7 +412,7 @@ func TestSearchContentFTSContentColumnFilter(t *testing.T) {
 		want    int
 	}{
 		{`"needle" AND content:needle`, 1},
-		{`content:hiddenneedle`, 0},
+		{`"hiddenneedle" AND content:hiddenneedle`, 0},
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			page, err := d.SearchContent(t.Context(), ContentSearchFilter{

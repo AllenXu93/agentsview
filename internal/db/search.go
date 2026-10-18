@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"go.kenn.io/kit/search/lexical"
 )
@@ -333,6 +334,21 @@ type SearchPage struct {
 	NextCursor int            `json:"next_cursor,omitempty"`
 }
 
+// isPhraseConjunction reports whether a prepared FTS query contains only quoted
+// phrases separated by whitespace.
+func isPhraseConjunction(query string) bool {
+	inQuote := false
+	for _, r := range query {
+		if r == '"' {
+			// Doubled quotes toggle twice, preserving the surrounding quote state.
+			inQuote = !inQuote
+		} else if !inQuote && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return !inQuote
+}
+
 // Search performs FTS5 full-text search across messages, grouped by session,
 // plus a LIKE-based search on session display names and first messages.
 //
@@ -371,18 +387,23 @@ func (db *DB) Search(
 	}
 
 	// innerWhere is used in the ROW_NUMBER inner subquery and the NOT IN
-	// subquery for the name branch. Classified rows must match the transcript,
-	// since removing thinking blocks can create phrases in dialogue alone.
+	// subquery for the name branch.
 	innerWhere := []string{
 		"messages_fts MATCH ?",
-		`(m2.dialogue_text IS NULL OR m2.id IN (
-			SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?
-		))`,
 		"s2.deleted_at IS NULL",
 		"m2.is_system = 0",
 		SystemPrefixSQL("m2.content", "m2.role"),
 	}
-	ftsArgs := []any{f.Query, "rendered : (" + f.Query + ")"} // args for one copy of innerWhere
+	ftsArgs := []any{f.Query} // args for one copy of innerWhere
+	if isPhraseConjunction(f.Query) {
+		// Plain phrases must also exist in the rendered transcript: removing
+		// thinking blocks can create phrases in dialogue alone. Operator
+		// expressions search dialogue without this block-boundary guard.
+		innerWhere = append(innerWhere, `(m2.dialogue_text IS NULL OR m2.id IN (
+			SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?
+		))`)
+		ftsArgs = append(ftsArgs, "rendered : ("+f.Query+")")
+	}
 
 	nameProjectClause := ""
 	var nameProjectArgs []any
@@ -420,22 +441,25 @@ func (db *DB) Search(
 	// Position 0 (? AS best_query in the ROW_NUMBER SELECT) is
 	// prepended after this block — see args2 below.
 	//
-	//  pos | SQL clause                                  | value
-	//  ----+---------------------------------------------+------------
-	//   0  | SELECT ? AS best_query (ROW_NUMBER)         | plainQuery  ← prepended in args2
-	//   1  | WHERE messages_fts MATCH ? (ROW_NUMBER)     | ftsArgs[0] (f.Query)
-	//   2  | WHERE messages_fts MATCH ? (ROW_NUMBER rendered) | ftsArgs[1] ("rendered : (" + f.Query + ")")
-	//  [2+]| AND s2.project = ? (if project set)         | ftsArgs[2] (f.Project)
-	//   3  | WHERE messages_fts MATCH ? (outer JOIN)     | f.Query
-	//   4  | WHEN COALESCE(display_name,session_name) LIKE ? (CASE) | likePattern
-	//   5  | WHEN s.first_message LIKE ? (CASE)          | likePattern
-	//   6  | WHERE COALESCE(display_name,session_name) LIKE ? (name WHERE) | likePattern
-	//   7  | WHERE s.first_message LIKE ? (name WHERE)   | likePattern
-	//  [8] | AND s.project = ? (name branch, optional)   | f.Project
-	//   9  | WHERE messages_fts MATCH ? (NOT IN)         | ftsArgs[0]
-	//  10  | WHERE messages_fts MATCH ? (NOT IN rendered) | ftsArgs[1]
-	// [10+]| AND s2.project = ? (NOT IN, if set)         | ftsArgs[2]
-	//  11  | LIMIT ? OFFSET ?                            | f.Limit+1, f.Cursor
+	// Positions below omit optional project/date arguments. R is 1 for plain
+	// phrase conjunctions and 0 for operator expressions. Each inner WHERE
+	// adds its project/date arguments after its MATCH arguments; the name
+	// branch adds its own project/date arguments after its LIKE arguments.
+	//
+	// pos       | SQL clause                                      | value
+	// ----------+-------------------------------------------------+-----------------
+	// 0         | SELECT ? AS best_query (ROW_NUMBER)              | plainQuery (args2)
+	// 1         | MATCH ? (ROW_NUMBER)                             | ftsArgs[0]
+	// 2 if R=1  | MATCH ? (ROW_NUMBER rendered)                    | ftsArgs[1]
+	// 2+R       | MATCH ? (outer JOIN)                             | f.Query
+	// 3+R       | display_name/session_name LIKE ? (CASE)           | likePattern
+	// 4+R       | first_message LIKE ? (CASE)                       | likePattern
+	// 5+R       | display_name/session_name LIKE ? (name WHERE)     | likePattern
+	// 6+R       | first_message LIKE ? (name WHERE)                 | likePattern
+	// 7+R       | MATCH ? (NOT IN)                                 | ftsArgs[0]
+	// 8+R if R=1| MATCH ? (NOT IN rendered)                        | ftsArgs[1]
+	// 8+2R      | LIMIT ?                                         | f.Limit+1
+	// 9+2R      | OFFSET ?                                        | f.Cursor
 	args := make([]any, 0, len(ftsArgs)*2+7+len(nameProjectArgs))
 	args = append(args, ftsArgs...)          // (1) ROW_NUMBER WHERE
 	args = append(args, f.Query)             // (2) outer MATCH re-filter
