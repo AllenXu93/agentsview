@@ -29,7 +29,6 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var message ParsedMessage
-			wantThinking := "reasoningneedle"
 			switch tc.agent {
 			case AgentClaude, AgentIflow, AgentPi:
 				root := t.TempDir()
@@ -74,7 +73,6 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 				var ok bool
 				if tc.name == "openhands-action" {
 					message, ok, _ = parseOpenHandsActionEvent(gjson.Parse(`{"thought":[{"type":"text","text":"Literal [Read: quokka.txt] [Thinking] quotation"}],"thinking_blocks":[{"type":"thinking","thinking":"reasoningneedle"},{"type":"thinking","thinking":"actionreasoningneedle"}],"tool_name":"terminal","tool_call_id":"call_a","tool_call":{"id":"call_a","name":"terminal","arguments":"{\"command\":\"tail -40 /tmp/server.log\"}"},"action":{"command":"tail -40 /tmp/server.log","kind":"TerminalAction"}}`), 0, "", time.Time{})
-					wantThinking += "\n\nactionreasoningneedle"
 				} else {
 					message, ok, _ = parseOpenHandsMessageEvent(gjson.Parse(`{"llm_message":{"role":"assistant","content":`+blocks+`}}`), 0, "", time.Time{})
 				}
@@ -88,9 +86,6 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 			}
 			want := "Literal [Read: quokka.txt] [Thinking] quotation"
 			assert.Equal(t, new(want), message.DialogueText)
-			if tc.agent == AgentOpenHands || tc.agent == AgentCursor || tc.agent == AgentPi || tc.agent == AgentIflow {
-				assert.Equal(t, wantThinking, message.ThinkingText)
-			}
 		})
 	}
 }

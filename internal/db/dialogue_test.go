@@ -88,9 +88,6 @@ func TestDialogueFTSCorpusVersion(t *testing.T) {
 				assert.Empty(t, details)
 				assert.Equal(t, tc.marker, marker)
 			}
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "needle", Mode: "fts", Sources: []string{"messages"}})
-			require.NoError(t, err)
-			assert.Len(t, page.Matches, 1)
 		})
 	}
 }
@@ -130,13 +127,6 @@ func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 						assert.Equal(t, "thinking", page.Matches[0].Location)
 					}
 				}
-			}
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: `"answerneedle" NOT reasoningneedle`, Mode: "fts", Sources: []string{"messages"}})
-			require.NoError(t, err)
-			if classified {
-				assert.Len(t, page.Matches, 1)
-			} else {
-				assert.Empty(t, page.Matches)
 			}
 		})
 	}

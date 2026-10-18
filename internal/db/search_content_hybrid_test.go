@@ -123,31 +123,6 @@ func TestSearchContentHybridVectorOnlyAndFTSOnlyBothAppear(t *testing.T) {
 	assert.ElementsMatch(t, []string{"fts-only", "vec-only"}, ids)
 }
 
-func TestSearchContentHybridContentColumnFilter(t *testing.T) {
-	d := testDB(t)
-	seedSearchSession(t, d, "column-filter", "proj", nil)
-	insertMessages(t, d, Message{
-		SessionID: "column-filter", Role: "assistant",
-		Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
-	})
-	d.SetVectorSearcher(&fakeVectorSearcher{})
-	for _, tc := range []struct {
-		pattern string
-		want    int
-	}{
-		{`"needle" AND content:needle`, 1},
-		{`"hiddenneedle" AND content:hiddenneedle`, 0},
-	} {
-		t.Run(tc.pattern, func(t *testing.T) {
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{
-				Pattern: tc.pattern, Mode: "hybrid", Sources: []string{"messages"},
-			})
-			require.NoError(t, err)
-			assert.Len(t, page.Matches, tc.want)
-		})
-	}
-}
-
 func TestSearchContentHybridFTSSnippetUsesDialogue(t *testing.T) {
 	d := testDB(t)
 	if !d.HasFTS(t.Context()) {

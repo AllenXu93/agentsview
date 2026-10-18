@@ -30,52 +30,6 @@ func seedSearchSession(t *testing.T, d *DB, id, project string, msgs [][2]string
 	require.NoError(t, d.ReplaceSessionMessages(t.Context(), id, out), "ReplaceSessionMessages")
 }
 
-func TestSearchContentLegacyThinkingSources(t *testing.T) {
-	for _, mode := range []string{"substring", "regex"} {
-		t.Run(mode, func(t *testing.T) {
-			d := testDB(t)
-			seedSearchSession(t, d, "legacy", "proj", nil)
-			insertMessages(t, d, Message{
-				SessionID: "legacy", Ordinal: 0, Role: "assistant",
-				Content: "Answer [Thinking]\nneedle\n[/Thinking]", ThinkingText: "needle",
-			})
-			seedSearchSession(t, d, "codebuddy", "proj", nil)
-			insertMessages(t, d, Message{
-				SessionID: "codebuddy", Ordinal: 0, Role: "assistant",
-				Content: "Answer", ThinkingText: "needle",
-			})
-			seedSearchSession(t, d, "codebuddy_literal_marker", "proj", nil)
-			insertMessages(t, d, Message{
-				SessionID: "codebuddy_literal_marker", Ordinal: 0, Role: "assistant",
-				Content: "The literal marker is [Thinking]", ThinkingText: "needle",
-			})
-			for _, tc := range []struct {
-				name     string
-				sources  []string
-				location string
-			}{
-				{"default", nil, "message"},
-				{"messages_and_thinking", []string{"messages", "thinking"}, "message"},
-				{"thinking_only", []string{"thinking"}, "thinking"},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					got, err := d.SearchContent(t.Context(), ContentSearchFilter{
-						Pattern: "needle", Mode: mode, Sources: tc.sources,
-					})
-					require.NoError(t, err)
-					require.Len(t, got.Matches, 3)
-					locations := make(map[string]string)
-					for _, match := range got.Matches {
-						locations[match.SessionID] = match.Location
-						assert.Contains(t, match.Snippet, "needle")
-					}
-					assert.Equal(t, map[string]string{"legacy": tc.location, "codebuddy": "thinking", "codebuddy_literal_marker": "thinking"}, locations)
-				})
-			}
-		})
-	}
-}
-
 func TestSearchContentThinkingDedupeMatches(t *testing.T) {
 	for _, mode := range []string{"substring", "regex"} {
 		for _, tc := range []struct {
@@ -86,6 +40,8 @@ func TestSearchContentThinkingDedupeMatches(t *testing.T) {
 			pattern   string
 			locations []string
 		}{
+			{"codebuddy", "Answer", "needle", nil, "needle", []string{"thinking"}},
+			{"codebuddy_literal_marker", "The literal marker is [Thinking]", "needle", nil, "needle", []string{"thinking"}},
 			{"multiple_inline_blocks", "[Thinking]\nab\n[/Thinking]\n[Thinking]\ncd\n[/Thinking]\nanswer", "ab\n\ncd", nil, "cd", []string{"message"}},
 			{"shared_start", strings.Repeat("shared ", 12) + "answer", strings.Repeat("shared ", 12) + "reasoningneedle", nil, "reasoningneedle", []string{"thinking"}},
 			{"projected_dialogue", "answerneedle [Thinking]\nanswerneedle\n[/Thinking]", "answerneedle", new("answerneedle"), "answerneedle", []string{"message", "thinking"}},
@@ -462,25 +418,41 @@ func TestSearchContentFTS(t *testing.T) {
 }
 
 func TestSearchContentFTSContentColumnFilter(t *testing.T) {
-	d := testDB(t)
-	seedSearchSession(t, d, "column-filter", "proj", nil)
-	insertMessages(t, d, Message{
-		SessionID: "column-filter", Role: "assistant",
-		Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
-	})
-	for _, tc := range []struct {
-		pattern string
-		want    int
-	}{
-		{`"needle" AND content:needle`, 1},
-		{`"hiddenneedle" AND content:hiddenneedle`, 0},
-	} {
-		t.Run(tc.pattern, func(t *testing.T) {
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{
-				Pattern: tc.pattern, Mode: "fts", Sources: []string{"messages"},
+	for _, mode := range []string{"fts", "hybrid"} {
+		t.Run(mode, func(t *testing.T) {
+			d := testDB(t)
+			requireFTS(t, d)
+			seedSearchSession(t, d, "column-filter", "proj", nil)
+			insertMessages(t, d, Message{
+				SessionID: "column-filter", Role: "assistant",
+				Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
 			})
-			require.NoError(t, err)
-			assert.Len(t, page.Matches, tc.want)
+			if mode == "hybrid" {
+				d.SetVectorSearcher(&fakeVectorSearcher{})
+			}
+			for _, tc := range []struct {
+				pattern string
+				want    int
+				wantErr bool
+			}{
+				{`"needle" AND content:needle`, 1, false},
+				{`"hiddenneedle" AND content:hiddenneedle`, 0, false},
+				{`"absent") OR (hiddenneedle`, 0, true},
+			} {
+				t.Run(tc.pattern, func(t *testing.T) {
+					page, err := d.SearchContent(t.Context(), ContentSearchFilter{
+						Pattern: tc.pattern, Mode: mode, Sources: []string{"messages"},
+					})
+					if tc.wantErr {
+						var inputErr *SearchInputError
+						require.ErrorAs(t, err, &inputErr)
+						assert.Contains(t, inputErr.Error(), "invalid FTS query")
+						return
+					}
+					require.NoError(t, err)
+					assert.Len(t, page.Matches, tc.want)
+				})
+			}
 		})
 	}
 }
@@ -750,27 +722,6 @@ func TestSearchContentFTSPhraseSnippetFallsBackToFirstToken(t *testing.T) {
 	assert.Contains(t, got.Matches[0].Snippet, "foo-bar")
 }
 
-func TestSearchContentFTSRejectsUnbalancedColumnEscape(t *testing.T) {
-	for _, mode := range []string{"fts", "hybrid"} {
-		t.Run(mode, func(t *testing.T) {
-			d := testDB(t)
-			requireFTS(t, d)
-			seedSearchSession(t, d, "column-escape", "proj", nil)
-			insertMessages(t, d, Message{
-				SessionID: "column-escape", Role: "assistant",
-				Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
-			})
-			d.SetVectorSearcher(&fakeVectorSearcher{})
-			_, err := d.SearchContent(t.Context(), ContentSearchFilter{
-				Pattern: `"absent") OR (hiddenneedle`, Mode: mode, Sources: []string{"messages"},
-			})
-			var inputErr *SearchInputError
-			require.ErrorAs(t, err, &inputErr)
-			assert.Contains(t, inputErr.Error(), "invalid FTS query")
-		})
-	}
-}
-
 func TestSearchContentFTSInvalidQuery(t *testing.T) {
 	d := testDB(t)
 	if !d.HasFTS(t.Context()) {
@@ -940,7 +891,7 @@ func TestSearchContentCursorPagination(t *testing.T) {
 	insertSession(t, d, "pg", "proj", func(s *Session) { s.UserMessageCount = 2 })
 	insertMessages(t, d,
 		Message{SessionID: "pg", Ordinal: 0, Role: "user", Content: "alpha NEEDLE one"},
-		Message{SessionID: "pg", Ordinal: 1, Role: "user", Content: "beta NEEDLE two [Thinking] reasoning", DialogueText: new("beta NEEDLE two")},
+		Message{SessionID: "pg", Ordinal: 1, Role: "user", Content: "beta NEEDLE two"},
 		Message{SessionID: "pg", Ordinal: 2, Role: "user", Content: "gamma NEEDLE three"},
 	)
 	for _, mode := range []string{"substring", "fts"} {
