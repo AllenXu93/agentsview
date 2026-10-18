@@ -18,7 +18,8 @@ func TestPiDialogueSearch(t *testing.T) {
 	env.writeSession(t, env.piDir, filepath.Join("encoded-cwd", "dialogue.jsonl"), content)
 	stats := env.engine.SyncAll(t.Context(), nil)
 	require.Equal(t, 1, stats.Synced)
-	page, err := env.db.SearchContent(t.Context(), db.ContentSearchFilter{Pattern: "reasoningneedle", Sources: []string{"messages"}})
+	page, err := env.db.SearchContent(t.Context(), db.ContentSearchFilter{Pattern: "An answer.", Sources: []string{"messages"}})
 	require.NoError(t, err)
-	assert.Empty(t, page.Matches)
+	require.Len(t, page.Matches, 1)
+	assert.Equal(t, "An answer.", page.Matches[0].Snippet)
 }

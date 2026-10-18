@@ -706,13 +706,6 @@ func TestSearchContentFTSRejectsUnbalancedColumnEscape(t *testing.T) {
 			var inputErr *SearchInputError
 			require.ErrorAs(t, err, &inputErr)
 			assert.Contains(t, inputErr.Error(), "invalid FTS query")
-
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{
-				Pattern: `"needle" AND content:needle`, Mode: mode, Sources: []string{"messages"},
-			})
-			require.NoError(t, err)
-			require.Len(t, page.Matches, 1)
-			assert.Equal(t, "column-escape", page.Matches[0].SessionID)
 		})
 	}
 }

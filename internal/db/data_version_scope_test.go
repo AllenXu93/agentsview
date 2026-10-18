@@ -30,7 +30,7 @@ func TestCodexLegacyPageVersionRebuildsEveryProvider(t *testing.T) {
 }
 
 func TestDialogueUpgradePreservesCompletedCodexRepositoryUpgrade(t *testing.T) {
-	const completedVersion = 138
+	completedVersion := CurrentDataVersion() - 1
 	path := filepath.Join(t.TempDir(), "archive.db")
 	d := testDBAtPath(t, path, "completed Codex upgrade")
 	for _, agent := range []string{"codex", "pi"} {

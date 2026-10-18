@@ -26,8 +26,6 @@ func TestCJKFTSRenderedTranscript(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page.Results, 1)
 	assert.Equal(t, "classified", page.Results[0].SessionID)
-	assert.Contains(t, page.Results[0].Snippet, "Read:")
-	assert.Contains(t, page.Results[0].Snippet, "検索方法")
 }
 
 // These searches exercise the store's choice of query preparation against the

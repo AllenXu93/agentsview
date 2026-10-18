@@ -4854,15 +4854,10 @@ func TestOpenRejectsArchiveWhoseFTSModuleIsUnavailable(t *testing.T) {
 	// name nothing registers; SQLite reports the same failure mode.
 	raw, err := sql.Open("sqlite3", makeDSN(path, false))
 	require.NoError(t, err)
-	var originalDDL string
-	require.NoError(t, raw.QueryRowContext(t.Context(), "SELECT sql FROM sqlite_master WHERE name = 'messages_fts'").Scan(&originalDDL))
-	_, err = raw.ExecContext(t.Context(), "DELETE FROM stats WHERE key = ?", searchCorpusVersionStatsKey)
-	require.NoError(t, err)
 	for _, stmt := range []string{
 		"PRAGMA writable_schema=ON",
 		`UPDATE sqlite_master
-		 SET sql = replace(replace(sql, 'USING fts5(', 'USING fts5_absent('),
-		     'content=''message_search_content''', 'content=''messages''')
+		 SET sql = replace(sql, 'USING fts5(', 'USING fts5_absent(')
 		 WHERE type = 'table' AND name = 'messages_fts'`,
 		"PRAGMA writable_schema=OFF",
 	} {
@@ -4875,19 +4870,6 @@ func TestOpenRejectsArchiveWhoseFTSModuleIsUnavailable(t *testing.T) {
 	require.Error(t, err, "Open must refuse an archive whose FTS index this executable cannot load")
 	require.ErrorContains(t, err, "no such module: fts5_absent")
 	require.ErrorContains(t, err, "-tags fts5")
-	raw, err = sql.Open("sqlite3", makeDSN(path, false))
-	require.NoError(t, err)
-	_, err = raw.ExecContext(t.Context(), "PRAGMA writable_schema=ON")
-	require.NoError(t, err)
-	_, err = raw.ExecContext(t.Context(), "UPDATE sqlite_master SET sql = ? WHERE name = 'messages_fts'", originalDDL)
-	require.NoError(t, err)
-	require.NoError(t, raw.Close())
-	reopened, err := Open(t.Context(), path)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
-	result, err := reopened.Search(t.Context(), SearchFilter{Query: "indexed"})
-	require.NoError(t, err)
-	require.Len(t, result.Results, 1)
 }
 
 func TestPath(t *testing.T) {

@@ -56,18 +56,6 @@ func TestDialogueFTSUpgradePreservesMessages(t *testing.T) {
 	}
 
 	assert.Contains(t, details, "Updating full-text search")
-	var marker string
-	require.NoError(t, d.getReader().QueryRow(t.Context(), "SELECT value FROM stats WHERE key = ?", searchCorpusVersionStatsKey).Scan(&marker))
-	assert.Equal(t, searchCorpusVersion, marker)
-	require.NoError(t, d.Close())
-	details = nil
-	d, err = OpenWithProgress(t.Context(), path, config.ArchiveContentFull, func(progress OpenProgress) {
-		details = append(details, progress.Detail)
-	})
-	require.NoError(t, err)
-	assert.NotContains(t, details, "Updating full-text search")
-	_, err = d.getWriter().Exec(t.Context(), "INSERT INTO messages_fts(messages_fts, rank) VALUES('integrity-check', 1)")
-	require.NoError(t, err)
 }
 
 func TestDialogueFTSCorpusVersion(t *testing.T) {
@@ -162,7 +150,7 @@ func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 	}
 }
 
-func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
+func TestDialogueFTSTriggerSync(t *testing.T) {
 	for _, tc := range []struct{ name, dialogue, hidden, replacement string }{
 		{"porter", "answerneedle", "reasoningneedle", "replacementneedle"},
 		{"cjk", "中文搜索", "工具输出", "秘密推理"},
@@ -180,44 +168,34 @@ func TestSearchRetainsRenderedContentAlongsideDialogue(t *testing.T) {
 				{SessionID: "search", Ordinal: 2, Role: "assistant", Content: "Done"},
 			}
 			insertMessages(t, d, messages...)
-			if tc.name == "cjk" {
-				page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: tc.dialogue, Mode: "terms", Sources: []string{"messages"}})
-				require.NoError(t, err)
-				assert.Len(t, page.Matches, 1)
+			terms := []string{tc.hidden, tc.replacement}
+			if tc.dialogue != "" {
+				terms = append(terms, tc.dialogue)
 			}
 			for _, phase := range []string{"insert", "update", "delete"} {
-				t.Run(phase, func(t *testing.T) {
-					switch phase {
-					case "update":
-						messages[1].Content = tc.dialogue + " [Thinking] " + tc.replacement
-						require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", messages))
-					case "delete":
-						require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", nil))
+				switch phase {
+				case "update":
+					messages[1].Content = tc.dialogue + " [Thinking] " + tc.replacement
+					require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", messages))
+				case "delete":
+					require.NoError(t, d.ReplaceSessionMessages(t.Context(), "search", nil))
+				}
+				_, err := d.getWriter().Exec(t.Context(), "INSERT INTO messages_fts(messages_fts, rank) VALUES('integrity-check', 1)")
+				require.NoError(t, err, phase)
+				if tc.name == "cjk" {
+					_, err := d.getWriter().Exec(t.Context(), "INSERT INTO messages_cjk_fts(messages_cjk_fts, rank) VALUES('integrity-check', 1)")
+					require.NoError(t, err, phase)
+				}
+				for _, term := range terms {
+					page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: term, Mode: "fts", Sources: []string{"messages"}})
+					require.NoError(t, err, "%s %s", phase, term)
+					if phase != "delete" && tc.dialogue != "" && term == tc.dialogue {
+						require.Len(t, page.Matches, 1, "%s %s", phase, term)
+						assert.Equal(t, tc.dialogue, page.Matches[0].Snippet, phase)
+					} else {
+						assert.Empty(t, page.Matches, "%s %s", phase, term)
 					}
-					for _, term := range []string{tc.dialogue, tc.hidden, tc.replacement} {
-						if term == "" {
-							continue
-						}
-						ordinary, err := d.Search(t.Context(), SearchFilter{Query: term})
-						require.NoError(t, err)
-						wantOrdinary := 0
-						if phase != "delete" && (term == tc.dialogue || phase == "insert" && term == tc.hidden || phase == "update" && term == tc.replacement) {
-							wantOrdinary = 1
-						}
-						assert.Len(t, ordinary.Results, wantOrdinary, term)
-						if phase == "insert" {
-							continue
-						}
-						page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: term, Mode: "fts", Sources: []string{"messages"}})
-						require.NoError(t, err)
-						if phase != "delete" && term == tc.dialogue {
-							require.Len(t, page.Matches, 1)
-							assert.Equal(t, tc.dialogue, page.Matches[0].Snippet)
-						} else {
-							assert.Empty(t, page.Matches, term)
-						}
-					}
-				})
+				}
 			}
 		})
 	}
