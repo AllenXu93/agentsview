@@ -21,8 +21,13 @@ import (
 
 const (
 	selectMessageCols = `id, session_id, ordinal, role, content,
-		thinking_text, dialogue_text,
-		COALESCE(timestamp, '') AS timestamp,
+		thinking_text, dialogue_text, ` + selectMessageMetadataCols
+
+	// Bounded transcript loaders don't need the search projection.
+	selectTranscriptMessageCols = `id, session_id, ordinal, role, content,
+		thinking_text, NULL AS dialogue_text, ` + selectMessageMetadataCols
+
+	selectMessageMetadataCols = `COALESCE(timestamp, '') AS timestamp,
 		has_thinking, has_tool_use, content_length,
 		is_system,
 		model, reasoning_effort, token_usage, context_tokens, output_tokens, provider_id,
@@ -752,15 +757,15 @@ func (db *DB) GetAllMessages(
 	ctx context.Context, sessionID string,
 ) ([]Message, error) {
 	db.messagesLoadCount.Add(1)
-	return allMessagesWithQuerier(ctx, db.getReader(), sessionID)
+	return allMessagesWithQuerier(ctx, db.getReader(), sessionID, selectMessageCols)
 }
 
-func allMessagesWithQuerier(ctx context.Context, q messageRowsQuerier, sessionID string) ([]Message, error) {
+func allMessagesWithQuerier(ctx context.Context, q messageRowsQuerier, sessionID, columns string) ([]Message, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s
 		FROM messages
 		WHERE session_id = ?
-		ORDER BY ordinal ASC`, selectMessageCols), sessionID)
+		ORDER BY ordinal ASC`, columns), sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("querying all messages: %w", err)
 	}

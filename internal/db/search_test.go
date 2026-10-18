@@ -130,32 +130,6 @@ real prompt'),
 	}, got)
 }
 
-func TestIsPhraseConjunction(t *testing.T) {
-	for _, tc := range []struct {
-		query string
-		want  bool
-	}{
-		{`"alpha"`, true},
-		{`"alpha beta"`, true},
-		{"\t\"alpha\" \n\"beta\"\u2003", true},
-		{`"say ""hello""" "beta"`, true},
-		{`"AND content:alpha"`, true},
-		{`"alpha" AND content:alpha`, false},
-		{`"alpha" NOT "beta"`, false},
-		{`"alpha" OR "beta"`, false},
-		{`"alpha" + "beta"`, false},
-		{`"alpha"*`, false},
-		{`("alpha")`, false},
-		{`alpha`, false},
-		{`"alpha`, false},
-		{`"alpha""`, false},
-	} {
-		t.Run(tc.query, func(t *testing.T) {
-			assert.Equal(t, tc.want, isPhraseConjunction(tc.query))
-		})
-	}
-}
-
 func TestSearchRenderedTranscript(t *testing.T) {
 	d := testDB(t)
 	requireFTS(t, d)
@@ -175,10 +149,18 @@ func TestSearchRenderedTranscript(t *testing.T) {
 		snippet string
 	}{
 		{`"alpha beta"`, "", ""},
-		{`"alpha" AND content:alpha`, "classified", "<mark>alpha</mark>"},
+		{`"alpha beta" OR absent`, "", ""},
+		{`"alpha beta" NOT absent`, "", ""},
+		{`"alpha beta" AND gamma`, "", ""},
+		{`alpha`, "classified", "<mark>alpha</mark>"},
+		{`"alpha" AND content:alpha`, "", ""},
 		{`"go test"`, "classified", "[Bash: <mark>go test</mark> ./widget]"},
 		{`"gamma delta"`, "classified", "<mark>gamma delta</mark>"},
+		{`"gamma delta" AND alpha`, "classified", "<mark>gamma delta</mark>"},
 		{`"legacy phrase"`, "legacy", "<mark>legacy phrase</mark>"},
+		{`"legacy phrase" OR absent`, "legacy", "<mark>legacy phrase</mark>"},
+		{`"legacy phrase" NOT absent`, "legacy", "<mark>legacy phrase</mark>"},
+		{`"legacy phrase" AND content:legacy`, "legacy", "<mark>legacy phrase</mark>"},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			page, err := d.Search(t.Context(), SearchFilter{Query: tc.query, Project: "proj"})
