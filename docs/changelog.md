@@ -16,7 +16,10 @@ The latest release is
   use `--in thinking` to search it alone. FTS, terms,
   semantic, and hybrid reject that source. Existing sessions reparse when source
   files are available; source-less sessions, v4 imports, and unpaired OpenHands
-  observations keep searching their saved text as `message` hits.
+  observations keep searching their saved text as `message` hits. The first
+  writable open refreshes full-text indexes once and waits for the scan.
+  Artifact transport and mirror dialogue search are a separate follow-up;
+  semantic search continues to use rendered messages.
 
 **Upgrade notes**
 

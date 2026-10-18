@@ -5,62 +5,50 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+)
+
+// The same corpus version invalidates ordinary FTS and the CJK fingerprint.
+const (
+	searchCorpusVersion         = "1"
+	searchCorpusVersionStatsKey = "message_search_corpus_version"
 )
 
 // refreshDialogueFTS upgrades the derived index once, preserving every message.
 func refreshDialogueFTS(ctx context.Context, w *writerHandle, progress OpenProgressFunc) error {
-	var ddl string
-	err := w.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name = 'messages_fts'").Scan(&ddl)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && strings.Contains(ddl, "dialogue,") {
+	var version string
+	err := w.QueryRowContext(ctx, "SELECT CAST(value AS TEXT) FROM stats WHERE key = ?", searchCorpusVersionStatsKey).Scan(&version)
+	if err == nil && version == searchCorpusVersion {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("reading message FTS schema: %w", err)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("reading search corpus version: %w", err)
 	}
+	return rebuildMessageFTS(ctx, w, progress)
+}
+
+func rebuildMessageFTS(ctx context.Context, w *writerHandle, progress OpenProgressFunc) error {
 	tx, err := w.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Verify the module before replacing an existing derived index.
+	if _, err := tx.ExecContext(ctx, "CREATE VIRTUAL TABLE temp.fts_module_probe USING fts5(content); DROP TABLE temp.fts_module_probe"); err != nil {
+		return fmt.Errorf("checking FTS5 availability: %w", err)
+	}
+	progress.report("Updating full-text search")
 	for _, query := range []string{
 		"DROP TRIGGER IF EXISTS messages_ai", "DROP TRIGGER IF EXISTS messages_ad", "DROP TRIGGER IF EXISTS messages_au",
-		"DROP TABLE messages_fts", "DROP VIEW IF EXISTS message_search_content", schemaFTS,
+		"DROP TABLE IF EXISTS messages_fts", "DROP VIEW IF EXISTS message_search_content", schemaFTS,
+		"INSERT INTO messages_fts(messages_fts) VALUES('rebuild')",
 	} {
 		if _, err := tx.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("refreshing dialogue FTS: %w", err)
 		}
 	}
-	if err := populateDialogueFTS(ctx, tx, progress); err != nil {
-		return fmt.Errorf("refreshing dialogue FTS: %w", err)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO stats(key, value) VALUES(?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value`, searchCorpusVersionStatsKey, searchCorpusVersion); err != nil {
+		return fmt.Errorf("storing search corpus version: %w", err)
 	}
 	return tx.Commit()
-}
-
-func populateDialogueFTS(ctx context.Context, tx *sql.Tx, progress OpenProgressFunc) error {
-	var total, done, lastID int64
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM messages").Scan(&total); err != nil {
-		return err
-	}
-	progress.report(fmt.Sprintf("Updating full-text search: %d/%d messages", done, total))
-	for done < total {
-		var nextID int64
-		if err := tx.QueryRowContext(ctx, `SELECT max(id) FROM
-			(SELECT id FROM messages WHERE id > ? ORDER BY id LIMIT 10000)`, lastID).Scan(&nextID); err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `INSERT INTO messages_fts(rowid, content, dialogue)
-			SELECT id, content, dialogue FROM message_search_content WHERE id > ? AND id <= ?`, lastID, nextID)
-		if err != nil {
-			return err
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		done += count
-		lastID = nextID
-		progress.report(fmt.Sprintf("Updating full-text search: %d/%d messages", done, total))
-	}
-	return nil
 }

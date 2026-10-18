@@ -17,7 +17,7 @@ const simpleFTSDirEnv = "AGENTSVIEW_SIMPLE_DIR"
 
 const (
 	cjkFTSFingerprintStatsKey = "messages_cjk_fts_fingerprint_v1"
-	cjkFTSSchemaVersion       = "messages-cjk-fts-v5"
+	cjkFTSSchemaVersion       = "messages-cjk-fts-v3"
 )
 
 var simpleFTSRuntimeConfig, simpleFTSRuntimeErr = discoverSimpleFTSRuntime()
@@ -176,7 +176,7 @@ func fingerprintSimpleFTSRuntime(
 	libraryPath, dictionaryPath string,
 ) (string, error) {
 	h := sha256.New()
-	_, _ = io.WriteString(h, cjkFTSSchemaVersion+"\n")
+	_, _ = io.WriteString(h, cjkFTSSchemaVersion+"\n"+searchCorpusVersion+"\n")
 
 	type fingerprintFile struct {
 		name string

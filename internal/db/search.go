@@ -356,7 +356,7 @@ func (db *DB) Search(
 	if err != nil {
 		return SearchPage{}, err
 	}
-	f.Query = "content : (" + ftsQuery.match + ")"
+	f.Query = ftsQuery.match
 
 	// ORDER BY for the outer query. FTS5 ranks are negative (lower = better),
 	// so rank ASC places message matches (negative rank) before name-only rows
@@ -450,7 +450,7 @@ func (db *DB) Search(
 				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at, '') AS session_ended_at,
 				best.best_ordinal AS ordinal,
-				snippet(messages_fts, 0, '<mark>', '</mark>',
+				snippet(messages_fts, -1, '<mark>', '</mark>',
 					'...', %d) AS snippet,
 				best.best_rank AS rank,
 				instr(LOWER(m.content), LOWER(best.best_query))

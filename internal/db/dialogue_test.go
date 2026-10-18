@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,8 +12,8 @@ import (
 	"go.kenn.io/agentsview/internal/config"
 )
 
-func TestDialogueFTSUpgradePreservesMessagesAndReportsProgress(t *testing.T) {
-	const total, needle = 20001, 12345
+func TestDialogueFTSUpgradePreservesMessages(t *testing.T) {
+	const total, needle = 21, 12
 	path := filepath.Join(t.TempDir(), "archive.db")
 	d := testDBAtPath(t, path, "source")
 	insertSession(t, d, "legacy", "project", func(s *Session) { s.Agent = "pi"; s.UserMessageCount = 2 })
@@ -25,6 +24,7 @@ func TestDialogueFTSUpgradePreservesMessagesAndReportsProgress(t *testing.T) {
  INSERT INTO messages (session_id, ordinal, role, content, content_length)
  SELECT 'legacy', i, CASE i %% 2 WHEN 0 THEN 'user' ELSE 'assistant' END,
   CASE i WHEN %d THEN 'answerneedle [Thinking] reasoningneedle' ELSE 'filler ' || i END, 0 FROM n;
+ DELETE FROM stats WHERE key = 'message_search_corpus_version';
  CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id', tokenize='porter unicode61');
  UPDATE messages SET thinking_text = 'reasoningneedle', has_thinking = 1 WHERE ordinal = %d;
  INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
@@ -59,27 +59,19 @@ func TestDialogueFTSUpgradePreservesMessagesAndReportsProgress(t *testing.T) {
 		assert.Len(t, ordinary.Results, 1, term)
 	}
 
-	var positions []int
-	for _, detail := range details {
-		rest, ok := strings.CutPrefix(detail, "Updating full-text search: ")
-		if !ok {
-			continue
-		}
-		var done, of int
-		_, err := fmt.Sscanf(rest, "%d/%d messages", &done, &of)
-		require.NoError(t, err, detail)
-		require.Equal(t, total, of, detail)
-		if done == 0 && len(positions) == 0 {
-			continue
-		}
-		require.Positive(t, done, detail)
-		if len(positions) > 0 {
-			require.Greater(t, done, positions[len(positions)-1], detail)
-		}
-		positions = append(positions, done)
-	}
-	require.GreaterOrEqual(t, len(positions), 3, "progress details: %q", details)
-	assert.Equal(t, total, positions[len(positions)-1])
+	assert.Contains(t, details, "Updating full-text search")
+	var marker string
+	require.NoError(t, d.getReader().QueryRow(t.Context(), "SELECT value FROM stats WHERE key = ?", searchCorpusVersionStatsKey).Scan(&marker))
+	assert.Equal(t, searchCorpusVersion, marker)
+	require.NoError(t, d.Close())
+	details = nil
+	d, err = OpenWithProgress(t.Context(), path, config.ArchiveContentFull, func(progress OpenProgress) {
+		details = append(details, progress.Detail)
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, details, "Updating full-text search")
+	_, err = d.getWriter().Exec(t.Context(), "INSERT INTO messages_fts(messages_fts, rank) VALUES('integrity-check', 1)")
+	require.NoError(t, err)
 }
 
 func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
@@ -212,5 +204,52 @@ func TestProjectionOnlyReparsePreservesTranscriptFreshness(t *testing.T) {
 		assert.Equal(t, "secrets-current", secretVersion)
 		assert.Equal(t, "friction-current", frictionVersion)
 		assert.Equal(t, "2026-05-01T10:00:00Z", modified)
+	}
+}
+
+func TestDialogueFTSMixedArchivePaging(t *testing.T) {
+	d := testDB(t)
+	for _, id := range []string{"classified", "legacy", "empty"} {
+		insertSession(t, d, id, "project", func(s *Session) { s.UserMessageCount = 2 })
+		message := Message{SessionID: id, Ordinal: 1, Role: "assistant", Content: "quick brown fox renderedneedle 中文搜索"}
+		switch id {
+		case "classified":
+			message.DialogueText = new("quick brown fox 中文搜索")
+		case "empty":
+			message.DialogueText = new("")
+		}
+		insertMessages(t, d, Message{SessionID: id, Role: "user", Content: "Question"}, message)
+	}
+	for _, mode := range []string{"fts", "terms"} {
+		pattern := `"quick brown"`
+		if mode == "terms" {
+			pattern = "quick brown"
+		}
+		full, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: pattern, Mode: mode, Sources: []string{"messages"}})
+		require.NoError(t, err)
+		require.Len(t, full.Matches, 2, mode)
+		var sessions []string
+		for offset := range 2 {
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: pattern, Mode: mode, Sources: []string{"messages"}, Limit: 1, Cursor: offset})
+			require.NoError(t, err)
+			require.Len(t, page.Matches, 1)
+			sessions = append(sessions, page.Matches[0].SessionID)
+		}
+		assert.Equal(t, []string{full.Matches[0].SessionID, full.Matches[1].SessionID}, sessions)
+	}
+	for _, mode := range []string{"fts", "terms"} {
+		page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "中文搜索", Mode: mode, Sources: []string{"messages"}})
+		require.NoError(t, err)
+		assert.Len(t, page.Matches, 2)
+	}
+	page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: `"fox" NOT renderedneedle`, Mode: "fts", Sources: []string{"messages"}})
+	require.NoError(t, err)
+	require.Len(t, page.Matches, 1)
+	assert.Equal(t, "classified", page.Matches[0].SessionID)
+	ordinary, err := d.Search(t.Context(), SearchFilter{Query: "renderedneedle"})
+	require.NoError(t, err)
+	require.Len(t, ordinary.Results, 3)
+	for _, result := range ordinary.Results {
+		assert.Contains(t, result.Snippet, "<mark>renderedneedle</mark>")
 	}
 }

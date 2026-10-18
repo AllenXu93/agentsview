@@ -379,8 +379,8 @@ func (db *DB) searchContentSubstring(
 			FROM tool_calls tc
 			JOIN messages mm ON mm.id = tc.message_id
 			JOIN sessions s ON s.id = tc.session_id
-			WHERE COALESCE(NULLIF(tc.input_json, ''), tc.file_path) LIKE ? ESCAPE '\' AND tc.%s`,
-			snippetExpr("COALESCE(NULLIF(tc.input_json, ''), tc.file_path)"), scope))
+			WHERE tc.input_json LIKE ? ESCAPE '\' AND tc.%s`,
+			snippetExpr("tc.input_json"), scope))
 		args = append(args, like)
 		args = append(args, scopeArgs...)
 	}
@@ -660,7 +660,7 @@ func (db *DB) regexCandidateRows(
 		args = append(args, scopeArgs...)
 	}
 	if hasSource(f, "tool_input") {
-		w := prefilterClause("COALESCE(NULLIF(tc.input_json, ''), tc.file_path)")
+		w := prefilterClause("tc.input_json")
 		branches = append(branches, fmt.Sprintf(`
 			SELECT tc.session_id AS session_id, s.project AS project,
 				s.agent AS agent,
@@ -668,7 +668,7 @@ func (db *DB) regexCandidateRows(
 				'tool_input' AS location,
 				'assistant' AS role, tc.tool_name AS tool_name,
 				mm.ordinal AS ordinal, COALESCE(mm.timestamp,'') AS ts,
-				COALESCE(NULLIF(tc.input_json, ''), tc.file_path) AS body,
+				tc.input_json AS body,
 				COALESCE(s.ended_at, s.started_at, '') AS sort_ts,
 				1 AS src, tc.id AS row_id
 			FROM tool_calls tc JOIN messages mm ON mm.id = tc.message_id
@@ -1415,7 +1415,7 @@ func (db *DB) fetchHybridFTSBatch(
 	scope, scopeArgs := semanticSessionScopeSubquery(f)
 	query := fmt.Sprintf(`
 		SELECT m.session_id, m.ordinal,
-		       snippet(messages_fts, 1, '', '', '...', 32) AS snip
+		       snippet(messages_fts, 0, '', '', '...', 32) AS snip
 		FROM messages_fts f JOIN messages m ON m.id = f.rowid
 		WHERE messages_fts MATCH ? AND m.role IN ('user','assistant')
 		  AND m.is_system = 0 AND %s

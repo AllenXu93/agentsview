@@ -1409,23 +1409,3 @@ func assertUsageOnlyGroup(t *testing.T, database *DB, project string, keys ...st
 		assert.Equal(t, key, byKey[key].DisplayName)
 	}
 }
-
-func TestTranscriptsToolPathRemainsSearchable(t *testing.T) {
-	d := testDB(t)
-	d.SetArchiveContent(config.ArchiveContentTranscripts)
-	insertSession(t, d, "paths", "project", func(s *Session) { s.UserMessageCount = 2 })
-	insertMessages(t, d, Message{
-		SessionID: "paths", Role: "assistant",
-		Content:   "Reading",
-		ToolCalls: []ToolCall{{ToolName: "Read", Category: "Read", InputJSON: `{"file_path":"retainedneedle.txt"}`, FilePath: "retainedneedle.txt"}},
-	})
-	for _, mode := range []string{"substring", "regex"} {
-		t.Run(mode, func(t *testing.T) {
-			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "retainedneedle", Mode: mode})
-			require.NoError(t, err)
-			require.Len(t, page.Matches, 1, mode)
-			assert.Equal(t, "tool_input", page.Matches[0].Location)
-			assert.Equal(t, "retainedneedle.txt", page.Matches[0].Snippet)
-		})
-	}
-}

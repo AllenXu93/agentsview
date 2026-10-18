@@ -658,7 +658,7 @@ var schemaSQL string
 const messagesADTriggerDDL = `
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content, dialogue)
-        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
+        VALUES('delete', old.id, CASE WHEN old.dialogue_text IS NULL THEN NULL ELSE old.content END, COALESCE(old.dialogue_text, old.content));
 END;
 `
 
@@ -673,34 +673,35 @@ CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_ad
 AFTER DELETE ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
     INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, content, dialogue)
-        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
+        VALUES('delete', old.id, CASE WHEN old.dialogue_text IS NULL THEN NULL ELSE old.content END, COALESCE(old.dialogue_text, old.content));
 END;
 `
 
 const schemaFTS = `
 CREATE VIEW IF NOT EXISTS message_search_content AS
-SELECT id, session_id, content, COALESCE(dialogue_text, content) AS dialogue FROM messages;
+SELECT id, session_id, CASE WHEN dialogue_text IS NULL THEN NULL ELSE content END AS content,
+    COALESCE(dialogue_text, content) AS dialogue FROM messages;
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content, dialogue,
+    dialogue, content,
     content='message_search_content',
     content_rowid='id',
     tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_fts(rowid, content, dialogue) VALUES (new.id, CASE WHEN new.dialogue_text IS NULL THEN NULL ELSE new.content END, COALESCE(new.dialogue_text, new.content));
 END;
 ` + messagesADTriggerDDL + `
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content, dialogue)
-        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
-    INSERT INTO messages_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
+        VALUES('delete', old.id, CASE WHEN old.dialogue_text IS NULL THEN NULL ELSE old.content END, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_fts(rowid, content, dialogue) VALUES (new.id, CASE WHEN new.dialogue_text IS NULL THEN NULL ELSE new.content END, COALESCE(new.dialogue_text, new.content));
 END;
 `
 
 const schemaCJKFTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_cjk_fts USING fts5(
-    content, dialogue,
+    dialogue, content,
     content='message_search_content',
     content_rowid='id',
     tokenize='simple 0'
@@ -711,15 +712,15 @@ const schemaCJKFTSTriggers = `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_ai
 AFTER INSERT ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
-    INSERT INTO messages_cjk_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
+    INSERT INTO messages_cjk_fts(rowid, content, dialogue) VALUES (new.id, CASE WHEN new.dialogue_text IS NULL THEN NULL ELSE new.content END, COALESCE(new.dialogue_text, new.content));
 END;
 ` + messagesCJKADTriggerDDL + `
 CREATE TEMP TRIGGER IF NOT EXISTS messages_cjk_au
 AFTER UPDATE ON main.messages
 WHEN ` + cjkFTSRuntimeMatchesSQL + ` BEGIN
     INSERT INTO messages_cjk_fts(messages_cjk_fts, rowid, content, dialogue)
-        VALUES('delete', old.id, old.content, COALESCE(old.dialogue_text, old.content));
-    INSERT INTO messages_cjk_fts(rowid, content, dialogue) VALUES (new.id, new.content, COALESCE(new.dialogue_text, new.content));
+        VALUES('delete', old.id, CASE WHEN old.dialogue_text IS NULL THEN NULL ELSE old.content END, COALESCE(old.dialogue_text, old.content));
+    INSERT INTO messages_cjk_fts(rowid, content, dialogue) VALUES (new.id, CASE WHEN new.dialogue_text IS NULL THEN NULL ELSE new.content END, COALESCE(new.dialogue_text, new.content));
 END;
 
 -- The persistent BEFORE triggers mark a session pending without consulting
@@ -4825,9 +4826,9 @@ func (db *DB) DropFTS(ctx context.Context) error {
 		}
 	}
 	if _, err := w.Exec(ctx,
-		"DELETE FROM stats WHERE key = ?", cjkFTSFingerprintStatsKey,
+		"DELETE FROM stats WHERE key IN (?, ?)", cjkFTSFingerprintStatsKey, searchCorpusVersionStatsKey,
 	); err != nil {
-		return fmt.Errorf("clearing CJK fts fingerprint: %w", err)
+		return fmt.Errorf("clearing FTS versions: %w", err)
 	}
 	return nil
 }
@@ -4838,15 +4839,8 @@ func (db *DB) RebuildFTS(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	w := db.getWriter()
-	if _, err := w.Exec(ctx, schemaFTS); err != nil {
-		return fmt.Errorf("recreate fts: %w", err)
-	}
-	_, err := w.Exec(ctx,
-		"INSERT INTO messages_fts(messages_fts)"+
-			" VALUES('rebuild')",
-	)
-	if err != nil {
-		return fmt.Errorf("rebuild fts index: %w", err)
+	if err := rebuildMessageFTS(ctx, w, nil); err != nil {
+		return err
 	}
 	if err := ensureCJKFTS(ctx, w, true); err != nil {
 		return fmt.Errorf("rebuild CJK fts index: %w", err)
@@ -5055,25 +5049,14 @@ func (db *DB) init(ctx context.Context, progress OpenProgressFunc) error {
 		if err := db.checkFTSModuleLoads(ctx, w); err != nil {
 			return err
 		}
-		if err := refreshDialogueFTS(ctx, w, progress); err != nil {
-			return err
-		}
 	}
-
-	// Attempt to initialize FTS. Failure is non-fatal
-	// (might be missing module).
-	if _, err := w.ExecContext(ctx, schemaFTS); err != nil {
-		if fts5Available {
-			return fmt.Errorf("initializing FTS: %w", err)
-		}
-	} else if !hadFTS {
-		// Schema init succeeded and we didn't have FTS
-		// before. Populate the index for existing messages.
-		if _, err := w.ExecContext(ctx,
-			"INSERT INTO messages_fts(messages_fts)"+
-				" VALUES('rebuild')",
-		); err != nil {
-			return fmt.Errorf("backfilling FTS: %w", err)
+	if fts5Available {
+		if !hadFTS {
+			if err := rebuildMessageFTS(ctx, w, progress); err != nil {
+				return err
+			}
+		} else if err := refreshDialogueFTS(ctx, w, progress); err != nil {
+			return err
 		}
 	}
 

@@ -817,7 +817,12 @@ Existing sessions from these providers are reparsed when their source files are
 available. Other providers and parser paths, sessions without source files,
 imported v4 artifacts, and unpaired OpenHands observations keep searching their
 stored content as `message` hits.
-Transcript display, block order, and artifact format v4 remain unchanged.
+The first writable open refreshes SQLite's full-text indexes once. Startup waits
+for this scan; later opens reuse the indexes. Classified messages index dialogue
+and rendered text separately, so ordinary session-search ordering may shift.
+Artifact transport and PostgreSQL, DuckDB, and ClickHouse dialogue search are a
+separate follow-up. Transcript display, block order, and artifact format v4
+remain unchanged.
 
 One-shot, automated, and subagent sessions are excluded by default; opt back in
 with `--include-one-shot`, `--include-automated`, or `--include-children`.
