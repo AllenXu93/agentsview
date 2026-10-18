@@ -92,6 +92,24 @@ func TestDialogueFTSCorpusVersion(t *testing.T) {
 	}
 }
 
+func TestDropFTSInterruptedKeepsIndexConsistent(t *testing.T) {
+	d := testDB(t)
+	_, err := d.getWriter().Exec(t.Context(), `CREATE TRIGGER stats_fail BEFORE DELETE ON stats
+ BEGIN SELECT RAISE(ABORT, 'interrupted'); END`)
+	require.NoError(t, err)
+	require.Error(t, d.DropFTS(t.Context()))
+
+	var objects, marker int
+	require.NoError(t, d.getReader().QueryRow(t.Context(),
+		`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('messages_fts', 'messages_ai', 'messages_ad', 'messages_au')`,
+	).Scan(&objects))
+	require.NoError(t, d.getReader().QueryRow(t.Context(),
+		"SELECT COUNT(*) FROM stats WHERE key = ?", searchCorpusVersionStatsKey,
+	).Scan(&marker))
+	assert.Equal(t, 4, objects)
+	assert.Equal(t, 1, marker)
+}
+
 func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 	for _, classified := range []bool{true, false} {
 		t.Run(strconv.FormatBool(classified), func(t *testing.T) {

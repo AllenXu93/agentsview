@@ -4820,18 +4820,24 @@ func (db *DB) DropFTS(ctx context.Context) error {
 		"DROP TRIGGER IF EXISTS messages_au",
 		"DROP TABLE IF EXISTS messages_fts",
 	}
-	w := db.getWriter()
+	// One transaction, so an interrupted drop cannot leave the index without
+	// its triggers while the corpus marker still says it is current.
+	tx, err := db.getWriter().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("drop fts: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, s := range stmts {
-		if _, err := w.Exec(ctx, s); err != nil {
+		if _, err := tx.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("drop fts (%s): %w", s, err)
 		}
 	}
-	if _, err := w.Exec(ctx,
+	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM stats WHERE key IN (?, ?)", cjkFTSFingerprintStatsKey, searchCorpusVersionStatsKey,
 	); err != nil {
 		return fmt.Errorf("clearing FTS versions: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // RebuildFTS recreates the FTS table, triggers, and
