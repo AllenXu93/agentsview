@@ -648,6 +648,34 @@ func TestSearchContentFTSPhraseSnippetFallsBackToFirstToken(t *testing.T) {
 	assert.Contains(t, got.Matches[0].Snippet, "foo-bar")
 }
 
+func TestSearchContentFTSRejectsUnbalancedColumnEscape(t *testing.T) {
+	for _, mode := range []string{"fts", "hybrid"} {
+		t.Run(mode, func(t *testing.T) {
+			d := testDB(t)
+			requireFTS(t, d)
+			seedSearchSession(t, d, "column-escape", "proj", nil)
+			insertMessages(t, d, Message{
+				SessionID: "column-escape", Role: "assistant",
+				Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
+			})
+			d.SetVectorSearcher(&fakeVectorSearcher{})
+			_, err := d.SearchContent(t.Context(), ContentSearchFilter{
+				Pattern: `"absent") OR (hiddenneedle`, Mode: mode, Sources: []string{"messages"},
+			})
+			var inputErr *SearchInputError
+			require.ErrorAs(t, err, &inputErr)
+			assert.Contains(t, inputErr.Error(), "invalid FTS query")
+
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{
+				Pattern: `"needle" AND content:needle`, Mode: mode, Sources: []string{"messages"},
+			})
+			require.NoError(t, err)
+			require.Len(t, page.Matches, 1)
+			assert.Equal(t, "column-escape", page.Matches[0].SessionID)
+		})
+	}
+}
+
 func TestSearchContentFTSInvalidQuery(t *testing.T) {
 	d := testDB(t)
 	if !d.HasFTS(t.Context()) {

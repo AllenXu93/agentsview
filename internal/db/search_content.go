@@ -855,6 +855,26 @@ func LiteralPrefix(pattern string) string {
 // failed to load), so both modes report the same capability gate.
 var errFTSUnavailable = errors.New("search: full-text search is unavailable")
 
+// prepareContentFTSQuery validates the expression before restricting it to
+// dialogue. Wrapping an unbalanced expression can make it valid and let an OR
+// branch escape the content column filter.
+func (db *DB) prepareContentFTSQuery(ctx context.Context, pattern string) (messageFTSQuery, error) {
+	query, err := db.prepareMessageFTSQuery(ctx, pattern)
+	if err != nil {
+		return messageFTSQuery{}, err
+	}
+	var rowid int64
+	err = db.getReader().QueryRowContext(ctx,
+		"SELECT rowid FROM "+query.table+" WHERE "+query.table+" MATCH ? LIMIT 1",
+		query.match,
+	).Scan(&rowid)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return messageFTSQuery{}, classifyFTSError(err)
+	}
+	query.match = "content : (" + query.match + ")"
+	return query, nil
+}
+
 // searchContentFTS uses messages_fts for fast tokenized matching over
 // message content only. The caller (service/CLI) guarantees Sources is
 // messages-only for fts mode.
@@ -868,7 +888,7 @@ func (db *DB) searchContentFTS(
 	if !db.HasFTS(ctx) {
 		return ContentSearchPage{}, errFTSUnavailable
 	}
-	ftsQuery, err := db.prepareMessageFTSQuery(ctx, f.Pattern)
+	ftsQuery, err := db.prepareContentFTSQuery(ctx, f.Pattern)
 	if err != nil {
 		return ContentSearchPage{}, err
 	}
@@ -890,7 +910,7 @@ func (db *DB) searchContentFTS(
 		ORDER BY rank ASC, m.ordinal ASC, m.id ASC
 		LIMIT ? OFFSET ?`, sysPred, scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
-	args := []any{"content : (" + ftsQuery.match + ")"}
+	args := []any{ftsQuery.match}
 	args = append(args, scopeArgs...)
 	args = append(args, f.Limit+1, f.Cursor)
 	page, err := db.scanContentMatches(ctx, query, args, f.Limit, f.Cursor, func(body string) string {
@@ -1407,7 +1427,7 @@ func (db *DB) hybridFTSLeg(
 func (db *DB) fetchHybridFTSBatch(
 	ctx context.Context, f ContentSearchFilter, k, offset int,
 ) ([]hybridDisplay, error) {
-	ftsQuery, err := db.prepareMessageFTSQuery(ctx, f.Pattern)
+	ftsQuery, err := db.prepareContentFTSQuery(ctx, f.Pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1423,7 +1443,7 @@ func (db *DB) fetchHybridFTSBatch(
 		SystemPrefixSQL("m.content", "m.role"), scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
 
-	args := []any{"content : (" + ftsQuery.match + ")"}
+	args := []any{ftsQuery.match}
 	args = append(args, scopeArgs...)
 	args = append(args, k, offset)
 

@@ -370,15 +370,19 @@ func (db *DB) Search(
 		orderBy = "julianday(session_ended_at) DESC, session_id ASC"
 	}
 
-	// innerWhere is used in three places: the ROW_NUMBER inner subquery,
-	// the outer MATCH re-filter, and the NOT IN subquery for the name branch.
+	// innerWhere is used in the ROW_NUMBER inner subquery and the NOT IN
+	// subquery for the name branch. Classified rows must match the transcript,
+	// since removing thinking blocks can create phrases in dialogue alone.
 	innerWhere := []string{
 		"messages_fts MATCH ?",
+		`(m2.dialogue_text IS NULL OR m2.id IN (
+			SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?
+		))`,
 		"s2.deleted_at IS NULL",
 		"m2.is_system = 0",
 		SystemPrefixSQL("m2.content", "m2.role"),
 	}
-	ftsArgs := []any{f.Query} // args for one copy of innerWhere
+	ftsArgs := []any{f.Query, "rendered : (" + f.Query + ")"} // args for one copy of innerWhere
 
 	nameProjectClause := ""
 	var nameProjectArgs []any
@@ -412,25 +416,9 @@ func (db *DB) Search(
 	}
 	likePattern := "%" + escapeLike(plainQuery) + "%"
 
-	// Build args in the order the SQL placeholders appear.
-	// Position 0 (? AS best_query in the ROW_NUMBER SELECT) is
-	// prepended after this block — see args2 below.
-	//
-	//  pos | SQL clause                                  | value
-	//  ----+---------------------------------------------+------------
-	//   0  | SELECT ? AS best_query (ROW_NUMBER)         | plainQuery  ← prepended in args2
-	//   1  | WHERE messages_fts MATCH ? (ROW_NUMBER)     | ftsArgs[0] (f.Query)
-	//  [1+]| AND s2.project = ? (if project set)         | ftsArgs[1] (f.Project)
-	//   2  | WHERE messages_fts MATCH ? (outer JOIN)     | f.Query
-	//   3  | WHEN COALESCE(display_name,session_name) LIKE ? (CASE) | likePattern
-	//   4  | WHEN s.first_message LIKE ? (CASE)          | likePattern
-	//   5  | WHERE COALESCE(display_name,session_name) LIKE ? (name WHERE) | likePattern
-	//   6  | WHERE s.first_message LIKE ? (name WHERE)   | likePattern
-	//  [7] | AND s.project = ? (name branch, optional)   | f.Project
-	//   8  | WHERE messages_fts MATCH ? (NOT IN)         | ftsArgs[0]
-	//  [8+]| AND s2.project = ? (NOT IN, if set)         | ftsArgs[1]
-	//   9  | LIMIT ? OFFSET ?                            | f.Limit+1, f.Cursor
-	args := make([]any, 0, len(ftsArgs)*2+6+len(nameProjectArgs))
+	// Build args in SQL placeholder order, including both copies of innerWhere.
+	// The SELECT's best_query argument is prepended below in args2.
+	args := make([]any, 0, len(ftsArgs)*2+7+len(nameProjectArgs))
 	args = append(args, ftsArgs...)          // (1) ROW_NUMBER WHERE
 	args = append(args, f.Query)             // (2) outer MATCH re-filter
 	args = append(args, likePattern)         // (3) CASE COALESCE(display_name,session_name) LIKE
@@ -450,7 +438,7 @@ func (db *DB) Search(
 				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at, '') AS session_ended_at,
 				best.best_ordinal AS ordinal,
-				snippet(messages_fts, -1, '<mark>', '</mark>',
+				snippet(messages_fts, CASE WHEN m.dialogue_text IS NULL THEN 0 ELSE 1 END, '<mark>', '</mark>',
 					'...', %d) AS snippet,
 				best.best_rank AS rank,
 				instr(LOWER(m.content), LOWER(best.best_query))

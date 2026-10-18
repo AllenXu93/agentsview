@@ -130,6 +130,53 @@ real prompt'),
 	}, got)
 }
 
+func TestSearchRenderedTranscript(t *testing.T) {
+	d := testDB(t)
+	requireFTS(t, d)
+	insertSession(t, d, "classified", "proj")
+	insertMessages(t, d, Message{
+		SessionID: "classified", Role: "assistant",
+		Content:      "alpha [Thinking] consider options [/Thinking] beta [Bash: go test ./widget] gamma delta",
+		DialogueText: new("alpha beta gamma delta"),
+	})
+	insertSession(t, d, "legacy", "proj")
+	insertMessages(t, d, Message{
+		SessionID: "legacy", Role: "user", Content: "legacy phrase",
+	})
+	for _, tc := range []struct {
+		query   string
+		id      string
+		snippet string
+	}{
+		{`"alpha beta"`, "", ""},
+		{`"go test"`, "classified", "[Bash: <mark>go test</mark> ./widget]"},
+		{`"gamma delta"`, "classified", "<mark>gamma delta</mark>"},
+		{`"legacy phrase"`, "legacy", "<mark>legacy phrase</mark>"},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			page, err := d.Search(t.Context(), SearchFilter{Query: tc.query, Project: "proj"})
+			require.NoError(t, err)
+			if tc.id == "" {
+				assert.Empty(t, page.Results)
+				return
+			}
+			require.Len(t, page.Results, 1)
+			assert.Equal(t, tc.id, page.Results[0].SessionID)
+			assert.Contains(t, page.Results[0].Snippet, tc.snippet)
+			if tc.id == "classified" {
+				assert.Contains(t, page.Results[0].Snippet, "[Thinking]")
+			}
+		})
+	}
+	_, err := d.getWriter().Exec(t.Context(), "UPDATE sessions SET display_name = 'alpha beta' WHERE id = 'classified'")
+	require.NoError(t, err)
+	page, err := d.Search(t.Context(), SearchFilter{Query: `"alpha beta"`, Project: "proj"})
+	require.NoError(t, err)
+	require.Len(t, page.Results, 1)
+	assert.Equal(t, "classified", page.Results[0].SessionID)
+	assert.Equal(t, -1, page.Results[0].Ordinal, "dialogue-only phrases must leave the name match visible")
+}
+
 func TestSearch(t *testing.T) {
 	d := testDB(t)
 	requireFTS(t, d)
