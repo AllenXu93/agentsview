@@ -1442,6 +1442,7 @@
 {#if ui.signalPanelOpen && session}
   <SignalPanel {session} />
   <ToolSequencesPanel
+    errorTelemetryKind="session"
     data={toolSequencesData?.session_id === session.id ? toolSequencesData : null}
     timing={sessionTiming.timing?.session_id === session.id ? sessionTiming.timing : null}
     sessionId={session.id}
