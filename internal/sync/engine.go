@@ -557,6 +557,8 @@ type EngineConfig struct {
 	// stalled. Zero uses the production default. Tests and embedders may use a
 	// shorter interval without changing the daemon-wide policy.
 	ProgressStallAfter time.Duration
+	// RebuildSources prepares configured non-filesystem sources inside the rebuild lock.
+	RebuildSources func(context.Context) (RebuildOptions, error)
 	// ProviderFactories and ProviderMigrationModes select which concrete
 	// providers own discovery and parsing for their agents. Nil uses the
 	// parser package registry/manifest.
@@ -566,7 +568,8 @@ type EngineConfig struct {
 
 // Engine orchestrates session file discovery and sync.
 type Engine struct {
-	sourceSyncErr error
+	sourceSyncErr  error
+	rebuildSources func(context.Context) (RebuildOptions, error)
 
 	db    *db.DB
 	stat  func(string) (os.FileInfo, error)
@@ -1039,6 +1042,7 @@ func NewEngine(ctx context.Context,
 		idPrefix:                cfg.IDPrefix,
 		archiveSessionPolicy:    cfg.ArchiveSessionPolicy,
 		archiveWriteProvenance:  cfg.ArchiveWriteProvenance,
+		rebuildSources:          cfg.RebuildSources,
 		parserExclusionPolicy:   cfg.ParserExclusionPolicy,
 		pathRewriter:            cfg.PathRewriter,
 		storedPathResolver:      cfg.StoredPathResolver,
@@ -3198,6 +3202,14 @@ func (e *Engine) resyncBuildLocked(
 	ctx context.Context, onProgress ProgressFunc, opts RebuildOptions,
 	ops rebuildOperations, restoreActiveWriterOnAbort bool,
 ) (stats SyncStats, retErr error) {
+	if e.rebuildSources != nil {
+		sources, err := e.rebuildSources(ctx)
+		if err != nil {
+			return SyncStats{Aborted: true, Warnings: []string{err.Error()}}, err
+		}
+		opts.Contributors = append(opts.Contributors, sources.Contributors...)
+		opts.UnavailableContributorIDPrefixes = append(opts.UnavailableContributorIDPrefixes, sources.UnavailableContributorIDPrefixes...)
+	}
 	if e.sourceSyncErr != nil && (!errors.Is(e.sourceSyncErr, db.ErrArchiveOnly) || len(opts.Contributors) > 0) {
 		return SyncStats{Aborted: true}, e.sourceSyncErr
 	}
@@ -3250,6 +3262,11 @@ func (e *Engine) resyncBuildLocked(
 		log.Printf("resync: get old file count: %v", err)
 		oldFileSessions = 1
 	}
+	prefixes, err := origDB.AttachedArchiveIDPrefixes(ctx)
+	if err != nil {
+		return SyncStats{Aborted: true}, err
+	}
+	opts.UnavailableContributorIDPrefixes = append(opts.UnavailableContributorIDPrefixes, prefixes...)
 	localOldFileSessions := oldFileSessions
 	rebuildOldFileSessions := oldFileSessions
 	contributorOldFileSessions := make([]int, len(opts.Contributors))
@@ -3262,6 +3279,7 @@ func (e *Engine) resyncBuildLocked(
 			contributorPrefixes, len(opts.Contributors),
 		)
 		for _, contributor := range opts.Contributors {
+			contributorPrefixes = append(contributorPrefixes, contributor.IDPrefixes...)
 			if contributor.Config.IDPrefix != "" {
 				contributorPrefixes = append(
 					contributorPrefixes, contributor.Config.IDPrefix,
@@ -3296,6 +3314,16 @@ func (e *Engine) resyncBuildLocked(
 			localOldFileSessions = 1
 		}
 		for i, contributor := range opts.Contributors {
+			if len(contributor.IDPrefixes) > 0 {
+				for _, prefix := range contributor.IDPrefixes {
+					count, err := origDB.FileBackedSessionCountForSource(ctx, strings.TrimSuffix(prefix, "~"), prefix)
+					if err != nil {
+						return SyncStats{Aborted: true}, err
+					}
+					contributorOldFileSessions[i] += count
+				}
+				continue
+			}
 			count, countErr := protectedFileSessionCount(ctx,
 				origDB, contributor.Config.Machine,
 				contributor.Config.IDPrefix,
@@ -3366,6 +3394,12 @@ func (e *Engine) resyncBuildLocked(
 		e.lastSyncStats = stats
 		e.mu.Unlock()
 		return stats, err
+	}
+	if err := newDB.CopyAttachedArchiveStateFrom(ctx, origPath); err != nil {
+		newDB.Close()
+		removeTempDB(tempPath)
+		restoreSkipCache()
+		return SyncStats{Aborted: true}, err
 	}
 	newDB.SetToolResultImages(e.toolResultImages)
 	newDB.SetAssetsDir(e.db.AssetsDir())
@@ -3565,10 +3599,13 @@ func (e *Engine) resyncBuildLocked(
 			}
 			reportResyncProgress(p)
 		}
-		contributorStats := contributorEngine.syncAllLocked(
-			ctx, contributorProgress, time.Time{}, nil,
-			syncWriteBulk, true, contributor.ForceParse,
-		)
+		var contributorStats SyncStats
+		var contributorErr error
+		if contributor.Run != nil {
+			contributorStats, contributorErr = contributor.Run(ctx, contributorEngine, newDB, contributorProgress)
+		} else {
+			contributorStats = contributorEngine.syncAllLocked(ctx, contributorProgress, time.Time{}, nil, syncWriteBulk, true, contributor.ForceParse)
+		}
 		e.failures.Merge(&contributorEngine.failures)
 		contributorEngine.phaseStats.Log("resync contributor " + contributor.Name)
 		phase := phaseSnapshot(contributor.Name, &contributorEngine.phaseStats)
@@ -3602,9 +3639,9 @@ func (e *Engine) resyncBuildLocked(
 			}
 			return nil
 		}
-		if !contributorStats.ProcessingComplete() || stats.Aborted || ctx.Err() != nil ||
+		if contributorErr != nil || !contributorStats.ProcessingComplete() || stats.Aborted || ctx.Err() != nil ||
 			contributorSafetyAbort {
-			failureHookErr := runAfterFailure()
+			failureHookErr := errors.Join(contributorErr, runAfterFailure())
 			contributorEngine.Close()
 			if contributor.Finished != nil {
 				contributor.Finished(

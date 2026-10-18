@@ -44,7 +44,11 @@ func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig, path 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		active, err := e.db.ArchiveSourceSessionIDs(ctx, source.Source)
+		baseline := e.db
+		if old, ok := e.archiveStore.(*db.DB); ok {
+			baseline = old
+		}
+		active, err := baseline.ArchiveSourceSessionIDs(ctx, source.Source)
 		if err != nil {
 			return err
 		}
@@ -62,11 +66,16 @@ func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig, path 
 			if err != nil {
 				return false, err
 			}
+			if baseline != e.db {
+				if err := baseline.CheckExistingArchiveProvenance(ctx, session.ID, p); err != nil {
+					return false, err
+				}
+			}
 			return true, e.db.CheckArchiveSessionProvenance(ctx, *session, p)
 		}
 		cfg.ParserExclusionPolicy = func(ctx context.Context, ids []string) error {
 			for _, id := range ids {
-				existing, err := e.db.GetSessionFull(ctx, id)
+				existing, err := baseline.GetSessionFull(ctx, id)
 				if err != nil {
 					return err
 				}
@@ -87,6 +96,7 @@ func (e *Engine) SyncAttachedSource(ctx context.Context, cfg EngineConfig, path 
 			return err
 		}
 		stats = child.LastSyncStats()
+		stats.nonContainerDiscovered = stats.filesDiscovered
 		if stats.TotalSessions == 0 || !stats.ProcessingComplete() {
 			return errors.New("archive source parse incomplete")
 		}

@@ -11,7 +11,6 @@ import (
 // ingestion route even if its namespaced ID happens to match.
 func checkArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) error {
 	p := write.ArchiveProvenance
-	var stored ArchiveSessionProvenance
 	if p == nil {
 		var owned bool
 		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_session_provenance WHERE session_id=?)`, write.Session.ID).Scan(&owned)
@@ -42,15 +41,20 @@ func checkArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write Sess
 	if !member {
 		return fmt.Errorf("%w: source is not registered in this attachment", ErrArchiveSourceConflict)
 	}
+	return checkExistingArchiveProvenanceTx(ctx, tx, write.Session.ID, *p)
+}
+
+func checkExistingArchiveProvenanceTx(ctx context.Context, tx *sql.Tx, sessionID string, provenance ArchiveSessionProvenance) error {
+	var stored ArchiveSessionProvenance
 	var present bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?)`, write.Session.ID).Scan(&present); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?)`, sessionID).Scan(&present); err != nil {
 		return err
 	}
 	if !present {
 		return nil
 	}
 	s := &stored.Source
-	err := tx.QueryRowContext(ctx, `SELECT archive_id,device_id,root_id,source_key,manifest_id,native_session_id FROM archive_session_provenance WHERE session_id=?`, write.Session.ID).
+	err := tx.QueryRowContext(ctx, `SELECT archive_id,device_id,root_id,source_key,manifest_id,native_session_id FROM archive_session_provenance WHERE session_id=?`, sessionID).
 		Scan(&s.ArchiveID, &s.DeviceID, &s.RootID, &s.SourceKey, &stored.ManifestID, &stored.NativeSessionID)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("%w: session already belongs to another route", ErrArchiveSourceConflict)
@@ -58,7 +62,7 @@ func checkArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write Sess
 	if err != nil {
 		return err
 	}
-	if stored.Source != p.Source || stored.ManifestID != p.ManifestID || stored.NativeSessionID != p.NativeSessionID {
+	if stored.Source != provenance.Source || stored.ManifestID != provenance.ManifestID || stored.NativeSessionID != provenance.NativeSessionID {
 		return fmt.Errorf("%w: session already belongs to another source", ErrArchiveSourceConflict)
 	}
 	return nil
@@ -103,4 +107,15 @@ func (d *DB) ArchiveSourceSessionIDs(ctx context.Context, source ArchiveSourceId
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// CheckExistingArchiveProvenance compares the original database during a rebuild;
+// the replacement database validates the selected snapshot membership separately.
+func (d *DB) CheckExistingArchiveProvenance(ctx context.Context, sessionID string, provenance ArchiveSessionProvenance) error {
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	return checkExistingArchiveProvenanceTx(ctx, tx, sessionID, provenance)
 }

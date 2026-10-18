@@ -918,7 +918,10 @@ func coordinateLocalSync(
 
 func localSyncEngineConfig(appCfg config.Config) sync.EngineConfig {
 	return sync.EngineConfig{
-		AgentDirs:               appCfg.AgentDirs,
+		AgentDirs: appCfg.AgentDirs,
+		RebuildSources: func(ctx context.Context) (sync.RebuildOptions, error) {
+			return archivesource.RebuildContributors(ctx, appCfg)
+		},
 		SourceMachines:          appCfg.SourceMachines,
 		ProviderMetadata:        appCfg.ProviderMetadata,
 		DisabledAgents:          appCfg.DisabledAgents,
