@@ -447,6 +447,8 @@ type EngineConfig struct {
 	// before any content is published. False preserves source deletion policy.
 	// Used only by the local archive's scratch-database reparse.
 	ArchiveSessionPolicy func(context.Context, *db.Session, string) (bool, error)
+	// ArchiveWriteProvenance commits source ownership with normalized content.
+	ArchiveWriteProvenance func(*db.Session, string) (db.ArchiveSessionProvenance, error)
 	// ParserExclusionPolicy validates exclusions before scratch rows are deleted.
 	ParserExclusionPolicy func(context.Context, []string) error
 
@@ -658,6 +660,7 @@ type Engine struct {
 	disableProjectDiscovery bool
 	stableSourceSnapshots   bool
 	archiveSessionPolicy    func(context.Context, *db.Session, string) (bool, error)
+	archiveWriteProvenance  func(*db.Session, string) (db.ArchiveSessionProvenance, error)
 	parserExclusionPolicy   func(context.Context, []string) error
 	idPrefix                string
 	pathRewriter            func(string) string
@@ -1035,6 +1038,7 @@ func NewEngine(ctx context.Context,
 		stableSourceSnapshots:   cfg.StableSourceSnapshots,
 		idPrefix:                cfg.IDPrefix,
 		archiveSessionPolicy:    cfg.ArchiveSessionPolicy,
+		archiveWriteProvenance:  cfg.ArchiveWriteProvenance,
 		parserExclusionPolicy:   cfg.ParserExclusionPolicy,
 		pathRewriter:            cfg.PathRewriter,
 		storedPathResolver:      cfg.StoredPathResolver,
@@ -18439,7 +18443,7 @@ func (e *Engine) writeBatchWithOutcomeContext(
 			// The staged sink owns this parse's tool-result rows, and only the
 			// staged write publishes them, so it runs even when signal
 			// recomputation is disabled.
-			werr = e.writeStagedFullParse(ctx, s, msgs, pw)
+			werr = e.writeStagedFullParse(ctx, s, msgs, pw, nil)
 		} else if replaceMessages && !e.disableSignalRecompute {
 			update, werr = e.attachFullSignalState(s, msgs, update, nil)
 			if werr != nil {
@@ -19040,6 +19044,7 @@ func stagedToolCallPositions(
 // commits with the content.
 func (e *Engine) writeStagedFullParse(
 	ctx context.Context, s db.Session, msgs []db.Message, pw pendingWrite,
+	write *db.SessionBatchWrite,
 ) error {
 	if pw.staged != nil {
 		if err := pw.staged.PublishToolResultImages(ctx); err != nil {
@@ -19074,11 +19079,15 @@ func (e *Engine) writeStagedFullParse(
 		log.Printf("checkpoint build %s: %v", pw.sess.File.Path, cpErr)
 		cp, blobs = nil, nil
 	}
-	if err := e.db.ReplaceSessionContentStagedWithCheckpoint(
-		ctx, s.ID, msgs, pw.staged,
-		e.blockedResultCategories, closure, cp, blobs,
-	); err != nil {
-		return err
+	var writeErr error
+	if write == nil {
+		writeErr = e.db.ReplaceSessionContentStagedWithCheckpoint(ctx, s.ID, msgs, pw.staged, e.blockedResultCategories, closure, cp, blobs)
+	} else {
+		write.Checkpoint, write.CheckpointBlobs = cp, blobs
+		writeErr = e.db.WriteSessionBatchStaged(ctx, *write, pw.staged, e.blockedResultCategories, closure)
+	}
+	if writeErr != nil {
+		return writeErr
 	}
 	e.anomalies.recordSanitize(pw.staged.ValidationStats())
 
@@ -19127,6 +19136,28 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 			continue
 		}
 		s, msgs := prepared.Session, prepared.Messages
+		provenance, err := e.sessionArchiveProvenance(&s, pw.sess.ID)
+		if err != nil {
+			outcome.err = err
+			outcome.failedSessions++
+			return outcome
+		}
+		if pw.staged != nil && provenance != nil {
+			err := e.writeAttachedStaged(ctx, prepared, pw, provenance)
+			if err != nil {
+				if isIntentionalSessionSkip(err) {
+					outcome.resolved[pendingIndex] = true
+					continue
+				}
+				outcome.err = errors.Join(outcome.err, err)
+				outcome.failedSessions++
+				continue
+			}
+			outcome.written[pendingIndex], outcome.resolved[pendingIndex] = true, true
+			outcome.writtenSessions++
+			outcome.writtenMessages += len(msgs)
+			continue
+		}
 		if pw.staged != nil {
 			// Staged streaming results bypass the bulk batch: their
 			// tool-result rows live in the staging scratch database and
@@ -19154,7 +19185,7 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 				continue
 			}
 			tWrite := time.Now()
-			err = e.writeStagedFullParse(ctx, s, msgs, pw)
+			err = e.writeStagedFullParse(ctx, s, msgs, pw, nil)
 			e.phaseStats.WriteNanos.Add(int64(time.Since(tWrite)))
 			if err != nil {
 				log.Printf(
@@ -19247,11 +19278,12 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 			return outcome
 		}
 		writes = append(writes, db.SessionBatchWrite{
-			Session:          s,
-			Messages:         msgs,
-			UsageEvents:      prepared.UsageEvents,
-			PlanUsage:        prepared.PlanUsage,
-			ToolResultImages: &e.toolResultImages,
+			ArchiveProvenance: provenance,
+			Session:           s,
+			Messages:          msgs,
+			UsageEvents:       prepared.UsageEvents,
+			PlanUsage:         prepared.PlanUsage,
+			ToolResultImages:  &e.toolResultImages,
 			IdentityObservation: identityObservationOrZero(
 				identityObservation, hasIdentityObservation,
 			),
@@ -20219,7 +20251,7 @@ func (e *Engine) writeSessionFullWithResolver(
 	if pw.staged != nil {
 		// The staged sink owns this parse's tool-result rows, and only the
 		// staged write publishes them.
-		if err := e.writeStagedFullParse(ctx, s, msgs, pw); err != nil {
+		if err := e.writeStagedFullParse(ctx, s, msgs, pw, nil); err != nil {
 			log.Printf(
 				"write staged session %s: %v",
 				s.ID, err,

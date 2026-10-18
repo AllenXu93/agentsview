@@ -1,0 +1,75 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
+// Check before any session update; a row without provenance belongs to another
+// ingestion route even if its namespaced ID happens to match.
+func checkArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) error {
+	p := write.ArchiveProvenance
+	var stored ArchiveSessionProvenance
+	if p == nil {
+		var owned bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_session_provenance WHERE session_id=?)`, write.Session.ID).Scan(&owned)
+		if err != nil {
+			return err
+		}
+		if owned {
+			return fmt.Errorf("%w: session belongs to an attached archive", ErrArchiveSourceConflict)
+		}
+		return nil
+	}
+	if err := archiveReceiverTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := validateArchiveDeviceTx(ctx, tx, p.Source.DeviceID); err != nil {
+		return err
+	}
+	if p.NativeSessionID == "" || write.Session.ID != p.Source.DeviceID+"~"+p.NativeSessionID || write.Session.Machine != p.Source.DeviceID {
+		return fmt.Errorf("%w: session does not match its source identity", ErrArchiveSourceConflict)
+	}
+	if err := checkArchiveSourceBindingTx(ctx, tx, p.ArchiveSourceProvenance); err != nil {
+		return err
+	}
+	var member bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_attachment_sources WHERE `+archiveMembershipWhere+`)`, archiveMembershipArgs(p.ArchiveSourceProvenance)...).Scan(&member); err != nil {
+		return err
+	}
+	if !member {
+		return fmt.Errorf("%w: source is not registered in this attachment", ErrArchiveSourceConflict)
+	}
+	var present bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?)`, write.Session.ID).Scan(&present); err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	s := &stored.Source
+	err := tx.QueryRowContext(ctx, `SELECT archive_id,device_id,root_id,source_key,manifest_id,native_session_id FROM archive_session_provenance WHERE session_id=?`, write.Session.ID).
+		Scan(&s.ArchiveID, &s.DeviceID, &s.RootID, &s.SourceKey, &stored.ManifestID, &stored.NativeSessionID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("%w: session already belongs to another route", ErrArchiveSourceConflict)
+	}
+	if err != nil {
+		return err
+	}
+	if stored.Source != p.Source || stored.ManifestID != p.ManifestID || stored.NativeSessionID != p.NativeSessionID {
+		return fmt.Errorf("%w: session already belongs to another source", ErrArchiveSourceConflict)
+	}
+	return nil
+}
+
+func recordArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) error {
+	p := write.ArchiveProvenance
+	if p == nil {
+		return nil
+	}
+	s := p.Source
+	_, err := tx.ExecContext(ctx, `INSERT INTO archive_session_provenance(session_id,archive_id,device_id,root_id,source_key,manifest_id,native_session_id)
+ VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING`, write.Session.ID, s.ArchiveID, s.DeviceID, s.RootID, s.SourceKey, p.ManifestID, p.NativeSessionID)
+	return err
+}

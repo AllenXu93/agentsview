@@ -15,9 +15,10 @@ import (
 // complete message set to store, the computed signal values,
 // and the data version to stamp after messages are written.
 type SessionBatchWrite struct {
-	Session     Session
-	Messages    []Message
-	UsageEvents []UsageEvent
+	ArchiveProvenance *ArchiveSessionProvenance
+	Session           Session
+	Messages          []Message
+	UsageEvents       []UsageEvent
 	// PlanUsage replaces the session's plan usage row; nil removes it.
 	PlanUsage           *SessionPlanUsage
 	IdentityObservation export.ProjectIdentityObservation
@@ -472,34 +473,7 @@ func writeOneSessionBatchTx(
 	usageOnly bool,
 	pinSnapshot *[]savedPin,
 ) (int, error) {
-	if write.IdentityObservation.Project != "" {
-		normalized, err := normalizeProjectIdentityObservation(
-			write.IdentityObservation,
-		)
-		if err != nil {
-			return 0, err
-		}
-		if normalized.SessionID == "" {
-			normalized.SessionID = write.Session.ID
-		}
-		if normalized.SessionID != write.Session.ID {
-			return 0, fmt.Errorf(
-				"identity observation session id %q does not match session id %q",
-				normalized.SessionID, write.Session.ID,
-			)
-		}
-		write.IdentityObservation = normalized
-	}
-
-	upsertResult, err := upsertSessionExec(
-		ctx,
-		tx.ExecContext,
-		func(ctx context.Context, query string, args ...any) rowScanner {
-			return tx.QueryRowContext(ctx, query, args...)
-		},
-		write.Session,
-		true,
-	)
+	upsertResult, err := upsertSessionBatchTx(ctx, tx, write)
 	if err != nil {
 		return 0, err
 	}
@@ -533,43 +507,7 @@ func writeOneSessionBatchTx(
 		)
 	}
 
-	if write.IdentityObservation.Project != "" {
-		var err error
-		if write.IdentitySnapshotProject == nil {
-			err = upsertProjectIdentityObservationTxContext(
-				ctx, tx, write.IdentityObservation,
-			)
-		} else {
-			err = upsertProjectIdentityObservationWithSnapshotProjectTxContext(
-				ctx, tx, write.IdentityObservation,
-				*write.IdentitySnapshotProject,
-				upsertResult.inserted, true,
-			)
-		}
-		if err != nil {
-			return 0, err
-		}
-	}
-	if !upsertResult.inserted &&
-		upsertResult.previousProject != upsertResult.currentProject {
-		if err := reconcileSessionProjectIdentityAggregatesTx(
-			ctx, tx, write.Session.ID,
-			[]string{
-				upsertResult.previousProject,
-				upsertResult.currentProject,
-			},
-		); err != nil {
-			return 0, err
-		}
-	}
-	if err := replaceSessionUsageEventsTx(
-		queries, write.Session.ID, write.UsageEvents, false,
-	); err != nil {
-		return 0, err
-	}
-	if err := replaceSessionPlanUsageTx(
-		queries, write.Session.ID, write.PlanUsage, false,
-	); err != nil {
+	if err := writeSessionBatchMetadataTx(ctx, tx, queries, write, upsertResult); err != nil {
 		return 0, err
 	}
 
@@ -889,5 +827,90 @@ func messagesAfterOrdinal(msgs []Message, maxOrd int) []Message {
 			return msgs[i:]
 		}
 	}
+	return nil
+}
+
+func upsertSessionBatchTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) (sessionUpsertResult, error) {
+	if err := checkArchiveSessionProvenanceTx(ctx, tx, write); err != nil {
+		return sessionUpsertResult{}, err
+	}
+
+	upsertResult, err := upsertSessionExec(
+		ctx,
+		tx.ExecContext,
+		func(ctx context.Context, query string, args ...any) rowScanner {
+			return tx.QueryRowContext(ctx, query, args...)
+		},
+		write.Session,
+		true,
+	)
+	if err != nil {
+		return sessionUpsertResult{}, err
+	}
+	if err := recordArchiveSessionProvenanceTx(ctx, tx, write); err != nil {
+		return sessionUpsertResult{}, err
+	}
+	return upsertResult, nil
+}
+
+func writeSessionBatchMetadataTx(ctx context.Context, tx *sql.Tx, queries transactionQueries, write SessionBatchWrite, upsertResult sessionUpsertResult) error {
+	if write.IdentityObservation.Project != "" {
+		normalized, err := normalizeProjectIdentityObservation(
+			write.IdentityObservation,
+		)
+		if err != nil {
+			return err
+		}
+		if normalized.SessionID == "" {
+			normalized.SessionID = write.Session.ID
+		}
+		if normalized.SessionID != write.Session.ID {
+			return fmt.Errorf(
+				"identity observation session id %q does not match session id %q",
+				normalized.SessionID, write.Session.ID,
+			)
+		}
+		write.IdentityObservation = normalized
+	}
+	if write.IdentityObservation.Project != "" {
+		var err error
+		if write.IdentitySnapshotProject == nil {
+			err = upsertProjectIdentityObservationTxContext(
+				ctx, tx, write.IdentityObservation,
+			)
+		} else {
+			err = upsertProjectIdentityObservationWithSnapshotProjectTxContext(
+				ctx, tx, write.IdentityObservation,
+				*write.IdentitySnapshotProject,
+				upsertResult.inserted, true,
+			)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if !upsertResult.inserted &&
+		upsertResult.previousProject != upsertResult.currentProject {
+		if err := reconcileSessionProjectIdentityAggregatesTx(
+			ctx, tx, write.Session.ID,
+			[]string{
+				upsertResult.previousProject,
+				upsertResult.currentProject,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	if err := replaceSessionUsageEventsTx(
+		queries, write.Session.ID, write.UsageEvents, false,
+	); err != nil {
+		return err
+	}
+	if err := replaceSessionPlanUsageTx(
+		queries, write.Session.ID, write.PlanUsage, false,
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
