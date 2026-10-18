@@ -829,8 +829,8 @@ func fillEmptyToolResultsTx(
 }
 
 // extendTruncatedTextTx writes candidate text into stored messages at
-// ordinals up to maxOrd whose stored text the candidate extends. It also updates
-// the content length by row ID.
+// ordinals up to maxOrd whose stored text the candidate extends. It updates the
+// rendered content and length by row ID, preserving the stored dialogue projection.
 func extendTruncatedTextTx(
 	tx transactionQueries, sessionID string, msgs []Message, maxOrd int,
 ) (int, error) {

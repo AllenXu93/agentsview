@@ -9,6 +9,8 @@ The latest release is
 
 ## Unreleased
 
+- `--fts`, terms, and hybrid message search no longer match command, path, and reasoning text.
+
 - SQLite message search matches dialogue and keeps tool renderings and reasoning
   out of snippets for
   [supported providers](https://github.com/kenn-io/agentsview/blob/main/docs/session-api.md#agentsview-session-search).

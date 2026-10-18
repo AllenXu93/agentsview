@@ -70,6 +70,82 @@ func TestDialogueFTSUpgradePreservesMessages(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDialogueFTSColumnRenameUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive.db")
+	d := testDBAtPath(t, path, "previous corpus")
+	seedSearchSession(t, d, "upgrade", "proj", nil)
+	insertMessages(t, d, Message{
+		SessionID: "upgrade", Role: "assistant",
+		Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
+	})
+	require.NoError(t, d.DropFTS(t.Context()))
+	_, err := d.getWriter().Exec(t.Context(), `
+ DROP VIEW message_search_content;
+ CREATE VIEW message_search_content AS
+ SELECT id, session_id, COALESCE(dialogue_text, content) AS dialogue,
+   CASE WHEN dialogue_text IS NULL THEN NULL ELSE content END AS content FROM messages;
+ CREATE VIRTUAL TABLE messages_fts USING fts5(dialogue, content,
+   content='message_search_content', content_rowid='id', tokenize='porter unicode61');
+ INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+ INSERT INTO stats(key, value) VALUES('message_search_corpus_version', '1');`)
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+	d, err = OpenWithProgress(t.Context(), path, config.ArchiveContentFull, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, d.Close()) })
+	page, err := d.SearchContent(t.Context(), ContentSearchFilter{
+		Pattern: `"needle" AND content:needle`, Mode: "fts", Sources: []string{"messages"},
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Matches, 1)
+	assert.Equal(t, "needle", page.Matches[0].Snippet)
+	stored, err := d.GetAllMessages(t.Context(), "upgrade")
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Equal(t, "needle [Thinking] hiddenneedle", stored[0].Content)
+	assert.Equal(t, new("needle"), stored[0].DialogueText)
+	ordinary, err := d.Search(t.Context(), SearchFilter{Query: "hiddenneedle"})
+	require.NoError(t, err)
+	assert.Len(t, ordinary.Results, 1)
+}
+
+func TestDialogueFTSCorpusVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name, marker string
+		rebuild      bool
+	}{
+		{"older", "0", true},
+		{"current", searchCorpusVersion, false},
+		{"newer", "10", false},
+		{"invalid", "invalid", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			seedSearchSession(t, d, "version", "proj", nil)
+			insertMessages(t, d, Message{SessionID: "version", Role: "user", Content: "needle"})
+			_, err := d.getWriter().Exec(t.Context(), "UPDATE stats SET value = ? WHERE key = ?", tc.marker, searchCorpusVersionStatsKey)
+			require.NoError(t, err)
+			var details []string
+			err = refreshDialogueFTS(t.Context(), d.getWriter(), func(progress OpenProgress) {
+				details = append(details, progress.Detail)
+			})
+			require.NoError(t, err)
+			var marker string
+			require.NoError(t, d.getReader().QueryRow(t.Context(), "SELECT value FROM stats WHERE key = ?", searchCorpusVersionStatsKey).Scan(&marker))
+			if tc.rebuild {
+				assert.Contains(t, details, "Updating full-text search")
+				assert.Equal(t, searchCorpusVersion, marker)
+			} else {
+				assert.Empty(t, details)
+				assert.Equal(t, tc.marker, marker)
+			}
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{Pattern: "needle", Mode: "fts", Sources: []string{"messages"}})
+			require.NoError(t, err)
+			assert.Len(t, page.Matches, 1)
+		})
+	}
+}
+
 func TestDialogueProjectionSeparatesMessagesAndThinking(t *testing.T) {
 	for _, classified := range []bool{true, false} {
 		t.Run(strconv.FormatBool(classified), func(t *testing.T) {

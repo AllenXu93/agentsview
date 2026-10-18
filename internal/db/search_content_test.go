@@ -359,6 +359,30 @@ func TestSearchContentFTS(t *testing.T) {
 	assert.Equal(t, "message", got.Matches[0].Location, "fts match Location")
 }
 
+func TestSearchContentFTSContentColumnFilter(t *testing.T) {
+	d := testDB(t)
+	seedSearchSession(t, d, "column-filter", "proj", nil)
+	insertMessages(t, d, Message{
+		SessionID: "column-filter", Role: "assistant",
+		Content: "needle [Thinking] hiddenneedle", DialogueText: new("needle"),
+	})
+	for _, tc := range []struct {
+		pattern string
+		want    int
+	}{
+		{`"needle" AND content:needle`, 1},
+		{`content:hiddenneedle`, 0},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			page, err := d.SearchContent(t.Context(), ContentSearchFilter{
+				Pattern: tc.pattern, Mode: "fts", Sources: []string{"messages"},
+			})
+			require.NoError(t, err)
+			assert.Len(t, page.Matches, tc.want)
+		})
+	}
+}
+
 func TestSearchContentTermsAcrossExchange(t *testing.T) {
 	d := testDB(t)
 	insertSession(t, d, "terms-main", "proj", func(s *Session) {

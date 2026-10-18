@@ -276,8 +276,9 @@ func parseOpenHandsMessageEvent(
 	}
 
 	content, thinking, dialogue, blockThinking, _, toolCalls, toolResults := ExtractTextContent(context.Background(), llmMessage.Get("content"))
+	eventThinking := openHandsThinkingText(ev)
 	content, hasThinking := openHandsAppendThinking(
-		content, ev,
+		content, eventThinking,
 	)
 	content = strings.TrimSpace(content)
 	if content == "" &&
@@ -291,7 +292,7 @@ func parseOpenHandsMessageEvent(
 		Role:          role,
 		Content:       content,
 		DialogueText:  new(strings.TrimSpace(dialogue)),
-		ThinkingText:  joinNonEmpty(thinking, openHandsThinkingText(ev)),
+		ThinkingText:  joinNonEmpty(thinking, eventThinking),
 		Timestamp:     ts,
 		HasThinking:   hasThinking || blockThinking,
 		HasToolUse:    len(toolCalls) > 0,
@@ -332,8 +333,9 @@ func parseOpenHandsActionEvent(
 		toolName, action, ev.Get("summary").Str,
 	)
 	content = joinOpenHandsParts(content, rendering)
+	eventThinking := openHandsThinkingText(ev)
 	content, hasThinking := openHandsAppendThinking(
-		content, ev,
+		content, eventThinking,
 	)
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -345,7 +347,7 @@ func parseOpenHandsActionEvent(
 		Role:          RoleAssistant,
 		Content:       content,
 		DialogueText:  new(strings.TrimSpace(dialogue)),
-		ThinkingText:  joinNonEmpty(thinking, openHandsThinkingText(ev)),
+		ThinkingText:  joinNonEmpty(thinking, eventThinking),
 		Timestamp:     ts,
 		HasThinking:   hasThinking || blockThinking,
 		HasToolUse:    true,
@@ -434,9 +436,8 @@ func openHandsBaseStateCwd(base gjson.Result) string {
 }
 
 func openHandsAppendThinking(
-	content string, ev gjson.Result,
+	content, thinking string,
 ) (string, bool) {
-	thinking := openHandsThinkingText(ev)
 	if thinking == "" {
 		return content, false
 	}

@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // The same corpus version invalidates ordinary FTS and the CJK fingerprint.
 const (
-	searchCorpusVersion         = "1"
+	searchCorpusVersion         = "2"
 	searchCorpusVersionStatsKey = "message_search_corpus_version"
 )
 
@@ -17,8 +18,12 @@ const (
 func refreshDialogueFTS(ctx context.Context, w *writerHandle, progress OpenProgressFunc) error {
 	var version string
 	err := w.QueryRowContext(ctx, "SELECT CAST(value AS TEXT) FROM stats WHERE key = ?", searchCorpusVersionStatsKey).Scan(&version)
-	if err == nil && version == searchCorpusVersion {
-		return nil
+	if err == nil {
+		stored, parseErr := strconv.Atoi(version)
+		current, _ := strconv.Atoi(searchCorpusVersion)
+		if parseErr == nil && stored >= current {
+			return nil
+		}
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("reading search corpus version: %w", err)
@@ -32,10 +37,6 @@ func rebuildMessageFTS(ctx context.Context, w *writerHandle, progress OpenProgre
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Verify the module before replacing an existing derived index.
-	if _, err := tx.ExecContext(ctx, "CREATE VIRTUAL TABLE temp.fts_module_probe USING fts5(content); DROP TABLE temp.fts_module_probe"); err != nil {
-		return fmt.Errorf("checking FTS5 availability: %w", err)
-	}
 	progress.report("Updating full-text search")
 	for _, query := range []string{
 		"DROP TRIGGER IF EXISTS messages_ai", "DROP TRIGGER IF EXISTS messages_ad", "DROP TRIGGER IF EXISTS messages_au",

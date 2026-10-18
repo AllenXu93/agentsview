@@ -546,7 +546,6 @@ func (db *DB) searchContentRegex(
 	}
 
 	lit := LiteralPrefix(f.Pattern)
-
 	rows, err := db.regexCandidateRows(ctx, f, lit)
 	if err != nil {
 		return ContentSearchPage{}, err
@@ -891,7 +890,7 @@ func (db *DB) searchContentFTS(
 		ORDER BY rank ASC, m.ordinal ASC, m.id ASC
 		LIMIT ? OFFSET ?`, sysPred, scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
-	args := []any{"dialogue : (" + ftsQuery.match + ")"}
+	args := []any{"content : (" + ftsQuery.match + ")"}
 	args = append(args, scopeArgs...)
 	args = append(args, f.Limit+1, f.Cursor)
 	page, err := db.scanContentMatches(ctx, query, args, f.Limit, f.Cursor, func(body string) string {
@@ -1424,7 +1423,7 @@ func (db *DB) fetchHybridFTSBatch(
 		SystemPrefixSQL("m.content", "m.role"), scope)
 	query = strings.ReplaceAll(query, "messages_fts", ftsQuery.table)
 
-	args := []any{"dialogue : (" + ftsQuery.match + ")"}
+	args := []any{"content : (" + ftsQuery.match + ")"}
 	args = append(args, scopeArgs...)
 	args = append(args, k, offset)
 

@@ -2152,6 +2152,10 @@ schemas keep their existing ordering behavior.
 
 ## OpenHands (`openhands`)
 
+- **Action event shape:** Reverified 2026-10-17 against the SDK's
+  [ActionEvent](https://github.com/OpenHands/software-agent-sdk/blob/main/openhands-sdk/openhands/sdk/event/llm_convertible/action.py).
+  `thought` contains text blocks; `reasoning_content` and `thinking_blocks`
+  carry reasoning, and `action` and `tool_call` carry the tool invocation.
 - **Dialogue projection:** Reverified 2026-10-17 against parser fixtures.
   Structured text blocks retain literal markers separately from reasoning and
   tool calls. Unpaired observations retain their stored-content

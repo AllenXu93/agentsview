@@ -73,8 +73,8 @@ func TestStructuredParsersRetainDialogueProjection(t *testing.T) {
 			case AgentOpenHands:
 				var ok bool
 				if tc.name == "openhands-action" {
-					message, ok, _ = parseOpenHandsActionEvent(gjson.Parse(`{"thought":`+blocks+`,"thinking_blocks":[{"type":"thinking","thinking":"actionreasoningneedle"}],"tool_name":"terminal","action":{"command":"tail -40 /tmp/server.log","kind":"TerminalAction"}}`), 0, "", time.Time{})
-					wantThinking += "\nactionreasoningneedle"
+					message, ok, _ = parseOpenHandsActionEvent(gjson.Parse(`{"thought":[{"type":"text","text":"Literal [Read: quokka.txt] [Thinking] quotation"}],"thinking_blocks":[{"type":"thinking","thinking":"reasoningneedle"},{"type":"thinking","thinking":"actionreasoningneedle"}],"tool_name":"terminal","tool_call_id":"call_a","tool_call":{"id":"call_a","name":"terminal","arguments":"{\"command\":\"tail -40 /tmp/server.log\"}"},"action":{"command":"tail -40 /tmp/server.log","kind":"TerminalAction"}}`), 0, "", time.Time{})
+					wantThinking += "\n\nactionreasoningneedle"
 				} else {
 					message, ok, _ = parseOpenHandsMessageEvent(gjson.Parse(`{"llm_message":{"role":"assistant","content":`+blocks+`}}`), 0, "", time.Time{})
 				}

@@ -2345,8 +2345,8 @@ func deleteSessionMessageRowsTx(
 		// Bulk-delete the FTS entries first so the later row delete
 		// does not re-tokenize large message blobs through delete triggers.
 		if _, err := tx.Exec(
-			`INSERT INTO `+table.name+`(`+table.name+`, rowid, content, dialogue)
-			 SELECT 'delete', id, content, dialogue FROM message_search_content WHERE session_id = ?`,
+			`INSERT INTO `+table.name+`(`+table.name+`, rowid, rendered, content)
+			 SELECT 'delete', id, rendered, content FROM message_search_content WHERE session_id = ?`,
 			sessionID,
 		); err != nil {
 			return fmt.Errorf("bulk-deleting %s entries: %w", table.name, err)
