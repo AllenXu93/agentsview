@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/export"
 )
 
 func archiveProvenanceWrite(t *testing.T, database *DB) SessionBatchWrite {
@@ -142,6 +143,37 @@ func TestArchiveProvenanceNewWriteRollsBack(t *testing.T) {
 			var count int
 			require.NoError(t, database.getReader().QueryRow(t.Context(), `SELECT count(*) FROM archive_session_provenance`).Scan(&count))
 			assert.Zero(t, count)
+		})
+	}
+}
+
+func TestArchiveProvenanceRefusesOrdinaryWriters(t *testing.T) {
+	for _, mode := range []string{"upsert", "project identity", "incremental"} {
+		t.Run(mode, func(t *testing.T) {
+			database := testDB(t)
+			write := archiveProvenanceWrite(t, database)
+			_, err := database.WriteSessionBatchAtomic(t.Context(), []SessionBatchWrite{write})
+			require.NoError(t, err)
+			before, err := database.GetSessionFull(t.Context(), write.Session.ID)
+			require.NoError(t, err)
+			messages, err := database.GetAllMessages(t.Context(), write.Session.ID)
+			require.NoError(t, err)
+			write.Session.Project = "replacement"
+			switch mode {
+			case "upsert":
+				err = database.UpsertSession(t.Context(), write.Session)
+			case "project identity":
+				err = database.UpsertSessionWithProjectIdentity(t.Context(), write.Session, export.ProjectIdentityObservation{SessionID: write.Session.ID, Project: "replacement", Machine: write.Session.Machine}, "replacement")
+			case "incremental":
+				_, err = database.WriteSessionIncremental(t.Context(), write.Session.ID, []Message{{SessionID: write.Session.ID, Ordinal: 1, Role: "user", Content: "another route"}}, IncrementalSessionUpdate{MsgCount: 2, NextOrdinal: 2})
+			}
+			require.ErrorIs(t, err, ErrArchiveSourceConflict)
+			after, err := database.GetSessionFull(t.Context(), write.Session.ID)
+			require.NoError(t, err)
+			assert.Equal(t, before, after)
+			afterMessages, err := database.GetAllMessages(t.Context(), write.Session.ID)
+			require.NoError(t, err)
+			assert.Equal(t, messages, afterMessages)
 		})
 	}
 }

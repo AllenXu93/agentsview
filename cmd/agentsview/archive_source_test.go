@@ -13,6 +13,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/rawarchive"
+	"go.kenn.io/agentsview/internal/service"
 	"go.kenn.io/agentsview/internal/sync"
 	"go.kenn.io/agentsview/internal/testjsonl"
 )
@@ -76,8 +77,9 @@ func TestArchiveSourceDirectSyncAndWorkerRebuild(t *testing.T) {
 	require.NoError(t, err)
 	_, err = database.EnsureInstallationIdentity(t.Context(), cfg.InstallationID)
 	require.NoError(t, err)
-	_, _, err = runLocalSyncResult(t.Context(), cfg, database, false)
+	_, stats, err := runLocalSyncResult(t.Context(), cfg, database, false)
 	require.NoError(t, err)
+	assert.Equal(t, 4, stats.Synced, "the command result includes attached history")
 	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
 	before, err := database.GetAllMessages(t.Context(), id)
 	require.NoError(t, err)
@@ -98,4 +100,28 @@ func TestArchiveSourceDirectSyncAndWorkerRebuild(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, identity)
 	assert.Equal(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", identity.Machine)
+}
+
+func TestArchiveSourceSessionRefreshReportsRequiredCommand(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	cfg := testConfigWithClaudeFixture(t)
+	cfg.ArchiveSources = []config.ArchiveSource{source}
+	database, err := db.OpenIsolatedContext(t.Context(), cfg.DBPath)
+	require.NoError(t, err)
+	defer database.Close()
+	_, _, err = runLocalSyncResult(t.Context(), cfg, database, false)
+	require.NoError(t, err)
+	engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+	defer engine.Close()
+	backend := service.NewDirectBackend(database, engine)
+	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+	before, err := backend.Get(t.Context(), id)
+	require.NoError(t, err)
+	for _, subagents := range []bool{false, true} {
+		_, err := backend.Sync(t.Context(), service.SyncInput{ID: id, Subagents: subagents})
+		require.ErrorContains(t, err, "sync --full")
+	}
+	after, err := backend.Get(t.Context(), id)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
 }

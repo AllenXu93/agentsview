@@ -27,7 +27,7 @@ func TestAttachedArchiveRebuild(t *testing.T) {
 			defer engine.Close()
 			manager, err := NewManager(t.Context(), cfg, receiver, engine, nil)
 			require.NoError(t, err)
-			require.NoError(t, manager.Drain(t.Context(), nil))
+			require.NoError(t, drainError(manager, t.Context(), nil))
 			manager.Close()
 			const id = sourceDevice + "~codex:019eb791-cf7d-75c1-8439-9ed74c122e02"
 			before, err := receiver.GetAllMessages(t.Context(), id)
@@ -77,7 +77,7 @@ func TestAttachedArchiveRebuild(t *testing.T) {
 			retry, err := NewManager(t.Context(), cfg, receiver, engine, func(context.Context) error { retries++; return nil })
 			require.NoError(t, err)
 			defer retry.Close()
-			require.NoError(t, retry.Drain(t.Context(), nil))
+			require.NoError(t, drainError(retry, t.Context(), nil))
 			assert.Zero(t, retries, "a rebuild must preserve completed source targets")
 		})
 	}
@@ -94,7 +94,7 @@ func TestAttachedArchiveRebuildWaitsForBackup(t *testing.T) {
 			manager, err := NewManager(t.Context(), cfg, receiver, engine, nil)
 			require.NoError(t, err)
 			defer manager.Close()
-			require.NoError(t, manager.Drain(t.Context(), nil))
+			require.NoError(t, drainError(manager, t.Context(), nil))
 			const id = sourceDevice + "~codex:019eb791-cf7d-75c1-8439-9ed74c122e02"
 			before, err := receiver.GetAllMessages(t.Context(), id)
 			require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestAttachedArchivePendingSurvivesGlobalUpgradeMarker(t *testing.T) {
 	manager, err := NewManager(t.Context(), cfg, receiver, engine, func(context.Context) error { copies++; return nil })
 	require.NoError(t, err)
 	defer manager.Close()
-	require.NoError(t, manager.Drain(t.Context(), nil))
+	require.NoError(t, drainError(manager, t.Context(), nil))
 	require.Equal(t, 2, copies)
 	index, err := OpenIndex(t.Context(), source, filepath.Join(cfg.DataDir, "archive-sources"), nil)
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestAttachedArchivePendingSurvivesGlobalUpgradeMarker(t *testing.T) {
 	}
 	receiver.MarkDataCurrent()
 	assert.False(t, receiver.NeedsResync())
-	require.NoError(t, manager.Drain(t.Context(), nil))
+	require.NoError(t, drainError(manager, t.Context(), nil))
 	assert.Equal(t, 3, copies, "only the outdated provider source needs another parse")
 }
 
@@ -188,7 +188,7 @@ func TestAttachedArchiveFailedRebuildKeepsPublishedHistory(t *testing.T) {
 	manager, err := NewManager(t.Context(), cfg, receiver, engine, nil)
 	require.NoError(t, err)
 	defer manager.Close()
-	require.NoError(t, manager.Drain(t.Context(), nil))
+	require.NoError(t, drainError(manager, t.Context(), nil))
 	const id = sourceDevice + "~codex:019eb791-cf7d-75c1-8439-9ed74c122e02"
 	before, err := receiver.GetAllMessages(t.Context(), id)
 	require.NoError(t, err)

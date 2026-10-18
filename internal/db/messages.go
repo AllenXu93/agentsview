@@ -1760,6 +1760,9 @@ func (db *DB) writeSessionIncremental(ctx context.Context,
 		return false, fmt.Errorf("beginning incremental write tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: Session{ID: sessionID}}); err != nil {
+		return false, err
+	}
 
 	var replaced *messageRangeTotals
 	var pendingRecallRevocations recallEvidenceRevocationEvents

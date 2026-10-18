@@ -37,6 +37,7 @@ type Source struct {
 type Coverage struct {
 	SupportedSources  int64
 	SupplementalFiles int64
+	DeletionRules     int64
 }
 
 // OpenIndex requires the caller to own the receiving data directory. cacheDir
@@ -150,8 +151,8 @@ func (i *Index) Sources(ctx context.Context, after string, limit int) ([]Source,
 
 func (i *Index) Coverage(ctx context.Context) (Coverage, error) {
 	var result Coverage
-	err := i.database.QueryRowContext(ctx, `SELECT supported_sources,supplemental_files FROM coverage`).
-		Scan(&result.SupportedSources, &result.SupplementalFiles)
+	err := i.database.QueryRowContext(ctx, `SELECT supported_sources,supplemental_files,(SELECT coalesce(sum(json_array_length(CAST(suppressions AS TEXT))),0) FROM devices) FROM coverage`).
+		Scan(&result.SupportedSources, &result.SupplementalFiles, &result.DeletionRules)
 	return result, err
 }
 

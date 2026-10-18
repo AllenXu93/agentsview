@@ -913,7 +913,9 @@ func coordinateLocalSync(
 	if !stats.ProcessingComplete() {
 		return didResync, stats, errors.New("local sync processing incomplete")
 	}
-	return didResync, stats, attached.Drain(ctx, progress)
+	archiveStats, err := attached.Drain(ctx, progress)
+	stats.Merge(archiveStats)
+	return didResync, stats, err
 }
 
 func localSyncEngineConfig(appCfg config.Config) sync.EngineConfig {

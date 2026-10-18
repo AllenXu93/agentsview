@@ -1687,6 +1687,10 @@ func (db *DB) upsertSession(ctx context.Context,
 		return sessionUpsertResult{}, fmt.Errorf("beginning session upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: s}); err != nil {
+		return sessionUpsertResult{}, err
+	}
+
 	result, err := upsertSessionExec(
 		ctx,
 		tx.ExecContext,

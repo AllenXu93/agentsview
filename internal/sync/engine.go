@@ -21259,6 +21259,9 @@ func (e *Engine) syncSingleSessionContext(ctx context.Context, sessionID string,
 	e.resetS3CodexIndexCache()
 	e.resetSourceClaims()
 
+	if strings.HasPrefix(e.db.GetSessionFilePath(ctx, sessionID), "archive://") {
+		return errors.New("reparse attached archive sessions with agentsview sync --full")
+	}
 	host, _ := parser.StripHostPrefix(sessionID)
 	if host != "" && !isS3SourcePath(e.db.GetSessionFilePath(ctx, sessionID)) {
 		return fmt.Errorf(

@@ -45,11 +45,11 @@ func TestArchiveDrainSingleFlight(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Close()
 	finished := make(chan error, 1)
-	go func() { finished <- manager.Drain(t.Context(), nil) }()
+	go func() { finished <- drainError(manager, t.Context(), nil) }()
 	<-boundary
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	require.ErrorIs(t, manager.Drain(cancelled, nil), context.Canceled)
+	require.ErrorIs(t, drainError(manager, cancelled, nil), context.Canceled)
 	close(release)
 	require.NoError(t, <-finished)
 	assert.Equal(t, int32(2), copies.Load())
@@ -64,14 +64,14 @@ func TestArchiveDrainSingleFlight(t *testing.T) {
 	require.NoError(t, err)
 	key := db.ArchiveAttachmentKey{RepositoryID: index.Info.RepositoryID, SnapshotID: index.Info.SnapshotID}
 	require.NoError(t, index.Close())
-	require.NoError(t, manager.Drain(t.Context(), nil))
+	require.NoError(t, drainError(manager, t.Context(), nil))
 	assert.Equal(t, int32(2), copies.Load(), "unchanged pass performs no source copies")
 	status, err := receiver.ArchiveAttachmentStatus(t.Context(), key)
 	require.NoError(t, err)
 	assert.Zero(t, status.Pending)
 	offline := source.Repository + "-offline"
 	require.NoError(t, os.Rename(source.Repository, offline))
-	require.Error(t, manager.Drain(t.Context(), nil))
+	require.Error(t, drainError(manager, t.Context(), nil))
 	session, err := receiver.GetSessionFull(t.Context(), sourceDevice+"~codex:019eb791-cf7d-75c1-8439-9ed74c122e02")
 	require.NoError(t, err)
 	require.NotNil(t, session)
@@ -93,9 +93,9 @@ func TestArchiveDrainRecordsFailuresAndContinues(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer manager.Close()
-	require.ErrorIs(t, manager.Drain(t.Context(), nil), localFailed)
+	require.ErrorIs(t, drainError(manager, t.Context(), nil), localFailed)
 	// Failed local reconciliation defers the archive rather than taking priority.
-	require.NoError(t, manager.Drain(t.Context(), nil))
+	require.NoError(t, drainError(manager, t.Context(), nil))
 	assert.Equal(t, int32(3), handoffs.Load())
 }
 
@@ -154,7 +154,7 @@ func TestArchiveDrainYieldsToPendingLocalWork(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer manager.Close()
-	require.NoError(t, manager.Drain(t.Context(), nil))
+	require.NoError(t, drainError(manager, t.Context(), nil))
 	assert.Equal(t, 3, boundaries)
 }
 
@@ -188,6 +188,12 @@ func TestArchiveDrainDefersWhileBackupRuns(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer manager.Close()
-	require.ErrorIs(t, manager.Drain(t.Context(), nil), docbank.ErrBackupRepositoryLocked)
+	require.ErrorIs(t, drainError(manager, t.Context(), nil), docbank.ErrBackupRepositoryLocked)
 	assert.Equal(t, 2, handoffs, "defer the remaining sources while a backup owns the repository")
+}
+
+// Tests that inspect persisted output do not need the command's aggregate counters.
+func drainError(manager *Manager, ctx context.Context, progress syncer.ProgressFunc) error {
+	_, err := manager.Drain(ctx, progress)
+	return err
 }

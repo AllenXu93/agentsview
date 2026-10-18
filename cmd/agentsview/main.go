@@ -413,7 +413,7 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 			acknowledgeStartup(stats, err)
 			if err == nil && stats.ProcessingComplete() && !database.NeedsResync() {
 				go idleTracker.Do(func() {
-					if err := attachedSources.Drain(ctx, nil); err != nil && ctx.Err() == nil {
+					if _, err := attachedSources.Drain(ctx, nil); err != nil && ctx.Err() == nil {
 						log.Printf("archive sources: %v", err)
 					}
 				})
@@ -3103,7 +3103,7 @@ func startPeriodicSync(
 			current := sourceConfig()
 			runScheduledSyncPass(ctx, engine, scheduledReconcileTargets(current))
 			runRemoteSourceSyncPass(ctx, engine, remoteSourceSyncRoots(current))
-			if err := attachedSources.Drain(ctx, nil); err != nil && ctx.Err() == nil {
+			if _, err := attachedSources.Drain(ctx, nil); err != nil && ctx.Err() == nil {
 				log.Printf("archive sources: %v", err)
 			}
 			recomputePendingSessions(engine, database)

@@ -15,8 +15,9 @@ import (
 )
 
 type drainRun struct {
-	done chan struct{}
-	err  error
+	done  chan struct{}
+	err   error
+	stats syncer.SyncStats
 }
 
 // Manager owns one drain for a receiving database. A caller's cancellation ends
@@ -59,12 +60,12 @@ func (m *Manager) Close() {
 	}
 }
 
-func (m *Manager) Drain(ctx context.Context, progress syncer.ProgressFunc) error {
+func (m *Manager) Drain(ctx context.Context, progress syncer.ProgressFunc) (syncer.SyncStats, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return syncer.SyncStats{}, err
 	}
 	if len(m.cfg.ArchiveSources) == 0 {
-		return nil
+		return syncer.SyncStats{}, nil
 	}
 	m.mu.Lock()
 	run := m.active
@@ -72,9 +73,10 @@ func (m *Manager) Drain(ctx context.Context, progress syncer.ProgressFunc) error
 		run = &drainRun{done: make(chan struct{})}
 		m.active = run
 		go func() {
-			err := m.drain(progress)
+			stats, err := m.drain(progress)
 			m.mu.Lock()
 			run.err = err
+			run.stats = stats
 			m.active = nil
 			close(run.done)
 			m.mu.Unlock()
@@ -83,26 +85,29 @@ func (m *Manager) Drain(ctx context.Context, progress syncer.ProgressFunc) error
 	m.mu.Unlock()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return syncer.SyncStats{}, ctx.Err()
 	case <-run.done:
-		return run.err
+		return run.stats, run.err
 	}
 }
 
-func (m *Manager) drain(progress syncer.ProgressFunc) error {
+func (m *Manager) drain(progress syncer.ProgressFunc) (syncer.SyncStats, error) {
+	var total syncer.SyncStats
 	var result error
 	for _, source := range m.cfg.ArchiveSources {
 		if err := m.ctx.Err(); err != nil {
-			return errors.Join(result, err)
+			return total, errors.Join(result, err)
 		}
-		if err := m.drainAttachment(source, progress); err != nil {
+		stats, err := m.drainAttachment(source, progress)
+		total.Merge(stats)
+		if err != nil {
 			result = errors.Join(result, fmt.Errorf("archive source %q unavailable; retry on the next sync: %w", source.Name, err))
 		}
 	}
-	return result
+	return total, result
 }
 
-func (m *Manager) drainAttachment(cfg config.ArchiveSource, progress syncer.ProgressFunc) (retErr error) {
+func (m *Manager) drainAttachment(cfg config.ArchiveSource, progress syncer.ProgressFunc) (total syncer.SyncStats, retErr error) {
 	var index *Index
 	err := m.engine.RunExclusive(func() error {
 		var err error
@@ -116,47 +121,57 @@ func (m *Manager) drainAttachment(cfg config.ArchiveSource, progress syncer.Prog
 		defer func() { retErr = errors.Join(retErr, index.Close()) }()
 	}
 	if err != nil {
-		return err
+		return total, err
 	}
 	if index == nil {
-		return errors.New("archive source index was not opened")
+		return total, errors.New("archive source index was not opened")
 	}
 	key := db.ArchiveAttachmentKey{RepositoryID: index.Info.RepositoryID, SnapshotID: index.Info.SnapshotID}
 	status, err := m.database.ArchiveAttachmentStatus(m.ctx, key)
 	if err != nil || status.Pending == 0 {
-		return err
+		return total, err
+	}
+
+	coverage, err := index.Coverage(m.ctx)
+	if err != nil {
+		return total, err
+	}
+	if progress != nil {
+		progress(syncer.Progress{Phase: syncer.PhaseDiscovering, Detail: fmt.Sprintf("Archive %q: %d Claude/Codex sources (%d pending), %d deletion rules, %d supplemental original files", cfg.Name, coverage.SupportedSources, status.Pending, coverage.DeletionRules, coverage.SupplementalFiles)})
 	}
 	scratch := filepath.Join(m.cfg.DataDir, "archive-sources", "scratch")
 	if err := os.MkdirAll(scratch, 0o700); err != nil {
-		return err
+		return total, err
 	}
 	var after db.ArchiveSourceIdentity
 	for {
 		pending, err := m.database.PendingArchiveSources(m.ctx, key, after, 128)
 		if err != nil {
-			return errors.Join(retErr, err)
+			return total, errors.Join(retErr, err)
 		}
 		if len(pending) == 0 {
-			return retErr
+			return total, retErr
 		}
 		for _, item := range pending {
 			if err := m.ctx.Err(); err != nil {
-				return errors.Join(retErr, err)
+				return total, errors.Join(retErr, err)
 			}
 			if m.beforeSource != nil {
 				if err := m.beforeSource(m.ctx); err != nil {
-					return errors.Join(retErr, err)
+					return total, errors.Join(retErr, err)
 				}
 			}
 			source, err := index.source(m.ctx, item.Provenance.ManifestID)
 			if err == nil {
-				_, err = index.syncSource(m.ctx, cfg.Repository, source, m.cfg, m.engine, scratch, item.Target, progress)
+				var stats syncer.SyncStats
+				stats, err = index.syncSource(m.ctx, cfg.Repository, source, m.cfg, m.engine, scratch, item.Target, progress)
+				total.Merge(stats)
 			}
 			if err != nil {
 				recordErr := m.engine.RunExclusive(func() error { return m.database.RecordArchiveSourceError(m.ctx, item.Provenance, err.Error()) })
 				retErr = errors.Join(retErr, err, recordErr)
 				if errors.Is(err, docbank.ErrBackupRepositoryLocked) {
-					return retErr
+					return total, retErr
 				}
 			}
 			after = item.Provenance.Source
