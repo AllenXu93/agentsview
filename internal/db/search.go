@@ -416,8 +416,26 @@ func (db *DB) Search(
 	}
 	likePattern := "%" + escapeLike(plainQuery) + "%"
 
-	// Build args in SQL placeholder order, including both copies of innerWhere.
-	// The SELECT's best_query argument is prepended below in args2.
+	// Build args in the order the SQL placeholders appear.
+	// Position 0 (? AS best_query in the ROW_NUMBER SELECT) is
+	// prepended after this block — see args2 below.
+	//
+	//  pos | SQL clause                                  | value
+	//  ----+---------------------------------------------+------------
+	//   0  | SELECT ? AS best_query (ROW_NUMBER)         | plainQuery  ← prepended in args2
+	//   1  | WHERE messages_fts MATCH ? (ROW_NUMBER)     | ftsArgs[0] (f.Query)
+	//   2  | WHERE messages_fts MATCH ? (ROW_NUMBER rendered) | ftsArgs[1] ("rendered : (" + f.Query + ")")
+	//  [2+]| AND s2.project = ? (if project set)         | ftsArgs[2] (f.Project)
+	//   3  | WHERE messages_fts MATCH ? (outer JOIN)     | f.Query
+	//   4  | WHEN COALESCE(display_name,session_name) LIKE ? (CASE) | likePattern
+	//   5  | WHEN s.first_message LIKE ? (CASE)          | likePattern
+	//   6  | WHERE COALESCE(display_name,session_name) LIKE ? (name WHERE) | likePattern
+	//   7  | WHERE s.first_message LIKE ? (name WHERE)   | likePattern
+	//  [8] | AND s.project = ? (name branch, optional)   | f.Project
+	//   9  | WHERE messages_fts MATCH ? (NOT IN)         | ftsArgs[0]
+	//  10  | WHERE messages_fts MATCH ? (NOT IN rendered) | ftsArgs[1]
+	// [10+]| AND s2.project = ? (NOT IN, if set)         | ftsArgs[2]
+	//  11  | LIMIT ? OFFSET ?                            | f.Limit+1, f.Cursor
 	args := make([]any, 0, len(ftsArgs)*2+7+len(nameProjectArgs))
 	args = append(args, ftsArgs...)          // (1) ROW_NUMBER WHERE
 	args = append(args, f.Query)             // (2) outer MATCH re-filter
