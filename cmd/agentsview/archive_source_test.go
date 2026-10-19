@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"encoding/json/v2"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
@@ -16,10 +22,96 @@ import (
 	"go.kenn.io/agentsview/internal/rawcapture"
 	"go.kenn.io/agentsview/internal/rawcheckpoint"
 	"go.kenn.io/agentsview/internal/rawwatch"
+	"go.kenn.io/agentsview/internal/server"
 	"go.kenn.io/agentsview/internal/service"
 	"go.kenn.io/agentsview/internal/sync"
 	"go.kenn.io/agentsview/internal/testjsonl"
 )
+
+func TestArchiveSourceDaemonRemoteSyncIncludesAttachedHistory(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	remoteDB := dbtest.OpenTestDB(t)
+	remote := httptest.NewServer(server.New(config.Config{
+		Host: "127.0.0.1", DataDir: t.TempDir(), AuthToken: "remote-token",
+	}, remoteDB, nil).Handler())
+	t.Cleanup(remote.Close)
+	for _, tc := range []struct {
+		name         string
+		includeLocal bool
+		full         bool
+		offline      bool
+	}{
+		{name: "incremental", includeLocal: true},
+		{name: "full", includeLocal: true, full: true},
+		{name: "partial archive failure", includeLocal: true, offline: true},
+		{name: "remote only", offline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfigWithClaudeFixture(t)
+			cfg.Host = "127.0.0.1"
+			cfg.ArchiveSources = []config.ArchiveSource{source}
+			if tc.offline {
+				cfg.ArchiveSources = append(cfg.ArchiveSources, config.ArchiveSource{
+					Name: "offline", Repository: filepath.Join(t.TempDir(), "missing"), Snapshot: source.Snapshot,
+				})
+			}
+			cfg.RemoteHosts = []config.RemoteHost{{
+				Host: "remote", Transport: config.RemoteTransportHTTP,
+				URL: remote.URL, Token: "remote-token",
+			}}
+			database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+			engine := sync.NewEngine(t.Context(), database, localSyncEngineConfig(cfg))
+			t.Cleanup(engine.Close)
+			attached, err := archivesource.NewManager(t.Context(), cfg, database, engine, nil)
+			require.NoError(t, err)
+			t.Cleanup(attached.Close)
+			srv := server.New(cfg, database, engine,
+				server.WithArchiveSources(attached),
+				server.WithLocalSyncRunner(withAttachedSources(attached,
+					newForegroundSyncRunner(t.Context(), cfg, engine, database, nil))),
+			)
+			body, err := json.Marshal(remoteSyncRequest{
+				Full: tc.full, IncludeLocal: tc.includeLocal, Hosts: cfg.RemoteHosts,
+			})
+			require.NoError(t, err)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost,
+				"/api/v1/sync/remotes", bytes.NewReader(body))
+			req.Host = "127.0.0.1:0"
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "http://127.0.0.1:0")
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, req)
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			var result struct {
+				LocalStats *sync.SyncStats `json:"local_stats"`
+				Failures   []any           `json:"failures"`
+				Error      string          `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+			require.Empty(t, result.Failures)
+			messages, err := database.GetAllMessages(t.Context(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved")
+			require.NoError(t, err)
+			if !tc.includeLocal {
+				assert.Empty(t, result.Error)
+				assert.Nil(t, result.LocalStats)
+				assert.Empty(t, messages)
+				return
+			}
+			if tc.offline {
+				assert.Equal(t, "local sync failed", result.Error)
+			} else {
+				assert.Empty(t, result.Error)
+			}
+			require.NotNil(t, result.LocalStats)
+			assert.Equal(t, 4, result.LocalStats.Synced)
+			require.Len(t, messages, 1)
+			assert.Equal(t, "archived message", messages[0].Content)
+		})
+	}
+}
 
 func TestArchiveSourceWorkerRebuildAfterStartupSchemaUpgrade(t *testing.T) {
 	cfg := testConfigWithClaudeFixture(t)

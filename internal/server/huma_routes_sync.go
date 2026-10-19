@@ -660,6 +660,11 @@ func (s *Server) runRemoteSyncRequest(
 			} else {
 				blocked = syncpkg.ErrUnifiedRebuildAborted
 			}
+		} else if localStats != nil && s.archiveSources != nil {
+			// The manager takes the engine lock per source, after coordination releases it.
+			archiveStats, err := s.archiveSources.Drain(ctx, progress)
+			localStats.Merge(archiveStats)
+			blocked = err
 		}
 	} else {
 		exclusiveRun := func() (remotesync.SyncStats, error) {

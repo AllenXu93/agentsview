@@ -24,6 +24,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"go.kenn.io/agentsview/internal/apiclient"
+	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/codexcloud"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
@@ -190,6 +191,7 @@ type Server struct {
 	// localSyncRunner, when set, backs the foreground local-sync HTTP handler
 	// with the worker-backed pass instead of running SyncThenRun in process.
 	localSyncRunner LocalSyncRunner
+	archiveSources  *archivesource.Manager
 
 	// localResyncRunner, when set, backs the foreground full-resync HTTP handler
 	// with the worker-backed build-and-swap instead of an in-process resync.
@@ -641,6 +643,12 @@ type LocalSyncRunner func(
 // default) keeps the in-process SyncThenRun path, which server tests rely on.
 func WithLocalSyncRunner(r LocalSyncRunner) Option {
 	return func(s *Server) { s.localSyncRunner = r }
+}
+
+// WithArchiveSources shares the daemon's attached-archive manager with remote
+// sync requests that also include local sources.
+func WithArchiveSources(manager *archivesource.Manager) Option {
+	return func(s *Server) { s.archiveSources = manager }
 }
 
 // LocalResyncRunner runs the daemon's foreground full resync, streaming progress
