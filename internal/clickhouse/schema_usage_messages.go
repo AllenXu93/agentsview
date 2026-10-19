@@ -292,6 +292,19 @@ const chRetiredSkipMessage = "clickhouse push: skipping the prepared usage rebui
 // exchanges.
 const chExchangeProbePrefix = "agentsview_exchange_probe_"
 
+// chExchangeProbeKey is the sync_metadata key that records the last table
+// exchange probe as a chExchangeProbe.
+const chExchangeProbeKey = "agentsview_table_exchange_probe"
+
+// chExchangeProbe is the answer of a table exchange probe, the serverUUID()
+// of the server that ran it, and the server time, in Unix seconds, at which
+// it started.
+type chExchangeProbe struct {
+	ProbedAt  int64  `json:"probed_at"`
+	Server    string `json:"server"`
+	Supported bool   `json:"supported"`
+}
+
 // chSnapshotStampSQL identifies the complete snapshot set as a row count and
 // a sum of per-row hashes, so any republished or deleted session changes it.
 // The refresh stores it on every prepared row; scalar subqueries are
@@ -571,7 +584,7 @@ func ensurePreparedUsage(ctx context.Context, conn *sql.DB) error {
 	if err := ensurePreparedUsageProjections(ctx, conn); err != nil {
 		return err
 	}
-	exchange, err := chExchangeSupported(ctx, conn)
+	exchange, err := chExchangeSupportedSinceStart(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -653,6 +666,64 @@ func dropPreparedUsageView(ctx context.Context, conn *sql.DB) error {
 	return nil
 }
 
+// chExchangeSupportedSinceStart returns chExchangeSupported's answer and
+// probes at most once per server start. A failed probe logs an
+// UNSUPPORTED_METHOD error on the server, and a push watch runs the schema
+// step before every push. The answer depends on the filesystem that holds the
+// server's metadata directory, which changes only across a restart, so an
+// answer this server probed since it started still holds. An answer probed
+// before then is probed again. So is one from another server: RESTORE runs on
+// a live server and can copy in an answer newer than this server's start.
+func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, error) {
+	// A probe takes milliseconds, so probe tables an hour old belong to a
+	// push that was killed during one. A stored answer skips the probe until
+	// the next restart, so they are dropped here rather than in the probe.
+	if err := dropTables(ctx, conn, "match(name, ?) AND metadata_modification_time <= now() - INTERVAL 1 HOUR",
+		"^"+chExchangeProbePrefix+"[a-z0-9]+_[ab]$"); err != nil {
+		return false, err
+	}
+	// now() and uptime() count whole seconds, so the computed start can be
+	// one second after the start's own second, and a probe from that second
+	// would look older than the start. A probe up to a second before the
+	// computed start therefore counts as current. Trusting a stale answer
+	// would take a probe, a restart, and a move of the data directory within
+	// two seconds.
+	var now, started int64
+	var server string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT toUnixTimestamp(now()) AS t, t - uptime(), toString(serverUUID())").Scan(&now, &started, &server); err != nil {
+		return false, fmt.Errorf("reading server identity and start time: %w", err)
+	}
+	stored, err := readMetadata(ctx, conn, chExchangeProbeKey)
+	if err != nil {
+		return false, err
+	}
+	if value, ok := stored[chExchangeProbeKey]; ok {
+		// The probe can always run again, so an unreadable record is replaced
+		// rather than failing the schema step.
+		var probe chExchangeProbe
+		switch err := json.Unmarshal([]byte(value), &probe); {
+		case err != nil:
+			log.Printf("ClickHouse: the saved table swap check in sync_metadata could not be read, "+
+				"so it will run again: %v (stored value %q)", err, value)
+		case probe.Server == server && probe.ProbedAt >= started-1:
+			return probe.Supported, nil
+		}
+	}
+	supported, err := chExchangeSupported(ctx, conn)
+	if err != nil {
+		return false, err
+	}
+	value, err := json.Marshal(chExchangeProbe{ProbedAt: now, Server: server, Supported: supported})
+	if err != nil {
+		return false, fmt.Errorf("encoding table exchange probe: %w", err)
+	}
+	if err := writeMetadata(ctx, conn, map[string]string{chExchangeProbeKey: string(value)}); err != nil {
+		return false, err
+	}
+	return supported, nil
+}
+
 // chExchangeSupported reports whether the mirror database can exchange two
 // tables. A refreshable view that replaces its target ends every refresh
 // with EXCHANGE TABLES, which ClickHouse runs as a renameat2 call with the
@@ -662,12 +733,6 @@ func dropPreparedUsageView(ctx context.Context, conn *sql.DB) error {
 // database, so it renames files in the same metadata directory a refresh
 // does; where the tables keep their data does not matter.
 func chExchangeSupported(ctx context.Context, conn *sql.DB) (supported bool, err error) {
-	// A probe takes milliseconds, so probe tables an hour old belong to a
-	// push that was killed during one.
-	if err := dropTables(ctx, conn, "match(name, ?) AND metadata_modification_time <= now() - INTERVAL 1 HOUR",
-		"^"+chExchangeProbePrefix+"[a-z0-9]+_[ab]$"); err != nil {
-		return false, err
-	}
 	probe := chExchangeProbePrefix + strings.ToLower(rand.Text())
 	tables := []string{probe + "_a", probe + "_b"}
 	defer func() {
@@ -718,7 +783,7 @@ func refreshPreparedUsage(ctx context.Context, conn *sql.DB) error {
 			// see that gap rather than a switch that stopped halfway.
 			// Creating the view then would leave every refresh failing
 			// until the next schema step.
-			exchange, err := chExchangeSupported(ctx, conn)
+			exchange, err := chExchangeSupportedSinceStart(ctx, conn)
 			if err != nil {
 				return err
 			}

@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-16
+last_edited: 2026-10-17
 title: Changelog
 description: Release history for AgentsView
 ---
@@ -219,6 +219,10 @@ The latest release is
 
 - On Windows, daemon commands no longer make backup and sync tools treat the
   whole data directory as changed.
+- A ClickHouse server whose data directory is on NFS no longer logs an
+  `UNSUPPORTED_METHOD` error for `EXCHANGE TABLES` on every push. AgentsView
+  checks once after each server start whether the server can swap tables, and
+  reuses that answer until the server restarts.
 - `agentsview prune` no longer deletes the shared `state.db` of Hermes or
   Augure Desktop. Sessions synced by 0.45.0 or earlier record the bare
   `state.db` path, and pruning one deleted the whole app database. The prune
