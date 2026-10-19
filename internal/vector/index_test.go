@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
 	kitvec "go.kenn.io/kit/vector"
 	"go.kenn.io/kit/vector/sqlitevec"
 )
@@ -509,6 +511,56 @@ func TestMirrorSchemaVersionV2StampReadOnlyReturnsSentinel(t *testing.T) {
 	_, err = ro.StaleActive(ctx, legacySpace("any-fingerprint"), "")
 	assert.ErrorIs(t, err, ErrMirrorVersionMismatch,
 		"StaleActive must apply the same version gate Search does")
+}
+
+func TestMirrorSchemaVersionV3UpgradesInPlace(t *testing.T) {
+	ctx := t.Context()
+	archive := seedRunCapArchive(t, false)
+	dbtest.SeedSessionWithMessages(t, archive, "newer", "project", []db.Message{dbtest.UserMsg("newer", 0, "new work")},
+		func(s *db.Session) { s.EndedAt = new("2024-02-01T00:00:00Z") })
+	path := filepath.Join(t.TempDir(), "vectors.db")
+	ix, err := Open(ctx, path, false, 4000)
+	require.NoError(t, err)
+	gen := fakeGeneration("fake-model")
+	_, err = ix.Build(ctx, legacyRunSource(t, archive), fakeBuildEncoder(), gen, BuildOptions{})
+	require.NoError(t, err)
+	before, err := ix.Search(ctx, fakeBuildEncoder(), "work", 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, before)
+	require.NoError(t, ix.metaSet(ctx, mirrorSchemaVersionKey, "3"))
+	require.NoError(t, ix.metaDelete(ctx, runMaxRunesMetaKey))
+	require.NoError(t, ix.Close())
+
+	ro, err := Open(ctx, path, true, 4000)
+	require.NoError(t, err)
+	hits, err := ro.Search(ctx, fakeBuildEncoder(), "work", 10)
+	require.NoError(t, err)
+	assert.Equal(t, before, hits, "version-3 vectors remain readable before a build")
+	require.NoError(t, ro.Close())
+
+	upgraded, err := Open(ctx, path, false, 4000)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	version, ok, err := upgraded.metaGet(ctx, mirrorSchemaVersionKey)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "4", version)
+	active, ok, err := upgraded.ActiveFingerprint(ctx)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, gen.Fingerprint(), active)
+	hits, err = upgraded.Search(ctx, fakeBuildEncoder(), "work", 10)
+	require.NoError(t, err)
+	assert.Equal(t, before, hits, "restamping preserves stored vectors")
+	pending, err := upgraded.countPending(ctx, active)
+	require.NoError(t, err)
+	assert.Zero(t, pending, "restamping preserves content stamps")
+
+	result, err := upgraded.Build(ctx, archive, fakeBuildEncoder(), gen, BuildOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, gen.Fingerprint(), result.Fingerprint)
+	assert.Equal(t, 5, result.Fill.Documents, "only the split assistant run re-embeds")
+	assertRunCapPieces(t, upgraded, 6)
 }
 
 // TestMirrorSchemaVersionReadOnlyMismatchSearchReturnsSentinel covers the
