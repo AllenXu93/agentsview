@@ -7,16 +7,15 @@ import (
 
 // ArchiveSource selects retained history independently of its mount path.
 type ArchiveSource struct {
-	Name         string            `toml:"name"`
-	Repository   string            `toml:"repository"`
-	Snapshot     string            `toml:"snapshot"`
-	Directory    string            `toml:"directory"`
-	MachineNames map[string]string `toml:"machine_names"`
+	Name        string `toml:"name"`
+	Repository  string `toml:"repository"`
+	Snapshot    string `toml:"snapshot"`
+	Directory   string `toml:"directory"`
+	MachineName string `toml:"machine_name"`
 }
 
 func (c Config) ValidateArchiveSources() error {
 	seen := make(map[string]bool, len(c.ArchiveSources))
-	labels := make(map[string]string)
 	for i, source := range c.ArchiveSources {
 		fields := []struct{ name, value string }{{"name", source.Name}}
 		if source.Directory != "" {
@@ -36,14 +35,8 @@ func (c Config) ValidateArchiveSources() error {
 			return fmt.Errorf("duplicate archive source name %q", source.Name)
 		}
 		seen[source.Name] = true
-		for id, label := range source.MachineNames {
-			if ValidateInstallationID(id) != nil || strings.TrimSpace(label) == "" || strings.ContainsRune(label, '\x00') || len(label) > 4096 {
-				return fmt.Errorf("archive source %q has an invalid machine name", source.Name)
-			}
-			if previous, ok := labels[id]; ok && previous != label {
-				return fmt.Errorf("archive sources configure different names for machine %s", id)
-			}
-			labels[id] = label
+		if label := source.MachineName; label != "" && (strings.TrimSpace(label) == "" || strings.ContainsRune(label, '\x00') || len(label) > 4096) {
+			return fmt.Errorf("archive source %q has an invalid machine_name", source.Name)
 		}
 	}
 	return nil

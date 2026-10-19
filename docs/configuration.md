@@ -1925,6 +1925,7 @@ If you already have an archive directory, use `directory` instead of
 [[archive_sources]]
 name = "saved-history"
 directory = "/mnt/archives/restored"
+machine_name = "Previous workstation" # Optional; defaults to the captured name.
 ```
 
 The directory can be an original AgentsView archive, the output of
@@ -1943,19 +1944,14 @@ deletion rules, and supplemental files. Sessions retain the original machine's
 identity and label. `name` labels the configuration entry; changing it does not
 change session ownership.
 
-Machine identity is the installation ID saved at capture time. It does not
-come from the current hostname, archive path, or configuration entry's `name`.
-To change a displayed machine name, add a mapping under the source entry:
+A daemon started with `--no-sync` still handles manual `agentsview sync` and
+`agentsview sync --full`; automatic ingestion stays disabled.
 
-```toml
-[archive_sources.machine_names]
-"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" = "Previous workstation"
-```
-
-Use the captured installation ID as the key; `/api/v1/machines` lists IDs and
-labels after the first import. An archive containing several machines can list
-several mappings. Restart the daemon and sync to apply a name change. This
-updates the label without changing session IDs or reparsing transcripts.
+Use the optional `machine_name` to change the display name of a single-machine
+archive. Restart the daemon and sync to apply a name change; no reparse is
+needed. Omit it for an archive containing several machines, which retain their
+individual captured names. The underlying installation IDs come from the
+archive automatically and stay unchanged when you rename or move it.
 
 Later syncs skip transcripts whose parser and content-policy versions are
 current. The snapshot stays fixed until you change the configuration. A later

@@ -32,9 +32,10 @@ change ownership. A changed source manifest still conflicts with an existing
 binding. Rebuild preparation pins the selected catalog digest and refuses a
 directory changed before the rebuild starts.
 
-Optional `machine_names` maps captured installation IDs to display names. Labels
-change independently of identity and completion, without a reparse.
-Configuration rejects contradictory labels across sources.
+Optional `machine_name` overrides the display name of a single-machine archive.
+Labels change independently of identity and completion, without a reparse.
+Multi-machine archives keep their captured names and reject this override. Users
+do not configure installation IDs.
 
 Configuration, followed by the existing `agentsview sync` command:
 

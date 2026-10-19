@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/rawarchive"
 	syncer "go.kenn.io/agentsview/internal/sync"
@@ -43,7 +44,7 @@ func testAttachedRestoredDirectory(t *testing.T, layout string) {
 	require.NoError(t, os.RemoveAll(inputs))
 	source = config.ArchiveSource{
 		Name: "history", Directory: directory,
-		MachineNames: map[string]string{sourceDevice: "Previous workstation"},
+		MachineName: "Previous workstation",
 	}
 	saved, err := os.ReadFile(filepath.Join(directory, application, "sessions.db"))
 	require.NoError(t, err)
@@ -75,7 +76,7 @@ func testAttachedRestoredDirectory(t *testing.T, layout string) {
 	moved := filepath.Join(t.TempDir(), "moved")
 	require.NoError(t, os.Rename(directory, moved))
 	cfg.ArchiveSources[0].Directory = moved
-	cfg.ArchiveSources[0].MachineNames[sourceDevice] = "Saved workstation"
+	cfg.ArchiveSources[0].MachineName = "Saved workstation"
 	copies := 0
 	manager, err = NewManager(t.Context(), cfg, receiver, engine, func(context.Context) error { copies++; return nil })
 	require.NoError(t, err)
@@ -106,6 +107,38 @@ func TestAttachedDirectoryRefusesActiveWriter(t *testing.T) {
 	defer lock.Close()
 	_, err = OpenIndex(t.Context(), source, t.TempDir(), nil)
 	require.ErrorContains(t, err, "in use")
+}
+
+func TestAttachedDirectoryMachineNameRequiresOneMachine(t *testing.T) {
+	_, inputs := archiveFixture(t)
+	directory := filepath.Join(inputs, "seed")
+	saved, err := db.OpenIsolatedContext(t.Context(), filepath.Join(directory, "sessions.db"))
+	require.NoError(t, err)
+	const otherDevice = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	require.NoError(t, saved.RegisterRawArchiveDevice(t.Context(), otherDevice, "other-desktop", nil))
+	require.NoError(t, saved.RegisterRawArchiveRoot(t.Context(), db.RawArchiveRoot{
+		ID: "other-root", DeviceID: otherDevice, Machine: "other-desktop", Provider: "files",
+		OriginalPath: "/archive/other", ConfiguredRootID: "other-root",
+	}))
+	require.NoError(t, saved.Close())
+	receiver := dbtest.OpenTestDB(t)
+	cfg := config.Config{DataDir: filepath.Dir(receiver.Path()), ArchiveSources: []config.ArchiveSource{{
+		Name: "history", Directory: directory, MachineName: "Previous workstation",
+	}}}
+	engine := syncer.NewEngine(t.Context(), receiver, syncer.EngineConfig{Ephemeral: true})
+	defer engine.Close()
+	manager, err := NewManager(t.Context(), cfg, receiver, engine, nil)
+	require.NoError(t, err)
+	require.ErrorContains(t, drainError(manager, t.Context(), nil), "machine_name requires a single-machine archive")
+	manager.Close()
+	cfg.ArchiveSources[0].MachineName = ""
+	manager, err = NewManager(t.Context(), cfg, receiver, engine, nil)
+	require.NoError(t, err)
+	defer manager.Close()
+	require.NoError(t, drainError(manager, t.Context(), nil))
+	labels, err := receiver.GetMachineLabels(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "retired-desktop", labels[sourceDevice])
 }
 
 func TestArchiveSwitchStorageKeepsIdentityAndCuration(t *testing.T) {

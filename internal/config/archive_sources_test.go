@@ -68,19 +68,19 @@ func TestArchiveSourceExpandsRepositoryHome(t *testing.T) {
 	assert.Equal(t, filepath.Join(os.Getenv("HOME"), "archive"), cfg.ArchiveSources[0].Repository)
 }
 
-func TestArchiveSourceDirectoryAndMachineNames(t *testing.T) {
+func TestArchiveSourceDirectoryAndMachineName(t *testing.T) {
 	var cfg Config
 	require.NoError(t, cfg.applyConfigTOML(`[[archive_sources]]
 name = "saved-history"
 directory = "/mnt/archives/restored"
-[archive_sources.machine_names]
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = "Previous workstation"
+machine_name = "Previous workstation"
 `))
 	assert.Equal(t, "/mnt/archives/restored", cfg.ArchiveSources[0].Directory)
-	assert.Equal(t, "Previous workstation", cfg.ArchiveSources[0].MachineNames["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
 	cfg.ArchiveSources[0].Repository = "/mnt/archives/repository"
 	require.ErrorContains(t, cfg.ValidateArchiveSources(), "either")
-	cfg.ArchiveSources[0].Repository = ""
-	cfg.ArchiveSources[0].MachineNames = map[string]string{"not-an-installation": "label"}
-	require.ErrorContains(t, cfg.ValidateArchiveSources(), "machine")
+	require.ErrorContains(t, cfg.applyConfigTOML(`[[archive_sources]]
+name = "saved-history"
+directory = "/mnt/archives/restored"
+machine_name = "   "
+`), "machine_name")
 }

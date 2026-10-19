@@ -25,12 +25,12 @@ const indexVersion = 1
 
 // Index is disposable source metadata. Session ownership lives in the receiver.
 type Index struct {
-	Info         docbank.BackupReaderInfo
-	ArchiveID    string
-	database     *sql.DB
-	objects      rawderive.ObjectStore
-	closeSource  func() error
-	machineNames map[string]string
+	Info        docbank.BackupReaderInfo
+	ArchiveID   string
+	database    *sql.DB
+	objects     rawderive.ObjectStore
+	closeSource func() error
+	machineName string
 }
 
 type Source struct {
@@ -49,7 +49,7 @@ type Coverage struct {
 func OpenIndex(ctx context.Context, source config.ArchiveSource, cacheDir string, progress func(string)) (index *Index, retErr error) {
 	defer func() {
 		if index != nil {
-			index.machineNames = source.MachineNames
+			index.machineName = source.MachineName
 		}
 	}()
 	if err := (config.Config{ArchiveSources: []config.ArchiveSource{source}}).ValidateArchiveSources(); err != nil {

@@ -37,7 +37,7 @@ func (i *Index) register(ctx context.Context, database *db.DB, cfg config.Config
 		return err
 	}
 	if status.Target == target {
-		return i.configureMachineNames(ctx, database)
+		return i.configureMachineName(ctx, database)
 	}
 	var targets []db.ArchiveSourceTarget
 	after := ""
@@ -61,7 +61,7 @@ func (i *Index) register(ctx context.Context, database *db.DB, cfg config.Config
 	if err := database.SetArchiveAttachmentTargets(ctx, key, target, targets); err != nil {
 		return err
 	}
-	return i.configureMachineNames(ctx, database)
+	return i.configureMachineName(ctx, database)
 }
 
 func (i *Index) source(ctx context.Context, manifestID string) (Source, error) {
@@ -74,32 +74,27 @@ func (i *Index) source(ctx context.Context, manifestID string) (Source, error) {
 	return s, err
 }
 
-func (i *Index) configureMachineNames(ctx context.Context, database *db.DB) error {
-	for id := range i.machineNames {
-		var found bool
-		if err := i.database.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM roots WHERE device_id=?)`, id).Scan(&found); err != nil {
-			return err
-		}
-		if !found {
-			return fmt.Errorf("configured machine %s is absent from this archive", id)
-		}
-	}
-	if len(i.machineNames) == 0 {
+func (i *Index) configureMachineName(ctx context.Context, database *db.DB) error {
+	if i.machineName == "" {
 		return nil
+	}
+	var count int
+	var id string
+	if err := i.database.QueryRowContext(ctx, `SELECT count(DISTINCT device_id),coalesce(min(device_id),'') FROM roots`).Scan(&count, &id); err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("machine_name requires a single-machine archive; omit it to keep the captured names")
 	}
 	return database.Update(ctx, func(tx *sql.Tx) error {
-		for id, label := range i.machineNames {
-			var attached bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_source_bindings WHERE archive_id=? AND device_id=?)`, i.ArchiveID, id).Scan(&attached); err != nil {
-				return err
-			}
-			if !attached {
-				return errors.New("archive machine has not been registered")
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, db.MachineLabelKeyPrefix+id, label); err != nil {
-				return err
-			}
+		var attached bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_source_bindings WHERE archive_id=? AND device_id=?)`, i.ArchiveID, id).Scan(&attached); err != nil {
+			return err
 		}
-		return nil
+		if !attached {
+			return errors.New("archive machine has not been registered")
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, db.MachineLabelKeyPrefix+id, i.machineName)
+		return err
 	})
 }
