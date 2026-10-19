@@ -70,10 +70,27 @@ func (m *Manager) Drain(ctx context.Context, progress syncer.ProgressFunc) (sync
 	m.mu.Lock()
 	run := m.active
 	if run == nil {
+		report := progress
+		if progress != nil {
+			var callbacks sync.Mutex
+			report = func(p syncer.Progress) {
+				callbacks.Lock()
+				defer callbacks.Unlock()
+				if progress != nil {
+					progress(p)
+				}
+			}
+			// A request may release its writer as soon as Drain returns.
+			defer func() {
+				callbacks.Lock()
+				progress = nil
+				callbacks.Unlock()
+			}()
+		}
 		run = &drainRun{done: make(chan struct{})}
 		m.active = run
 		go func() {
-			stats, err := m.drain(progress)
+			stats, err := m.drain(report)
 			m.mu.Lock()
 			run.err = err
 			run.stats = stats

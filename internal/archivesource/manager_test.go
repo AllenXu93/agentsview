@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,14 +46,37 @@ func TestArchiveDrainSingleFlight(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer manager.Close()
-	finished := make(chan error, 1)
-	go func() { finished <- drainError(manager, t.Context(), nil) }()
+	type result struct {
+		stats syncer.SyncStats
+		err   error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		stats, err := manager.Drain(t.Context(), nil)
+		finished <- result{stats, err}
+	}()
 	<-boundary
+	joined := &drainWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	joinedResult := make(chan result, 1)
+	go func() {
+		stats, err := manager.Drain(joined, nil)
+		joinedResult <- result{stats, err}
+	}()
+	<-joined.waiting
 	cancelled, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cancelledWaiter := &drainWaitContext{Context: cancelled, waiting: make(chan struct{})}
+	cancelledResult := make(chan error, 1)
+	go func() { cancelledResult <- drainError(manager, cancelledWaiter, nil) }()
+	<-cancelledWaiter.waiting
 	cancel()
-	require.ErrorIs(t, drainError(manager, cancelled, nil), context.Canceled)
+	require.ErrorIs(t, <-cancelledResult, context.Canceled)
 	close(release)
-	require.NoError(t, <-finished)
+	first, second := <-finished, <-joinedResult
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+	assert.Equal(t, 2, first.stats.Synced)
+	assert.Equal(t, first.stats, second.stats, "live callers share the same completed drain")
 	assert.Equal(t, int32(2), copies.Load())
 	labels, err := receiver.GetMachineLabels(t.Context())
 	require.NoError(t, err)
@@ -72,6 +97,82 @@ func TestArchiveDrainSingleFlight(t *testing.T) {
 	offline := source.Repository + "-offline"
 	require.NoError(t, os.Rename(source.Repository, offline))
 	require.Error(t, drainError(manager, t.Context(), nil))
+	session, err := receiver.GetSessionFull(t.Context(), sourceDevice+"~codex:019eb791-cf7d-75c1-8439-9ed74c122e02")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+}
+
+// Done is observed only after Drain has selected an active run to wait for.
+type drainWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *drainWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+func TestArchiveDrainCancellationDetachesProgress(t *testing.T) {
+	source, _ := archiveFixture(t)
+	receiver := dbtest.OpenTestDB(t)
+	cfg := config.Config{DataDir: filepath.Dir(receiver.Path()), ArchiveSources: []config.ArchiveSource{source}}
+	engine := syncer.NewEngine(t.Context(), receiver, syncer.EngineConfig{Ephemeral: true})
+	defer engine.Close()
+	secondSource, releaseSource := make(chan struct{}), make(chan struct{})
+	var copies atomic.Int32
+	manager, err := NewManager(t.Context(), cfg, receiver, engine, func(ctx context.Context) error {
+		if copies.Add(1) == 2 {
+			close(secondSource)
+			select {
+			case <-releaseSource:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	callbackStarted, releaseCallback := make(chan struct{}), make(chan struct{})
+	var callbacks atomic.Int32
+	var reading atomic.Int32
+	finished := make(chan error, 1)
+	go func() {
+		finished <- drainError(manager, ctx, func(p syncer.Progress) {
+			callbacks.Add(1)
+			if p.Detail == "Reading archived session" && reading.Add(1) == 1 {
+				close(callbackStarted)
+				<-releaseCallback
+			}
+		})
+	}()
+	<-callbackStarted
+	joined := &drainWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	joinedResult := make(chan error, 1)
+	go func() { joinedResult <- drainError(manager, joined, nil) }()
+	<-joined.waiting
+	cancel()
+	var returned bool
+	select {
+	case <-finished:
+		returned = true
+		assert.Fail(t, "Drain returned while its progress callback was still running")
+	case <-time.After(time.Second):
+	}
+	close(releaseCallback)
+	if !returned {
+		require.ErrorIs(t, <-finished, context.Canceled)
+	}
+	<-secondSource
+	before := callbacks.Load()
+	close(releaseSource)
+	require.NoError(t, <-joinedResult)
+	assert.Equal(t, before, callbacks.Load(), "a cancelled caller receives no progress after Drain returns")
+	assert.Equal(t, int32(2), copies.Load(), "caller cancellation leaves shared work running")
 	session, err := receiver.GetSessionFull(t.Context(), sourceDevice+"~codex:019eb791-cf7d-75c1-8439-9ed74c122e02")
 	require.NoError(t, err)
 	require.NotNil(t, session)
