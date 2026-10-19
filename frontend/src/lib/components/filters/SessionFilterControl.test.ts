@@ -88,7 +88,8 @@ it("shows and searches machine labels while selecting the stored machine key", a
 });
 
 it("shows a temporary machine failure, disables rows, and retries when reopened", async () => {
-  vi.spyOn(sessions, "loadAgents").mockResolvedValue();
+  // The shared beforeEach stubs loadMachines; this test needs the real loader.
+  vi.mocked(sessions.loadMachines).mockRestore();
   vi.spyOn(sessions, "load").mockResolvedValue();
   sessions.setMachineFilter("Retry label");
   let fail!: (reason: unknown) => void;
