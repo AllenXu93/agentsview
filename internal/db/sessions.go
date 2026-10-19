@@ -1482,6 +1482,9 @@ func (db *DB) DeleteParserExcludedSessions(ctx context.Context, ids []string) (i
 		if id == "" {
 			continue
 		}
+		if err := db.checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: Session{ID: id}}); err != nil {
+			return 0, fmt.Errorf("checking parser-excluded session ownership: %w", err)
+		}
 		if err := deleteSessionMessagesTx(tx, id); err != nil {
 			return 0, fmt.Errorf(
 				"pre-deleting parser-excluded session %s messages: %w",
@@ -1687,7 +1690,7 @@ func (db *DB) upsertSession(ctx context.Context,
 		return sessionUpsertResult{}, fmt.Errorf("beginning session upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: s}); err != nil {
+	if err := db.checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: s}); err != nil {
 		return sessionUpsertResult{}, err
 	}
 

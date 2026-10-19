@@ -7,7 +7,7 @@ import (
 )
 
 // CopyAttachedArchiveStateFrom supplies identity and completion state before
-// replacement sessions are parsed. Session provenance follows the session rows.
+// replacement sessions are parsed and reserves ownership until rows are restored.
 func (d *DB) CopyAttachedArchiveStateFrom(ctx context.Context, source string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -28,7 +28,34 @@ func (d *DB) CopyAttachedArchiveStateFrom(ctx context.Context, source string) er
 	if err := copyAttachedArchiveStateTx(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	owners := make(map[string]ArchiveSessionProvenance)
+	if oldDBHasTable(ctx, tx, "archive_session_provenance") {
+		rows, err := tx.QueryContext(ctx, `SELECT session_id,archive_id,device_id,root_id,source_key,manifest_id,native_session_id FROM old_db.archive_session_provenance`)
+		if err != nil {
+			return fmt.Errorf("reading attached archive ownership: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			var owner ArchiveSessionProvenance
+			source := &owner.Source
+			if err := rows.Scan(&id, &source.ArchiveID, &source.DeviceID, &source.RootID, &source.SourceKey, &owner.ManifestID, &owner.NativeSessionID); err != nil {
+				return fmt.Errorf("reading attached archive owner: %w", err)
+			}
+			owners[id] = owner
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	d.archiveRebuildProvenance.Store(&owners)
+	return nil
 }
 
 func copyAttachedArchiveStateTx(ctx context.Context, tx *sql.Tx) error {

@@ -9,8 +9,18 @@ import (
 
 // Check before any session update; a row without provenance belongs to another
 // ingestion route even if its namespaced ID happens to match.
-func checkArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) error {
+func (d *DB) checkArchiveSessionProvenanceTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) error {
 	p := write.ArchiveProvenance
+	if owners := d.archiveRebuildProvenance.Load(); owners != nil {
+		if stored, ok := (*owners)[write.Session.ID]; ok {
+			if p == nil {
+				return fmt.Errorf("%w: session belongs to an attached archive", ErrArchiveSourceConflict)
+			}
+			if stored.Source != p.Source || stored.ManifestID != p.ManifestID || stored.NativeSessionID != p.NativeSessionID {
+				return fmt.Errorf("%w: session already belongs to another source", ErrArchiveSourceConflict)
+			}
+		}
+	}
 	if p == nil {
 		var owned bool
 		err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_session_provenance WHERE session_id=?)`, write.Session.ID).Scan(&owned)
@@ -87,7 +97,7 @@ func (d *DB) CheckArchiveSessionProvenance(ctx context.Context, session Session,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	return checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: session, ArchiveProvenance: &provenance})
+	return d.checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: session, ArchiveProvenance: &provenance})
 }
 
 func (d *DB) ArchiveSourceSessionIDs(ctx context.Context, source ArchiveSourceIdentity) ([]string, error) {

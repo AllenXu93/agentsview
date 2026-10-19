@@ -319,7 +319,7 @@ func stagedSessionContentDigestTx(ctx context.Context,
 	return digest, nil
 }
 
-func commitStagedDerivedStateAndCheckpoint(
+func (db *DB) commitStagedDerivedStateAndCheckpoint(
 	ctx context.Context, conn *sql.Conn, sessionID string,
 	signals *SessionSignalUpdate, findings []SecretFinding,
 	cp *ParserCheckpoint, blobs *ParserCheckpointBlobs,
@@ -331,7 +331,7 @@ func commitStagedDerivedStateAndCheckpoint(
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := publishStagedSessionMetadataTx(ctx, tx, write); err != nil {
+	if err := db.publishStagedSessionMetadataTx(ctx, tx, write); err != nil {
 		return err
 	}
 
@@ -429,7 +429,7 @@ func (db *DB) replaceSessionContentStaged(
 		return fmt.Errorf("beginning tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := publishStagedSessionMetadataTx(ctx, tx, write); err != nil {
+	if err := db.publishStagedSessionMetadataTx(ctx, tx, write); err != nil {
 		return err
 	}
 
@@ -490,7 +490,7 @@ func (db *DB) replaceSessionContentStaged(
 		if err := tx.Rollback(); err != nil {
 			return err
 		}
-		return commitStagedDerivedStateAndCheckpoint(
+		return db.commitStagedDerivedStateAndCheckpoint(
 			ctx, conn, sessionID, signals, findings, cp, blobs, msgs, write,
 		)
 	}
@@ -722,11 +722,11 @@ func (db *DB) WriteSessionBatchStaged(ctx context.Context, write SessionBatchWri
 	return nil
 }
 
-func publishStagedSessionMetadataTx(ctx context.Context, tx *sql.Tx, write *SessionBatchWrite) error {
+func (db *DB) publishStagedSessionMetadataTx(ctx context.Context, tx *sql.Tx, write *SessionBatchWrite) error {
 	if write == nil {
 		return nil
 	}
-	result, err := upsertSessionBatchTx(ctx, tx, *write)
+	result, err := db.upsertSessionBatchTx(ctx, tx, *write)
 	if err != nil {
 		return err
 	}

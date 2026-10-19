@@ -186,7 +186,7 @@ func (db *DB) WriteSessionBatchContext(
 		}
 
 		var sessionRecallRevocations recallEvidenceRevocationEvents
-		messagesWritten, err := writeOneSessionBatchTx(
+		messagesWritten, err := db.writeOneSessionBatchTx(
 			ctx, tx, ctxTx,
 			write,
 			&sessionRecallRevocations,
@@ -268,7 +268,7 @@ func (db *DB) WriteSessionBatchAtomic(ctx context.Context,
 
 	for i, write := range writes {
 		write = db.storageSessionBatchWrite(sanitizeSessionBatchWrite(write))
-		messagesWritten, err := writeOneSessionBatchTx(
+		messagesWritten, err := db.writeOneSessionBatchTx(
 			context.Background(), tx, tx,
 			write,
 			&pendingRecallRevocations,
@@ -464,7 +464,7 @@ func rollbackSavepoint(tx transactionQueries, savepoint string) error {
 	return nil
 }
 
-func writeOneSessionBatchTx(
+func (db *DB) writeOneSessionBatchTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	queries transactionQueries,
@@ -473,7 +473,7 @@ func writeOneSessionBatchTx(
 	usageOnly bool,
 	pinSnapshot *[]savedPin,
 ) (int, error) {
-	upsertResult, err := upsertSessionBatchTx(ctx, tx, write)
+	upsertResult, err := db.upsertSessionBatchTx(ctx, tx, write)
 	if err != nil {
 		return 0, err
 	}
@@ -830,8 +830,8 @@ func messagesAfterOrdinal(msgs []Message, maxOrd int) []Message {
 	return nil
 }
 
-func upsertSessionBatchTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) (sessionUpsertResult, error) {
-	if err := checkArchiveSessionProvenanceTx(ctx, tx, write); err != nil {
+func (db *DB) upsertSessionBatchTx(ctx context.Context, tx *sql.Tx, write SessionBatchWrite) (sessionUpsertResult, error) {
+	if err := db.checkArchiveSessionProvenanceTx(ctx, tx, write); err != nil {
 		return sessionUpsertResult{}, err
 	}
 
