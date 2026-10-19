@@ -3314,9 +3314,9 @@ func (e *Engine) resyncBuildLocked(
 			localOldFileSessions = 1
 		}
 		for i, contributor := range opts.Contributors {
-			if len(contributor.IDPrefixes) > 0 {
-				for _, prefix := range contributor.IDPrefixes {
-					count, err := origDB.FileBackedSessionCountForSource(ctx, strings.TrimSuffix(prefix, "~"), prefix)
+			if contributor.ArchiveSources != nil {
+				for _, source := range contributor.ArchiveSources {
+					count, err := origDB.FileBackedSessionCountForArchiveSource(ctx, source)
 					if err != nil {
 						return SyncStats{Aborted: true}, err
 					}

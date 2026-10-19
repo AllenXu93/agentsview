@@ -37,18 +37,41 @@ func RebuildContributors(ctx context.Context, cfg config.Config) (syncer.Rebuild
 			return options, err
 		}
 		prefixes, err := index.idPrefixes(ctx)
+		var sources []db.ArchiveSourceProvenance
+		if err == nil {
+			sources, err = index.rebuildSources(ctx)
+		}
 		err = errors.Join(err, index.Close())
 		if err != nil {
 			return options, err
 		}
 		options.Contributors = append(options.Contributors, syncer.RebuildContributor{
 			Name: source.Name, IDPrefixes: prefixes, Config: syncer.EngineConfig{Ephemeral: true},
+			ArchiveSources: sources,
 			Run: func(ctx context.Context, engine *syncer.Engine, database *db.DB, progress syncer.ProgressFunc) (syncer.SyncStats, error) {
 				return rebuildAttachment(ctx, cfg, source, index.Info, engine, database, progress)
 			},
 		})
 	}
 	return options, nil
+}
+
+func (i *Index) rebuildSources(ctx context.Context) ([]db.ArchiveSourceProvenance, error) {
+	rows, err := i.database.QueryContext(ctx, `SELECT r.device_id,s.root_id,s.source_key,s.manifest_id
+		FROM sources s JOIN roots r ON r.id=s.root_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sources := []db.ArchiveSourceProvenance{}
+	for rows.Next() {
+		p := db.ArchiveSourceProvenance{Source: db.ArchiveSourceIdentity{ArchiveID: i.ArchiveID}}
+		if err := rows.Scan(&p.Source.DeviceID, &p.Source.RootID, &p.Source.SourceKey, &p.ManifestID); err != nil {
+			return nil, err
+		}
+		sources = append(sources, p)
+	}
+	return sources, rows.Err()
 }
 
 func (i *Index) idPrefixes(ctx context.Context) ([]string, error) {

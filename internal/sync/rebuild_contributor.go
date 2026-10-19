@@ -23,6 +23,9 @@ type RebuildContributor struct {
 	Config     EngineConfig
 	Run        func(context.Context, *Engine, *db.DB, ProgressFunc) (SyncStats, error)
 	IDPrefixes []string
+	// ArchiveSources scopes discovery safety to selected accepted sources.
+	// A non-nil empty slice represents an archive with no supported sources.
+	ArchiveSources []db.ArchiveSourceProvenance
 
 	// ForceParse bypasses freshness gates for every contributor source. Remote
 	// explicit-full imports use this to preserve their parsing contract while
