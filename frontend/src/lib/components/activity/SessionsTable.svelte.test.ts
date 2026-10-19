@@ -143,21 +143,26 @@ describe("SessionsTable", () => {
     await unmount(c);
   });
 
-  it("requests a server sort when the Cost header is clicked", async () => {
+  it.each([
+    ["cost", "desc", "agent_minutes", "desc"],
+    ["session", "asc", "agent_minutes", "desc"],
+    ["model", "asc", "agent_minutes", "desc"],
+    ["session", "desc", "session", "asc"],
+  ] as const)("requests %s %s from the server", async (key, direction, sortKey, sortDir) => {
     const onSort = vi.fn();
     const report = makeReport(fixtureRows());
     const c = mount(SessionsTable, {
       target: document.body,
-      props: { report, onSort },
+      props: { report, onSort, sortKey, sortDir },
     });
     await tick();
 
-    const costHeader = document.querySelector("th.sort-cost button") as HTMLElement | null;
-    expect(costHeader).toBeTruthy();
-    costHeader!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const header = document.querySelector(`th.sort-${key} button`) as HTMLElement | null;
+    expect(header).toBeTruthy();
+    header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await tick();
 
-    expect(onSort).toHaveBeenCalledWith("cost", "desc");
+    expect(onSort).toHaveBeenCalledWith(key, direction);
     expect(rowOrder()).toEqual(["high-min", "low-min", "untimed"]);
 
     await unmount(c);

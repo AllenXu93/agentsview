@@ -135,3 +135,27 @@ func TestArtifactDigestIsIndependentOfMembershipMapOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, leftDigest, changed)
 }
+
+func TestPageSessionsDisplayedSessionAndModelOrder(t *testing.T) {
+	rows := []SessionRow{
+		{SessionID: "z", Title: "Alpha", PrimaryModel: "model-z", Models: []string{"model-z"}},
+		{SessionID: "empty"},
+		{SessionID: "mixed-b", Title: "Mixed", PrimaryModel: "model-a", Models: []string{"model-a", "model-z"}},
+		{SessionID: "mixed-a", Title: "Mixed", PrimaryModel: "model-z", Models: []string{"model-z", "model-a"}},
+	}
+	for _, tc := range []struct {
+		sort SessionSort
+		want []string
+	}{
+		{SessionSortSession, []string{"z", "mixed-a", "mixed-b", "empty"}},
+		{SessionSortModel, []string{"empty", "z", "mixed-a", "mixed-b"}},
+	} {
+		page, err := PageSessions(rows, nil, SessionPageOptions{Sort: tc.sort, Direction: "asc"})
+		require.NoError(t, err)
+		got := make([]string, 0, len(page.Sessions))
+		for _, row := range page.Sessions {
+			got = append(got, row.SessionID)
+		}
+		assert.Equal(t, tc.want, got, "sort %s", tc.sort)
+	}
+}

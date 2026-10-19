@@ -226,7 +226,19 @@ describe("ToolImageCleanup", () => {
   // one after confirmApply, carrying confirmed: true and the frozen filter.
   it("cancel issues no apply request; confirm sends exactly one request with frozen filter", async () => {
     vi.useFakeTimers();
-    dataService.postApiV1DataStripImagesPreview.mockResolvedValue(reportWithPayloads());
+    const preview = reportWithPayloads();
+    preview.projects.push({
+      ...preview.projects[0]!,
+      project: "other-project",
+      payloads: 10,
+      stored_bytes: 900,
+    });
+    preview.sessions = 4;
+    preview.changed = 4;
+    preview.payloads = 13;
+    preview.stored_bytes = 4996;
+    preview.decoded_bytes = 4096;
+    dataService.postApiV1DataStripImagesPreview.mockResolvedValue(preview);
     dataService.postApiV1DataStripImages.mockResolvedValue(reportWithPayloads());
 
     const component = mount(ToolImageCleanup, { target: document.body });
@@ -245,6 +257,19 @@ describe("ToolImageCleanup", () => {
     // Preview.
     document.body.querySelectorAll("button")[0]?.click();
     await settle();
+
+    const order = () =>
+      Array.from(document.querySelectorAll("tbody td:first-child"), (cell) => cell.textContent);
+    for (const [heading, expected] of [
+      ["Payloads", ["other-project", "my-project"]],
+      ["Stored", ["my-project", "other-project"]],
+    ] as const) {
+      Array.from(document.querySelectorAll<HTMLButtonElement>("thead button"))
+        .find((button) => button.textContent?.trim() === heading)!
+        .click();
+      await settle();
+      expect(order()).toEqual(expected);
+    }
 
     // Open confirm dialog (requestApply).
     const removeBtn = Array.from(document.body.querySelectorAll("button")).find((b) =>

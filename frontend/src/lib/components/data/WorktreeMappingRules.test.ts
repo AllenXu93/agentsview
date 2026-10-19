@@ -235,13 +235,15 @@ describe("WorktreeMappingRules", () => {
   it("cross-links target projects and shows the derived label for empty projects", async () => {
     dataService.getApiV1DataProjectRules.mockResolvedValue(
       response("remote-host", [
-        rule(),
+        rule({ project: "zeta-project", governed_sessions: 10 }),
         rule({
           id: 2,
           path_prefix: "/srv/parent",
           layout: "repo_dot_worktrees",
           project: "",
           original_project: "",
+          governed_sessions: 2,
+          updated_at: "2026-07-05T00:00:00Z",
         }),
       ]),
     );
@@ -249,14 +251,22 @@ describe("WorktreeMappingRules", () => {
     component = mountRules();
     await flush();
 
-    await fireEvent.click(screen.getByRole("button", { name: "canonical-project" }));
-    expect(onSelectProject).toHaveBeenCalledWith("canonical-project");
+    await fireEvent.click(screen.getByRole("button", { name: "zeta-project" }));
+    expect(onSelectProject).toHaveBeenCalledWith("zeta-project");
 
+    await fireEvent.click(screen.getByRole("button", { name: "Target project" }));
     const rows = document.querySelectorAll("tbody tr");
     expect(rows.length).toBe(2);
-    const derivedCell = rows[1]?.querySelector("td:nth-child(2)");
+    const derivedCell = rows[0]?.querySelector("td:nth-child(2)");
     expect(derivedCell?.textContent).toContain("repo.worktrees/branch");
     expect(derivedCell?.querySelector("button")).toBeNull();
+    expect(rows[1]?.querySelector("td:nth-child(2)")?.textContent).toBe("zeta-project");
+    const order = () =>
+      Array.from(document.querySelectorAll("tbody td:first-child"), (cell) => cell.textContent);
+    await fireEvent.click(screen.getByRole("button", { name: "Governed sessions" }));
+    expect(order()).toEqual(["/srv/worktrees/example", "/srv/parent"]);
+    await fireEvent.click(screen.getByRole("button", { name: "Updated" }));
+    expect(order()).toEqual(["/srv/parent", "/srv/worktrees/example"]);
   });
 
   it("requests the server default machine and falls back to local_machine", async () => {
