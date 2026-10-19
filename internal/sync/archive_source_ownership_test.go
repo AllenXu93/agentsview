@@ -20,11 +20,10 @@ func TestOrdinarySourceCannotReplaceAttachedHistory(t *testing.T) {
 			const id = device + "~owned"
 			key := db.ArchiveAttachmentKey{RepositoryID: "repository", SnapshotID: "snapshot"}
 			provenance := db.ArchiveSessionProvenance{
-				ArchiveSourceProvenance: db.ArchiveSourceProvenance{
-					Attachment: key,
-					Source:     db.ArchiveSourceIdentity{ArchiveID: "archive", DeviceID: device, RootID: "root", SourceKey: "source"},
-					ManifestID: "manifest",
-				}, NativeSessionID: "owned",
+				Attachment:      key,
+				Source:          db.ArchiveSourceIdentity{ArchiveID: "archive", DeviceID: device, RootID: "root", SourceKey: "source"},
+				ManifestID:      "manifest",
+				NativeSessionID: "owned",
 			}
 			require.NoError(t, database.RegisterArchiveAttachment(t.Context(), key, "archive"))
 			require.NoError(t, database.SetArchiveAttachmentTargets(t.Context(), key, "target", []db.ArchiveSourceTarget{{Provenance: provenance.ArchiveSourceProvenance, Target: "target"}}))

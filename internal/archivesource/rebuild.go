@@ -22,14 +22,14 @@ import (
 func RebuildContributors(ctx context.Context, cfg config.Config) (syncer.RebuildOptions, error) {
 	var options syncer.RebuildOptions
 	for _, source := range cfg.ArchiveSources {
-		if _, err := os.Stat(source.Repository); errors.Is(err, fs.ErrNotExist) {
+		if _, err := os.Stat(source.Path()); errors.Is(err, fs.ErrNotExist) {
 			log.Printf("archive source %q unavailable; retaining indexed history", source.Name)
 			continue
 		} else if err != nil {
 			return options, err
 		}
 		index, err := OpenIndex(ctx, source, filepath.Join(cfg.DataDir, "archive-sources"), nil)
-		if errors.Is(err, docbank.ErrBackupRepositoryLocked) {
+		if archiveBusy(err) {
 			log.Printf("archive source %q busy; retaining indexed history", source.Name)
 			continue
 		}
@@ -44,7 +44,7 @@ func RebuildContributors(ctx context.Context, cfg config.Config) (syncer.Rebuild
 		options.Contributors = append(options.Contributors, syncer.RebuildContributor{
 			Name: source.Name, IDPrefixes: prefixes, Config: syncer.EngineConfig{Ephemeral: true},
 			Run: func(ctx context.Context, engine *syncer.Engine, database *db.DB, progress syncer.ProgressFunc) (syncer.SyncStats, error) {
-				return rebuildAttachment(ctx, cfg, source, engine, database, progress)
+				return rebuildAttachment(ctx, cfg, source, index.Info, engine, database, progress)
 			},
 		})
 	}
@@ -68,7 +68,7 @@ func (i *Index) idPrefixes(ctx context.Context) ([]string, error) {
 	return prefixes, rows.Err()
 }
 
-func rebuildAttachment(ctx context.Context, cfg config.Config, source config.ArchiveSource, engine *syncer.Engine, database *db.DB, progress syncer.ProgressFunc) (total syncer.SyncStats, retErr error) {
+func rebuildAttachment(ctx context.Context, cfg config.Config, source config.ArchiveSource, expected docbank.BackupReaderInfo, engine *syncer.Engine, database *db.DB, progress syncer.ProgressFunc) (total syncer.SyncStats, retErr error) {
 	index, err := waitForRepository(ctx, source.Name, 0, progress, func() (*Index, error) {
 		return OpenIndex(ctx, source, filepath.Join(cfg.DataDir, "archive-sources"), indexProgress(progress))
 	})
@@ -76,6 +76,9 @@ func rebuildAttachment(ctx context.Context, cfg config.Config, source config.Arc
 		return total, err
 	}
 	defer func() { retErr = errors.Join(retErr, index.Close()) }()
+	if index.Info.RepositoryID != expected.RepositoryID || index.Info.SnapshotID != expected.SnapshotID {
+		return total, fmt.Errorf("%w: archive changed before rebuild", db.ErrArchiveSourceConflict)
+	}
 	if err := index.register(ctx, database, cfg); err != nil {
 		return total, err
 	}
@@ -119,7 +122,7 @@ func waitForRepository[T any](ctx context.Context, name string, completed int, p
 	policy.MaxInterval = 5 * time.Second
 	return backoff.Retry(ctx, func() (T, error) {
 		value, err := work()
-		if err != nil && !errors.Is(err, docbank.ErrBackupRepositoryLocked) {
+		if err != nil && !archiveBusy(err) {
 			return value, backoff.Permanent(err)
 		}
 		return value, err
@@ -128,4 +131,8 @@ func waitForRepository[T any](ctx context.Context, name string, completed int, p
 			progress(syncer.Progress{Phase: syncer.PhaseSyncing, Resync: true, Detail: fmt.Sprintf("Waiting for archive repository %q: %d sources complete, %s elapsed", name, completed, time.Since(started).Round(time.Second))})
 		}
 	}))
+}
+
+func archiveBusy(err error) bool {
+	return errors.Is(err, docbank.ErrBackupRepositoryLocked) || errors.Is(err, errDirectoryBusy)
 }

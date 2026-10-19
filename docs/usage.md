@@ -1435,8 +1435,9 @@ backend versions differ. Click it to reload.
 
 [Attach a saved archive](/docs/configuration/#history-from-a-saved-archive) to
 browse a retired machine's Claude and Codex sessions beside your current ones.
-Ordinary sync reads pending archive sources after local work. Once indexed, the
-history remains browsable with the drive disconnected. Reparsing requires the
+Choose a backup snapshot or an existing archive directory. You can override
+machine display names without changing the captured identities. Ordinary sync
+reads pending archive sources after local work. Once indexed, the history remains browsable with the drive disconnected. Reparsing requires the
 archive to be available again.
 
 ### Full Resync

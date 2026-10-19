@@ -16,6 +16,7 @@ import (
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/rawderive"
 	"go.kenn.io/docbank/docbank"
 	"go.kenn.io/kit/atomicfile"
 )
@@ -24,9 +25,12 @@ const indexVersion = 1
 
 // Index is disposable source metadata. Session ownership lives in the receiver.
 type Index struct {
-	Info      docbank.BackupReaderInfo
-	ArchiveID string
-	database  *sql.DB
+	Info         docbank.BackupReaderInfo
+	ArchiveID    string
+	database     *sql.DB
+	objects      rawderive.ObjectStore
+	closeSource  func() error
+	machineNames map[string]string
 }
 
 type Source struct {
@@ -42,12 +46,20 @@ type Coverage struct {
 
 // OpenIndex requires the caller to own the receiving data directory. cacheDir
 // belongs exclusively to this feature; abandoned bootstrap trees are removed.
-func OpenIndex(ctx context.Context, source config.ArchiveSource, cacheDir string, progress func(string)) (_ *Index, retErr error) {
+func OpenIndex(ctx context.Context, source config.ArchiveSource, cacheDir string, progress func(string)) (index *Index, retErr error) {
+	defer func() {
+		if index != nil {
+			index.machineNames = source.MachineNames
+		}
+	}()
 	if err := (config.Config{ArchiveSources: []config.ArchiveSource{source}}).ValidateArchiveSources(); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if source.Directory != "" {
+		return openDirectoryIndex(ctx, source, cacheDir)
 	}
 	// Reopen the repository too: its constructor caches the repository UUID.
 	repository, err := docbank.OpenBackupRepository(source.Repository)
@@ -124,7 +136,14 @@ func openCompactIndex(ctx context.Context, path string, info docbank.BackupReade
 	return &Index{Info: info, ArchiveID: archiveID, database: conn}, nil
 }
 
-func (i *Index) Close() error { return i.database.Close() }
+func (i *Index) Close() error {
+	err := i.database.Close()
+	if i.closeSource != nil {
+		err = errors.Join(err, i.closeSource())
+		i.closeSource = nil
+	}
+	return err
+}
 
 func (i *Index) Sources(ctx context.Context, after string, limit int) ([]Source, error) {
 	if limit <= 0 || limit > 10000 {
@@ -191,7 +210,7 @@ func bootstrapIndex(ctx context.Context, reader *docbank.BackupReader, target st
 		return err
 	}
 	output := filepath.Join(scratch, "index.db")
-	if err := buildCompactIndex(ctx, saved, output, reader); err != nil {
+	if err := buildCompactIndex(ctx, immutableURI(saved), output, reader.Info(), snapshotObjects{reader}.checkObject); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {

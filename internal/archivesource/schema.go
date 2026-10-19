@@ -89,8 +89,8 @@ func checkColumns(ctx context.Context, source *sql.DB, table string, required ma
 	return nil
 }
 
-func buildCompactIndex(ctx context.Context, saved, output string, reader *docbank.BackupReader) (retErr error) {
-	source, err := sql.Open("sqlite3", immutableURI(saved))
+func buildCompactIndex(ctx context.Context, savedURI, output string, info docbank.BackupReaderInfo, checkObject func(context.Context, string, rawsync.ObjectRef) error) (retErr error) {
+	source, err := sql.Open("sqlite3", savedURI)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func buildCompactIndex(ctx context.Context, saved, output string, reader *docban
 	if err != nil {
 		return err
 	}
-	if err := validateSavedRecords(ctx, source, archiveID, reader); err != nil {
+	if err := validateSavedRecords(ctx, source, archiveID, checkObject); err != nil {
 		return err
 	}
 	file, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -115,7 +115,7 @@ func buildCompactIndex(ctx context.Context, saved, output string, reader *docban
 	}
 	defer func() { retErr = errors.Join(retErr, index.Close()) }()
 	index.SetMaxOpenConns(1)
-	if _, err := index.ExecContext(ctx, `ATTACH DATABASE ? AS saved`, immutableURI(saved)); err != nil {
+	if _, err := index.ExecContext(ctx, `ATTACH DATABASE ? AS saved`, savedURI); err != nil {
 		return err
 	}
 	tx, err := index.BeginTx(ctx, nil)
@@ -123,7 +123,7 @@ func buildCompactIndex(ctx context.Context, saved, output string, reader *docban
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := copyIndexTables(ctx, tx, archiveID, reader.Info()); err != nil {
+	if err := copyIndexTables(ctx, tx, archiveID, info); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -157,7 +157,7 @@ func copyIndexTables(ctx context.Context, tx *sql.Tx, archiveID string, info doc
 	return err
 }
 
-func validateSavedRecords(ctx context.Context, source *sql.DB, archiveID string, reader *docbank.BackupReader) error {
+func validateSavedRecords(ctx context.Context, source *sql.DB, archiveID string, checkObject func(context.Context, string, rawsync.ObjectRef) error) error {
 	roots, err := readRoots(ctx, source)
 	if err != nil {
 		return err
@@ -165,7 +165,7 @@ func validateSavedRecords(ctx context.Context, source *sql.DB, archiveID string,
 	if err := validateDevices(ctx, source, roots); err != nil {
 		return err
 	}
-	if err := validateSources(ctx, source, roots, archiveID, reader); err != nil {
+	if err := validateSources(ctx, source, roots, archiveID, checkObject); err != nil {
 		return err
 	}
 	for _, query := range []string{
@@ -257,7 +257,7 @@ func validateDevices(ctx context.Context, source *sql.DB, roots map[string]db.Ra
 	return nil
 }
 
-func validateSources(ctx context.Context, source *sql.DB, roots map[string]db.RawArchiveRoot, archiveID string, reader *docbank.BackupReader) error {
+func validateSources(ctx context.Context, source *sql.DB, roots map[string]db.RawArchiveRoot, archiveID string, checkObject func(context.Context, string, rawsync.ObjectRef) error) error {
 	rows, err := source.QueryContext(ctx, `SELECT manifest_id,root_id,source_key,canonical_json FROM raw_archive_sources`)
 	if err != nil {
 		return err
@@ -285,12 +285,8 @@ func validateSources(ctx context.Context, source *sql.DB, roots map[string]db.Ra
 			return errors.New("accepted source differs from its recorded root")
 		}
 		for _, ref := range manifest.Objects {
-			object, err := reader.Object(ref.SHA256)
-			if err != nil {
+			if err := checkObject(ctx, archiveID, ref); err != nil {
 				return fmt.Errorf("source object %s: %w", ref.SHA256, err)
-			}
-			if object.Bytes != ref.Length {
-				return fmt.Errorf("source object %s differs from its recorded size", ref.SHA256)
 			}
 		}
 	}

@@ -13,12 +13,28 @@ installation. Sync reads its archived Claude and Codex sessions alongside local
 sessions. Both appear in the same application, attributed to their original
 machines. This lets users retire a machine and keep using its history.
 
-The first source reader uses existing AgentsView backup snapshots. This is the
-storage format for the first delivery, not a requirement that users restore a
-backup before using their history. The original files stay compressed. Users do
-not restore a vault, keep an extracted transcript tree, or run a separate
-archive server. Parsing uses temporary files for one source at a time. Opening a
-live Docbank vault directly remains a separate source-reader integration.
+The backup reader uses existing AgentsView snapshots without restoring a vault.
+The directory reader below handles archives that already have a Docbank vault.
+The original files stay compressed. Users do not need to restore a vault, keep
+an extracted transcript tree, or run a separate archive server. Parsing uses
+temporary files for one source at a time.
+
+The delivery also accepts an existing archive directory through `directory`.
+This includes an original AgentsView archive, an AgentsView restore, or a
+Docbank restore containing `application/sessions.db`. It uses the same accepted
+source records, machine identities, parser and receiving database. Directory
+reading holds the source application writer lock and embedded Docbank owner for
+one pass; the source must be stopped and writable. The application database is
+opened read-only, without migrations. Docbank uses its normal catalog open and
+maintenance path. A compact acceptance catalog is rebuilt without copying
+transcripts; its digest identifies the selected generation. Path changes do not
+change ownership. A changed source manifest still conflicts with an existing
+binding. Rebuild preparation pins the selected catalog digest and refuses a
+directory changed before the rebuild starts.
+
+Optional `machine_names` maps captured installation IDs to display names. Labels
+change independently of identity and completion, without a reparse.
+Configuration rejects contradictory labels across sources.
 
 Configuration, followed by the existing `agentsview sync` command:
 
@@ -66,8 +82,9 @@ priority between archived sources, so it does not wait for the whole backlog.
   deletions. Honor deletions recorded for the source installation. Do not
   merge the source database's stars, pins, renames, or other curation in this
   slice.
-- Read a backup repository. Opening a live Docbank vault, direct object-storage
-  access, and a source-management UI are outside this delivery.
+- Read backup repositories and stopped archive directories. Concurrent access to
+  a running vault, direct object-storage access, and a source-management UI
+  are outside this delivery.
 
 The reviewed design permits one bootstrap extraction: build the source index
 from the snapshot's application database.
@@ -130,7 +147,7 @@ Alternatives considered:
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Temporary application database, then compact index  | Selected approach. Reads existing backups with the smallest change; needs temporary database-sized disk space.                                             |
 | SQLite reads directly from compressed backup chunks | Avoids the full temporary database, but needs a random-access reader and SQLite filesystem integration. Defer unless zero database extraction is required. |
-| Restore a Docbank vault first                       | Uses today's APIs but creates another content store. Does not meet this feature's goal.                                                                    |
+| Restore a Docbank vault first                       | Supported when the user already has a restored archive; not required for reading backups.                                                                  |
 
 A separate index in future backups could reduce bootstrap cost. It is not a
 prerequisite and is not another format or fallback in this delivery.
@@ -170,10 +187,10 @@ Kit already exports `Open`, `LoadManifest`, `LoadBlobIndex`, and `OpenBlob` for
 plain objects. Chunked logical reads are implemented privately by `openObject`,
 `loadObjectRecipes`, and `recipeStream` in `backup/object_recipe.go`. Expose
 that existing chunk-aware path through the snapshot reader, with pack reader
-reuse and snapshot membership checks; do not invent another chunk format.
-Docbank wraps the reader. Calling `Restore` or opening a second live vault does
-not implement this contract. Index construction must not decode unrequested
-content or application extras.
+reuse and snapshot membership checks; do not invent another chunk format. For
+backup sources, Docbank wraps the reader. Calling `Restore` or opening a second
+live vault does not implement this contract. Index construction must not decode
+unrequested content or application extras.
 
 The repository's archive payload is unchanged. Existing leases write heartbeat
 files, so the first version requires permission to write those files, including

@@ -55,8 +55,11 @@ Remaining gates and limits:
 - Single-session refresh directs users to `agentsview sync --full`; scoped
   parser-version changes still drain only pending sources.
 
-The first implementation uses Docbank's merged reader commit for development. No
-installed binary, live archive, release, or remote branch was changed.
+The implementation uses Docbank's merged reader commit for development. Direct
+attachment also accepts a stopped archive directory, including Docbank restore
+output with its application database. Both readers share parsing and ownership.
+Machine labels can be overridden by captured installation ID. No installed
+binary or live archive is changed by the implementation checks.
 
 ## Delivery order
 

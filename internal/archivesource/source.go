@@ -22,17 +22,24 @@ const sourceScratchBytes = 16 << 30
 type snapshotObjects struct{ reader *docbank.BackupReader }
 
 func (s snapshotObjects) CopyObject(ctx context.Context, _ string, ref rawsync.ObjectRef, dst io.Writer) (rawsync.ObjectInfo, error) {
-	object, err := s.reader.Object(ref.SHA256)
-	if err != nil {
+	if err := s.checkObject(ctx, "", ref); err != nil {
 		return rawsync.ObjectInfo{}, err
-	}
-	if object.Bytes != ref.Length {
-		return rawsync.ObjectInfo{}, errors.New("archive source object length differs")
 	}
 	if _, err := s.reader.CopyObject(ctx, ref.SHA256, dst); err != nil {
 		return rawsync.ObjectInfo{}, err
 	}
 	return rawsync.ObjectInfo{Ref: ref}, nil
+}
+
+func (s snapshotObjects) checkObject(_ context.Context, _ string, ref rawsync.ObjectRef) error {
+	object, err := s.reader.Object(ref.SHA256)
+	if err != nil {
+		return err
+	}
+	if object.Bytes != ref.Length {
+		return errors.New("archive source object differs from its recorded size")
+	}
+	return nil
 }
 
 func (i *Index) provenance(source Source) db.ArchiveSourceProvenance {
@@ -61,19 +68,14 @@ func (i *Index) syncSource(ctx context.Context, repository string, source Source
 		if err != nil {
 			return syncer.EngineConfig{}, "", nil, err
 		}
-		reader, err := i.OpenReader(ctx, repository)
+		if err := rawderive.CleanAbandonedMaterializations(scratch); err != nil {
+			return syncer.EngineConfig{}, "", nil, err
+		}
+		materialized, err := i.materialize(ctx, repository, manifest, scratch)
 		if err != nil {
 			return syncer.EngineConfig{}, "", nil, err
 		}
-		materialized, err := (rawderive.Materializer{Store: snapshotObjects{reader}, BaseDir: scratch, MaxTotalBytes: sourceScratchBytes}).Materialize(ctx, manifest)
-		closeErr := reader.Close()
-		if err != nil {
-			return syncer.EngineConfig{}, "", nil, errors.Join(err, closeErr)
-		}
 		cleanup = materialized.Cleanup
-		if closeErr != nil {
-			return syncer.EngineConfig{}, "", nil, closeErr
-		}
 		storedPath := "archive://" + source.Root.ID + "/" + url.PathEscape(source.SourceKey)
 		prepared, err := rawderive.PrepareLocalSource(ctx, manifest, materialized, source.Root.DeviceID, storedPath)
 		if err != nil {
@@ -111,4 +113,21 @@ func (i *Index) syncSource(ctx context.Context, repository string, source Source
 		}
 		return prepared.Config, prepared.Path, cleanup, nil
 	}, progress)
+}
+
+func (i *Index) materialize(ctx context.Context, repository string, manifest rawsync.CanonicalManifest, scratch string) (*rawderive.Materialization, error) {
+	if i.objects != nil {
+		return (rawderive.Materializer{Store: i.objects, BaseDir: scratch, MaxTotalBytes: sourceScratchBytes}).Materialize(ctx, manifest)
+	}
+	reader, err := i.OpenReader(ctx, repository)
+	if err != nil {
+		return nil, err
+	}
+	materialized, err := (rawderive.Materializer{Store: snapshotObjects{reader}, BaseDir: scratch, MaxTotalBytes: sourceScratchBytes}).Materialize(ctx, manifest)
+	err = errors.Join(err, reader.Close())
+	if err != nil && materialized != nil {
+		err = errors.Join(err, materialized.Cleanup())
+		materialized = nil
+	}
+	return materialized, err
 }

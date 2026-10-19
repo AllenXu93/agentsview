@@ -57,6 +57,9 @@ func expandLocalPaths(cfg *Config) error {
 		return err
 	}
 	for i := range cfg.ArchiveSources {
+		if err := expand("archive directory", &cfg.ArchiveSources[i].Directory); err != nil {
+			return err
+		}
 		if err := expand("archive repository", &cfg.ArchiveSources[i].Repository); err != nil {
 			return err
 		}

@@ -209,7 +209,7 @@ func TestArchiveRebuildReservesAttachedSessionOwnership(t *testing.T) {
 			case "parser exclusion":
 				_, err = replacement.DeleteParserExcludedSessions(t.Context(), []string{write.Session.ID})
 			}
-			assert.ErrorIs(t, err, ErrArchiveSourceConflict)
+			require.ErrorIs(t, err, ErrArchiveSourceConflict)
 			require.NoError(t, original.CloseConnections(t.Context()))
 			_, err = replacement.CopyOrphanedDataFrom(original.Path())
 			require.NoError(t, err)
@@ -238,7 +238,7 @@ func TestParserExclusionPreservesAttachedArchiveAtomically(t *testing.T) {
 	require.NoError(t, err)
 
 	deleted, err := database.DeleteParserExcludedSessions(t.Context(), []string{"local", write.Session.ID})
-	assert.ErrorIs(t, err, ErrArchiveSourceConflict)
+	require.ErrorIs(t, err, ErrArchiveSourceConflict)
 	assert.Zero(t, deleted)
 	for _, fixture := range []struct{ id, content string }{{"local", "local question"}, {write.Session.ID, "original question"}} {
 		messages, err := database.GetAllMessages(t.Context(), fixture.id)
