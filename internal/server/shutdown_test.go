@@ -44,7 +44,7 @@ func TestShutdownCancelsOnDemandArchiveSources(t *testing.T) {
 			Name: "saved", Repository: filepath.Join(t.TempDir(), "offline"), Snapshot: "pinned",
 		}},
 	}, database, nil)
-	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
+	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
 	engine := srv.syncEngineForLocal(t.Context(), database)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -54,7 +54,7 @@ func TestShutdownCancelsOnDemandArchiveSources(t *testing.T) {
 	require.NotNil(t, manager)
 	_, err = manager.Drain(t.Context(), nil)
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, context.Canceled, "the first request must not own later attachment work")
+	require.NotErrorIs(t, err, context.Canceled, "the first request must not own later attachment work")
 
 	require.NoError(t, srv.Shutdown(t.Context()))
 	_, err = manager.Drain(t.Context(), nil)

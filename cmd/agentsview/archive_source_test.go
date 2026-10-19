@@ -160,7 +160,7 @@ func TestArchiveSourceNoSyncDaemonManualSync(t *testing.T) {
 			httpServer := httptest.NewUnstartedServer(nil)
 			cfg.PublicURL = "http://" + httpServer.Listener.Addr().String()
 			srv := server.New(cfg, database, nil, server.WithBaseContext(t.Context()))
-			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
+			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
 			httpServer.Config.Handler = srv.Handler()
 			httpServer.Start()
 			t.Cleanup(httpServer.Close)
