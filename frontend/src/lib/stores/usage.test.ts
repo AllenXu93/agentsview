@@ -2747,6 +2747,7 @@ describe("UsageStore time-series range selection", () => {
         ],
         agentBreakdowns: [],
         machineBreakdowns: [],
+        branchBreakdowns: [],
       },
     ];
     usage.summary = context;
