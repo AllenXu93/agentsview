@@ -11,16 +11,21 @@ The latest release is
 
 - `--fts`, terms, and hybrid message search no longer match command, path, and reasoning text.
 
-- SQLite message search matches dialogue and keeps tool renderings and reasoning
-  out of snippets for
+- SQLite, DuckDB, and ClickHouse message search matches dialogue and keeps tool
+  renderings and reasoning out of snippets for
   [supported providers](https://github.com/kenn-io/agentsview/blob/main/docs/session-api.md#agentsview-session-search).
-  SQLite substring and regex search include reasoning as `thinking` by default;
-  use `--in thinking` to search it alone. FTS, terms,
+  Substring and regex search on these backends include reasoning as `thinking`
+  by default; use `--in thinking` to search it alone. FTS, terms,
   semantic, and hybrid reject that source. Existing sessions reparse when source
   files are available; source-less sessions, v4 imports, and unpaired OpenHands
   observations keep searching their saved text as `message` hits. The first
   writable open refreshes full-text indexes once and waits for the scan.
-  Artifact transport and mirror dialogue search are a separate follow-up;
+  DuckDB mirrors rebuild on their next push. The first ClickHouse push after
+  upgrading re-sends every session in the configured mirror scope, including
+  sessions without dialogue, and needs schema permissions. Reads from either
+  pre-upgrade mirror fail with a schema compatibility error naming
+  `messages.dialogue_text` until the first push.
+  Artifact transport and PostgreSQL dialogue search are a separate follow-up;
   semantic search continues to use rendered messages.
 
 **Upgrade notes**
