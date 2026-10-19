@@ -296,11 +296,13 @@ const chExchangeProbePrefix = "agentsview_exchange_probe_"
 // exchange probe as a chExchangeProbe.
 const chExchangeProbeKey = "agentsview_table_exchange_probe"
 
-// chExchangeProbe is the answer of a table exchange probe and the server
-// time, in Unix seconds, at which it started.
+// chExchangeProbe is the answer of a table exchange probe, the serverUUID()
+// of the server that ran it, and the server time, in Unix seconds, at which
+// it started.
 type chExchangeProbe struct {
-	ProbedAt  int64 `json:"probed_at"`
-	Supported bool  `json:"supported"`
+	ProbedAt  int64  `json:"probed_at"`
+	Server    string `json:"server"`
+	Supported bool   `json:"supported"`
 }
 
 // chSnapshotStampSQL identifies the complete snapshot set as a row count and
@@ -669,9 +671,17 @@ func dropPreparedUsageView(ctx context.Context, conn *sql.DB) error {
 // UNSUPPORTED_METHOD error on the server, and a push watch runs the schema
 // step before every push. The answer depends on the filesystem that holds the
 // server's metadata directory, which changes only across a restart, so an
-// answer probed since the server started still holds. One probed before then,
-// including one a restore copied from another server, is probed again.
+// answer this server probed since it started still holds. An answer probed
+// before then is probed again. So is one from another server: RESTORE runs on
+// a live server and can copy in an answer newer than this server's start.
 func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, error) {
+	// A probe takes milliseconds, so probe tables an hour old belong to a
+	// push that was killed during one. A stored answer skips the probe until
+	// the next restart, so they are dropped here rather than in the probe.
+	if err := dropTables(ctx, conn, "match(name, ?) AND metadata_modification_time <= now() - INTERVAL 1 HOUR",
+		"^"+chExchangeProbePrefix+"[a-z0-9]+_[ab]$"); err != nil {
+		return false, err
+	}
 	// now() and uptime() count whole seconds, so the computed start can be
 	// one second after the start's own second, and a probe from that second
 	// would look older than the start. A probe up to a second before the
@@ -679,9 +689,10 @@ func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, err
 	// would take a probe, a restart, and a move of the data directory within
 	// two seconds.
 	var now, started int64
+	var server string
 	if err := conn.QueryRowContext(ctx,
-		"SELECT toUnixTimestamp(now()) AS t, t - uptime()").Scan(&now, &started); err != nil {
-		return false, fmt.Errorf("reading server start time: %w", err)
+		"SELECT toUnixTimestamp(now()) AS t, t - uptime(), toString(serverUUID())").Scan(&now, &started, &server); err != nil {
+		return false, fmt.Errorf("reading server identity and start time: %w", err)
 	}
 	stored, err := readMetadata(ctx, conn, chExchangeProbeKey)
 	if err != nil {
@@ -693,8 +704,9 @@ func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, err
 		var probe chExchangeProbe
 		switch err := json.Unmarshal([]byte(value), &probe); {
 		case err != nil:
-			log.Printf("ClickHouse: probing table exchange again; the stored result %q is unreadable: %v", value, err)
-		case probe.ProbedAt >= started-1:
+			log.Printf("ClickHouse: the saved table swap check in sync_metadata could not be read, "+
+				"so it will run again: %v (stored value %q)", err, value)
+		case probe.Server == server && probe.ProbedAt >= started-1:
 			return probe.Supported, nil
 		}
 	}
@@ -702,7 +714,7 @@ func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, err
 	if err != nil {
 		return false, err
 	}
-	value, err := json.Marshal(chExchangeProbe{ProbedAt: now, Supported: supported})
+	value, err := json.Marshal(chExchangeProbe{ProbedAt: now, Server: server, Supported: supported})
 	if err != nil {
 		return false, fmt.Errorf("encoding table exchange probe: %w", err)
 	}
@@ -721,12 +733,6 @@ func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, err
 // database, so it renames files in the same metadata directory a refresh
 // does; where the tables keep their data does not matter.
 func chExchangeSupported(ctx context.Context, conn *sql.DB) (supported bool, err error) {
-	// A probe takes milliseconds, so probe tables an hour old belong to a
-	// push that was killed during one.
-	if err := dropTables(ctx, conn, "match(name, ?) AND metadata_modification_time <= now() - INTERVAL 1 HOUR",
-		"^"+chExchangeProbePrefix+"[a-z0-9]+_[ab]$"); err != nil {
-		return false, err
-	}
 	probe := chExchangeProbePrefix + strings.ToLower(rand.Text())
 	tables := []string{probe + "_a", probe + "_b"}
 	defer func() {

@@ -874,8 +874,8 @@ func TestRebuildLockRejectsUnreadableComment(t *testing.T) {
 // Each failed table exchange probe logs an UNSUPPORTED_METHOD error on the
 // server, and a push watch runs the schema step before every push. Only a
 // server restart can change the answer, so later schema steps and pushes on
-// the same server reuse it. An answer recorded before the server started,
-// such as one a restore copied from another server, is probed again.
+// the same server reuse it. An answer recorded before the server started, or
+// by another server and copied in by a restore, is probed again.
 func TestTableExchangeProbedOncePerServerStart(t *testing.T) {
 	ctx := t.Context()
 	local, _ := seedUsagePriceFixture(t)
@@ -900,15 +900,29 @@ func TestTableExchangeProbedOncePerServerStart(t *testing.T) {
 	require.Zero(t, result.Errors)
 	require.Equal(t, probed, unsupported(), "later schema steps and pushes must reuse the answer")
 
-	// As a restore from a server that could swap tables leaves the mirror.
-	restored, err := json.Marshal(chExchangeProbe{ProbedAt: 1, Supported: true})
-	require.NoError(t, err)
-	require.NoError(t, writeMetadata(ctx, conn, map[string]string{chExchangeProbeKey: string(restored)}))
-	newTestSync(t, local, target, storage.PusherOptions{})
-	require.Greater(t, unsupported(), probed, "an answer from before the server started must be probed again")
-	hasView, err := preparedUsageViewExists(ctx, conn)
-	require.NoError(t, err)
-	require.False(t, hasView, "a database that cannot swap tables must not get the view")
+	var server string
+	var now int64
+	require.NoError(t, conn.QueryRowContext(ctx,
+		"SELECT toString(serverUUID()), toUnixTimestamp(now())").Scan(&server, &now))
+	for _, tc := range []struct {
+		name  string
+		probe chExchangeProbe
+	}{
+		// As a restore leaves the mirror from a server that could swap tables.
+		{"another server", chExchangeProbe{ProbedAt: now, Server: "00000000-0000-0000-0000-000000000001", Supported: true}},
+		{"before the server started", chExchangeProbe{ProbedAt: 1, Server: server, Supported: true}},
+	} {
+		stored, err := json.Marshal(tc.probe)
+		require.NoError(t, err)
+		require.NoError(t, writeMetadata(ctx, conn, map[string]string{chExchangeProbeKey: string(stored)}))
+		newTestSync(t, local, target, storage.PusherOptions{})
+		reprobed := unsupported()
+		require.Greater(t, reprobed, probed, "an answer from %s must be probed again", tc.name)
+		probed = reprobed
+		hasView, err := preparedUsageViewExists(ctx, conn)
+		require.NoError(t, err)
+		require.False(t, hasView, "a database that cannot swap tables must not get the view")
+	}
 }
 
 // A database that loses the ability to exchange tables again lets pushes
