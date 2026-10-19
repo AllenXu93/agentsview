@@ -113,6 +113,95 @@ func TestArchiveSourceDaemonRemoteSyncIncludesAttachedHistory(t *testing.T) {
 	}
 }
 
+func TestArchiveSourceNoSyncDaemonManualSync(t *testing.T) {
+	source := archiveSourceCommandFixture(t)
+	remoteDB := dbtest.OpenTestDB(t)
+	remote := httptest.NewServer(server.New(config.Config{
+		Host: "127.0.0.1", DataDir: t.TempDir(), AuthToken: "remote-token",
+	}, remoteDB, nil).Handler())
+	t.Cleanup(remote.Close)
+	for _, tc := range []struct {
+		name       string
+		remote     bool
+		full       bool
+		onlyRemote bool
+	}{
+		{name: "local"},
+		{name: "local full", full: true},
+		{name: "remote and local", remote: true},
+		{name: "remote and local full", remote: true, full: true},
+		{name: "remote only", remote: true, onlyRemote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfigWithClaudeFixture(t)
+			cfg.Host = "127.0.0.1"
+			cfg.AuthToken = "receiver-token"
+			cfg.RequireAuth = true
+			cfg.NoSync = true
+			cfg.ArchiveSources = []config.ArchiveSource{source}
+			cfg.RemoteHosts = []config.RemoteHost{{
+				Host: "remote", Transport: config.RemoteTransportHTTP,
+				URL: remote.URL, Token: "remote-token",
+			}}
+			database := dbtest.OpenTestDBAt(t, cfg.DBPath)
+			const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa~saved"
+			if tc.full {
+				_, _, err := runLocalSyncResult(t.Context(), cfg, database, false)
+				require.NoError(t, err)
+				require.NoError(t, database.Update(t.Context(), func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(t.Context(), `UPDATE messages SET content = 'stale parser output' WHERE session_id = ?`, id)
+					return err
+				}))
+			}
+			require.NoError(t, database.UpsertSession(t.Context(), db.Session{
+				ID: "retained", Agent: "claude", Machine: cfg.InstallationID,
+				FilePath: new(filepath.Join(t.TempDir(), "missing.jsonl")),
+			}))
+			httpServer := httptest.NewUnstartedServer(nil)
+			cfg.PublicURL = "http://" + httpServer.Listener.Addr().String()
+			srv := server.New(cfg, database, nil, server.WithBaseContext(t.Context()))
+			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
+			httpServer.Config.Handler = srv.Handler()
+			httpServer.Start()
+			t.Cleanup(httpServer.Close)
+			tr := transport{URL: httpServer.URL}
+			if !tc.full {
+				// CLI startup reconciliation must not scan a --no-sync daemon.
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
+					"/api/v1/sync?startup_only=true", nil)
+				req.Host = "127.0.0.1:0"
+				req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
+				response := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(response, req)
+				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				var sessions int
+				require.NoError(t, database.Reader().QueryRow(t.Context(), `SELECT count(*) FROM sessions`).Scan(&sessions))
+				assert.Equal(t, 1, sessions, "startup-only requests must leave local and attached sources unread")
+			}
+			if tc.remote {
+				failures, err := runDaemonRemoteSync(t.Context(), tr, cfg.AuthToken, cfg.RemoteHosts, tc.full, !tc.onlyRemote, nil)
+				require.NoError(t, err)
+				assert.Empty(t, failures)
+			} else {
+				stats, err := runDaemonSync(t.Context(), tr, cfg.AuthToken, tc.full, nil)
+				require.NoError(t, err)
+				assert.Equal(t, 4, stats.Synced)
+			}
+			messages, err := database.GetAllMessages(t.Context(), id)
+			require.NoError(t, err)
+			if tc.onlyRemote {
+				assert.Empty(t, messages, "remote-only sync must not drain attached archives")
+				return
+			}
+			require.Len(t, messages, 1)
+			assert.Equal(t, "archived message", messages[0].Content)
+			retained, err := database.GetSessionFull(t.Context(), "retained")
+			require.NoError(t, err)
+			assert.NotNil(t, retained, "full sync must keep sessions whose source files are gone")
+		})
+	}
+}
+
 func TestArchiveSourceWorkerRebuildAfterStartupSchemaUpgrade(t *testing.T) {
 	cfg := testConfigWithClaudeFixture(t)
 	database, err := db.Open(t.Context(), cfg.DBPath)

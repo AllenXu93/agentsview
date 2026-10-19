@@ -190,8 +190,9 @@ type Server struct {
 
 	// localSyncRunner, when set, backs the foreground local-sync HTTP handler
 	// with the worker-backed pass instead of running SyncThenRun in process.
-	localSyncRunner LocalSyncRunner
-	archiveSources  *archivesource.Manager
+	localSyncRunner        LocalSyncRunner
+	archiveSources         *archivesource.Manager
+	onDemandArchiveSources *archivesource.Manager
 
 	// localResyncRunner, when set, backs the foreground full-resync HTTP handler
 	// with the worker-backed build-and-swap instead of an in-process resync.
@@ -645,8 +646,8 @@ func WithLocalSyncRunner(r LocalSyncRunner) Option {
 	return func(s *Server) { s.localSyncRunner = r }
 }
 
-// WithArchiveSources shares the daemon's attached-archive manager with remote
-// sync requests that also include local sources.
+// WithArchiveSources shares the daemon's attached-archive manager with manual
+// sync requests that include local sources.
 func WithArchiveSources(manager *archivesource.Manager) Option {
 	return func(s *Server) { s.archiveSources = manager }
 }
@@ -1439,10 +1440,9 @@ func (s *Server) Serve(ln net.Listener) error {
 	return srv.Serve(ln)
 }
 
-// Shutdown gracefully shuts down the HTTP server, then closes the
-// server-owned on-demand sync engine (if one was lazily created) so
-// its pending debounced signal recomputes flush while the DB is
-// still open. Injected engines are closed by their owner.
+// Shutdown gracefully shuts down the HTTP server, stops its on-demand archive
+// drain, then closes its on-demand engine so pending signal recomputes flush
+// while the DB is still open. Injected managers and engines keep their owner.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpSrv
@@ -1465,7 +1465,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	engine := s.onDemandEngine
 	s.onDemandEngine = nil
+	attachments := s.onDemandArchiveSources
+	s.onDemandArchiveSources = nil
 	s.mu.Unlock()
+	if attachments != nil {
+		attachments.Close()
+	}
 	if engine != nil {
 		engine.Close()
 	}
