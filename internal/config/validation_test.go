@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -119,6 +120,56 @@ func TestScopedPGConnectionDeploymentOverride(t *testing.T) {
 					assert.Equal(t, value == "true", pg.AllowInsecure)
 				}
 			}
+		})
+	}
+}
+
+// A mistyped AGENTSVIEW_MODE makes serve refuse to start. Other commands must
+// not apply deployment secrets or the PG insecure override under it: a reader
+// reports the mode once one of its variables is set, and is a no-op otherwise.
+func TestInvalidDeploymentModeAppliesNoDeploymentSettings(t *testing.T) {
+	for _, tt := range []struct {
+		name, env, value string
+		// apply reports whether the deployment value took effect.
+		apply func(cfg *Config) (bool, error)
+	}{
+		{"auth token file", "AGENTSVIEW_AUTH_TOKEN_FILE", "deployment-secret", func(cfg *Config) (bool, error) {
+			err := cfg.ApplyDeploymentAuth()
+			return cfg.AuthToken != "", err
+		}},
+		{"embeddings", "AGENTSVIEW_EMBEDDINGS_ENDPOINT", "http://127.0.0.1:30000/v1", func(cfg *Config) (bool, error) {
+			err := cfg.ApplyDeploymentEmbeddings()
+			return cfg.DeploymentEmbeddings != nil, err
+		}},
+		{"pg allow insecure", "AGENTSVIEW_PG_ALLOW_INSECURE", "true", func(cfg *Config) (bool, error) {
+			pg, err := cfg.ResolvePG()
+			return pg.AllowInsecure, err
+		}},
+		{"hosted raw auth policy", "AGENTSVIEW_REQUIRE_AUTH", "false", func(cfg *Config) (bool, error) {
+			// Applying false would fail with the auth requirement instead.
+			return false, cfg.ValidatePGRawDerivation(PGConfig{Schema: "tenant_schema", RawTenant: "tenant"})
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			unsetDeploymentEnv(t)
+			dir := setupTestEnv(t)
+			writeConfig(t, dir, map[string]any{"pg": map[string]any{"url": "postgres://db.example/archive"}})
+			cfg, err := LoadMinimalFor(ScopeLocal)
+			require.NoError(t, err)
+			cfg.RequireAuth = true
+			t.Setenv("AGENTSVIEW_MODE", "srve")
+			applied, err := tt.apply(&cfg)
+			require.NoError(t, err, "a reader with no variables set ignores the mode")
+			assert.False(t, applied)
+
+			value := tt.value
+			if strings.HasSuffix(tt.env, "_FILE") {
+				value = writeSecret(t, t.TempDir(), "secret", tt.value)
+			}
+			t.Setenv(tt.env, value)
+			applied, err = tt.apply(&cfg)
+			require.ErrorContains(t, err, `AGENTSVIEW_MODE must be "serve" or "pg-serve", got "srve"`)
+			assert.False(t, applied)
 		})
 	}
 }

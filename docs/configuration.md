@@ -311,6 +311,11 @@ to a non-blank value, so a desktop or native install ignores them, including
 invalid values and missing files. You can also set `AGENTSVIEW_MODE` yourself to
 use them with the native binary.
 
+An invalid `AGENTSVIEW_MODE` stops `serve` and `pg serve`. Other commands apply
+no deployment variables under it. A command that would read one, such as a
+daemon client with `AGENTSVIEW_AUTH_TOKEN_FILE` set, fails with the invalid
+mode instead.
+
 | Variable                             | Behavior                                                                                                                                                                                    |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AGENTSVIEW_MODE`                    | `serve` or `pg-serve`. When the command line is empty or starts with a flag other than `--help` or `--version`, the image runs `agentsview serve` or `agentsview pg serve` with those flags |

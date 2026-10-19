@@ -95,9 +95,6 @@ type pgEnvOverrides struct {
 	URL         string
 	Schema      string
 	MachineName string
-	// AllowInsecure comes from AGENTSVIEW_PG_ALLOW_INSECURE under a
-	// deployment mode; nil leaves the target's setting in place.
-	AllowInsecure *bool
 }
 
 // ResolvedPGTarget is one PostgreSQL target after target selection,
@@ -3293,10 +3290,9 @@ func (c *Config) resolvePGConfig(
 		if c.pgEnvOverrides.MachineName != "" {
 			pg.MachineName = c.pgEnvOverrides.MachineName
 		}
-		if c.pgEnvOverrides.AllowInsecure != nil {
-			pg.AllowInsecure = *c.pgEnvOverrides.AllowInsecure
-		}
-		if strings.TrimSpace(os.Getenv("AGENTSVIEW_MODE")) != "" {
+		if active, err := deploymentVarsActive("AGENTSVIEW_PG_ALLOW_INSECURE"); err != nil {
+			return pg, err
+		} else if active {
 			if v, set, err := lookupEnvBool("AGENTSVIEW_PG_ALLOW_INSECURE"); err != nil {
 				return pg, err
 			} else if set {
