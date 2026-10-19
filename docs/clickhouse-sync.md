@@ -583,13 +583,14 @@ The mirror is designed for MergeTree, not copied from PostgreSQL SQL.
   the next push would reuse its number. Leave a lock whose status is `retired`
   alone.
 - **Moving off NFS.** The first schema step after the server restarts on the new
-  data directory checks again. Restarting the server is how to force a new
-  check. When it finds that the database can swap tables again, it creates a
-  new lock table with status `retired`, drops the older lock tables, and then
-  creates the `prepare_usage` view. Do not drop the retired lock: it stops a
-  push that started before the switch from overwriting the view's rows. If the
-  database later loses table swapping again, the schema step marks the retired
-  lock released, and pushes rebuild again.
+  data directory checks again. To force a new check without moving the data
+  directory, restart the server. When it finds that the database can swap
+  tables again, it creates a new lock table with status `retired`, drops the
+  older lock tables, and then creates the `prepare_usage` view. Do not drop
+  the retired lock: it stops a push that started before the switch from
+  overwriting the view's rows. If the database later loses table swapping
+  again, the schema step marks the retired lock released, and pushes rebuild
+  again.
 - **Half-finished switch.** If the schema step stops between retiring the lock
   and creating the view, the next push creates the view. If the database can
   no longer swap tables by then, the push releases the lock and rebuilds

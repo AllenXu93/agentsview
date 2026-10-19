@@ -704,8 +704,8 @@ func chExchangeSupportedSinceStart(ctx context.Context, conn *sql.DB) (bool, err
 		var probe chExchangeProbe
 		switch err := json.Unmarshal([]byte(value), &probe); {
 		case err != nil:
-			log.Printf("ClickHouse: the saved table swap check in sync_metadata could not be read, "+
-				"so it will run again: %v (stored value %q)", err, value)
+			log.Printf("ClickHouse: the saved table exchange check in sync_metadata could not be read, "+
+				"so the check will run again: %v (stored value %q)", err, value)
 		case probe.Server == server && probe.ProbedAt >= started-1:
 			return probe.Supported, nil
 		}
