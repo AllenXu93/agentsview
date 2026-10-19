@@ -2250,20 +2250,23 @@ func (c *Config) writeConfigMap(m map[string]any) error {
 }
 
 func (c *Config) withConfigLock(fn func() error) error {
+	return c.withFileLock(c.configPath()+".lock", fn)
+}
+
+func (c *Config) withFileLock(lockPath string, fn func() error) error {
 	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
 		return fmt.Errorf("creating data dir: %w", err)
 	}
-	lockPath := c.configPath() + ".lock"
 	// On macOS the flock syscall succeeds on a directory, whereas on
 	// Linux it errors. Detect that case explicitly so a path created as
 	// a directory is reported as an unusable lock on every platform.
 	if info, statErr := os.Stat(lockPath); statErr == nil && info.IsDir() {
 		return fmt.Errorf(
-			"locking config: %s is a directory, not a lock file", lockPath)
+			"locking %s: path is a directory, not a lock file", lockPath)
 	}
 	lock := flock.New(lockPath)
 	if err := lock.Lock(); err != nil {
-		return fmt.Errorf("locking config: %w", err)
+		return fmt.Errorf("locking %s: %w", lockPath, err)
 	}
 	defer func() {
 		_ = lock.Unlock()

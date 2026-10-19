@@ -15,7 +15,7 @@ const telemetryDaemonActiveFilename = "telemetry-daemon-active"
 const telemetrySetupFinishedFilename = "telemetry-setup-finished"
 
 // ClaimDaemonActive calls send unless this installation already sent on the
-// UTC day of now. The config lock serializes daemons sharing the data
+// UTC day of now. A record-specific lock serializes daemons sharing the data
 // directory. It reserves the day in the record before calling send, so a
 // record that cannot be read or written never lets restarts send again. When
 // send fails, it undoes the reservation by putting back the previous record,
@@ -32,9 +32,11 @@ func (c *Config) ClaimSetupFinished(send func() error) error {
 }
 
 // SetupFinishedClaimed reports whether this installation already queued setup.
+// It takes the claim's lock, so it waits for a pending send and its rollback.
 func (c *Config) SetupFinishedClaimed() (claimed bool, err error) {
-	err = c.withConfigLock(func() error {
-		record, err := os.ReadFile(filepath.Join(c.DataDir, telemetrySetupFinishedFilename))
+	path := filepath.Join(c.DataDir, telemetrySetupFinishedFilename)
+	err = c.withFileLock(path+".lock", func() error {
+		record, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -45,8 +47,8 @@ func (c *Config) SetupFinishedClaimed() (claimed bool, err error) {
 }
 
 func (c *Config) claimTelemetry(filename, record string, send func() error) error {
-	return c.withConfigLock(func() error {
-		path := filepath.Join(c.DataDir, filename)
+	path := filepath.Join(c.DataDir, filename)
+	return c.withFileLock(path+".lock", func() error {
 		previous, err := os.ReadFile(path)
 		existed := err == nil
 		if err != nil && !errors.Is(err, os.ErrNotExist) {

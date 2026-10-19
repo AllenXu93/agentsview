@@ -20,6 +20,9 @@ AgentsView stores all persistent data under a single directory, defaulting to
 ├── vectors.db       # Semantic-search vector index (when [vector] is enabled)
 ├── usage-cache-v6-<id>.db # Disposable usage-aggregate cache
 ├── telemetry-install-id # Application installation ID
+├── telemetry-daemon-active.lock  # Serializes daily daemon reports
+├── telemetry-setup-finished.lock # Serializes the one-time setup report
+├── telemetry-screen-views.lock   # Serializes screen view claims
 ├── config.toml      # Configuration file
 ├── config.toml.lock # Serializes concurrent config writers
 ├── db.write.lock    # Per-data-dir SQLite write-owner lock
@@ -2271,17 +2274,21 @@ to this, so `over_30m` can undercount.
 The web UI also reports `screen_viewed` with `surface: web`. The server counts
 each screen once per installation per UTC day, across tabs and server restarts.
 It stores versioned JSON claims in `telemetry-screen-views` beside the
-installation identity. When telemetry is enabled, startup moves older
-plain-text claims, malformed claims, or claims from a newer format to a unique
+installation identity. When telemetry is enabled, the server checks the file
+once in the background after it starts serving; a web UI report that arrives
+first waits for that check. The check moves older plain-text claims, malformed
+claims, or claims from a newer format to a unique
 `telemetry-screen-views.unreadable-*` file and logs the move. Earlier copies
-stay intact. Valid plain-text counts carry over for the current installation.
-If the move fails, the server logs the error and preserves the claims.
-Otherwise, kit starts a fresh file when counts cannot carry over, which can
-count each screen one more time that day. If the file becomes unreadable while
-the server runs, screen reports return 500 until the next startup. Requests
-must use `application/json` with exactly one JSON value; a missing or unknown
-`screen` returns 400. The server reserves each claim before enqueueing its
-event. If reservation storage fails, the request returns 500 without
+stay intact. Valid plain-text counts carry over for the current installation. If
+the check fails, the server logs the error and continues forwarding reports. It
+tries the check only once per process; restarting the server starts a fresh
+attempt. Forwarded reports can replace malformed or plain-text claims with a
+fresh file, losing their counts. Reports return 500 while the file cannot be
+read or written, or uses a newer format. When counts cannot carry over, kit
+starts a fresh file, which can count each screen one more time that day.
+Requests must use `application/json` with exactly one JSON value; a missing or
+unknown `screen` returns 400. The server reserves each claim before enqueueing
+its event. If reservation storage fails, the request returns 500 without
 enqueueing; a later visit retries.
 
 The web UI reports five core actions the same way. Each carries one property,
