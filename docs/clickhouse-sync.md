@@ -264,7 +264,7 @@ unattended and stop at the first step that does not confirm.
 
 1. Enable vectors in `~/.agentsview/config.toml`. `model`, `dimension`, and one
    `[vector.embeddings.servers.<name>]` entry with an `endpoint` are required;
-   the full key list is in
+   the full key list and `max_input_chars` guidance are in
    [Enabling `[vector]`](/docs/semantic-search/#enabling-vector).
 
     ```toml
@@ -274,6 +274,7 @@ unattended and stop at the first step that does not confirm.
     [vector.embeddings]
     model = "nomic-embed-text"
     dimension = 768
+    max_input_chars = 4000
     default_server = "local"
 
     [vector.embeddings.servers.local]
