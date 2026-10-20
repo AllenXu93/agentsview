@@ -16,8 +16,8 @@ func SeedDialogueSearch(t *testing.T, d *db.DB) {
 	const id = "dialogue-search"
 	SeedSession(t, d, id, "dialogue-search", func(s *db.Session) {
 		s.StartedAt = new("2026-05-20T12:00:00Z")
-		s.UserMessageCount = 2
-		s.MessageCount = 6
+		s.UserMessageCount = 3
+		s.MessageCount = 10
 	})
 	require.NoError(t, d.ReplaceSessionMessages(t.Context(), id, []db.Message{
 		{SessionID: id, Ordinal: 0, Role: "user", Content: "hello"},
@@ -61,6 +61,10 @@ func SeedDialogueSearch(t *testing.T, d *db.DB) {
 				},
 			},
 		},
+		{SessionID: id, Ordinal: 6, Role: "user", Content: "next question"},
+		{SessionID: id, Ordinal: 7, Role: "assistant", Content: "Sure.\n[Bash] $ true\nDone.", DialogueText: new("Sure.\nDone.")},
+		{SessionID: id, Ordinal: 8, Role: "tool", Content: "classifiedtoolneedle", DialogueText: new("")},
+		{SessionID: id, Ordinal: 9, Role: "tool", Content: "unclassifiedneedle"},
 	}))
 }
 
@@ -102,6 +106,7 @@ func AssertDialogueSearchParity(t *testing.T, archive, mirror db.Store, modes ..
 						{"resultneedle", 1, "tool_result", "resultneedle"},
 						{"legacyneedle", 2, "message", "legacy answer\n[Thinking] legacyneedle"},
 						{"emptyneedle", 3, "thinking", "emptyneedle"},
+						{"unclassifiedneedle", 9, "message", "unclassifiedneedle"},
 					} {
 						t.Run(tc.pattern, func(t *testing.T) {
 							f := db.ContentSearchFilter{Pattern: tc.pattern, Mode: mode, Project: "dialogue-search", Limit: 50}
@@ -123,9 +128,23 @@ func AssertDialogueSearchParity(t *testing.T, archive, mirror db.Store, modes ..
 					}
 				})
 			}
+			f := db.ContentSearchFilter{Pattern: "classifiedtoolneedle", Mode: mode, Project: "dialogue-search", Sources: []string{"messages"}}
+			got, err := mirror.SearchContent(t.Context(), f)
+			require.NoError(t, err)
+			assert.Empty(t, got.Matches)
+
 			if !lexical {
 				return
 			}
+			pattern := "Sure.\nDone."
+			if mode == "regex" {
+				pattern = `Sure\.\nDone\.`
+			}
+			f.Pattern = pattern
+			got, err = mirror.SearchContent(t.Context(), f)
+			require.NoError(t, err)
+			assert.Equal(t, []hit{{"dialogue-search", "message", 7, "Sure.\nDone."}}, project(got.Matches))
+
 			if mode == "regex" {
 				for _, source := range []string{"messages", "thinking"} {
 					word, upper, mixed := "answer", "ANSWER", "Answer"

@@ -801,17 +801,18 @@ The content-search response includes `active_filter_applied`, which is true when
 `exclude_active_since` was applied before pagination. All current stores support
 this filter. Older servers may omit the field.
 
-On SQLite, DuckDB, and ClickHouse, the `messages` source searches dialogue from
+On SQLite, PostgreSQL, DuckDB, and ClickHouse, the `messages` source searches dialogue from
 structured text blocks in Pi, OMP, OMO, Prime Agent, StepCode, iFlow, Claude Code,
 Cowork, iCodeMate CLI, Qoder, Cursor JSONL, Amp, OpenClaude, OpenClaw, QClaw, Devin,
 and OpenHands.
 Those projections exclude rendered tool calls and reasoning from snippets,
 while preserving literal marker text in dialogue. These parsers store reasoning
 blocks in `thinking_text`, including Cursor JSONL and OpenHands. Substring and
-regex searches on SQLite, DuckDB, and ClickHouse include `thinking` by default;
+regex searches on SQLite, PostgreSQL, DuckDB, and ClickHouse include `thinking` by default;
 use `--in messages` for dialogue alone or `--in thinking` for reasoning alone.
-FTS, terms, semantic, and hybrid reject `thinking` as a source. Semantic search
-continues to embed full message text; hybrid's keyword search uses dialogue.
+FTS searches messages only. Terms, semantic, and hybrid reject `thinking` as a
+source. Semantic search continues to embed full message text; hybrid's keyword
+search uses dialogue.
 Ordinary session search and the command palette continue to search the full
 rendered transcript.
 
@@ -827,7 +828,21 @@ FTS content search and hybrid's keyword search match `content`. Session-search
 ordering may shift.
 DuckDB mirrors rebuild on their next push to fill dialogue. The first ClickHouse
 push after upgrading is a full push to fill dialogue.
-Artifact transport and PostgreSQL dialogue search are a separate follow-up.
+
+PostgreSQL schema setup adds the dialogue column and builds trigram indexes on
+dialogue and reasoning beside the existing `content` index. The dialogue index
+is close to the size of the `content` index, the reasoning index grows with
+stored reasoning, and both slow message writes. Building them on an existing
+mirror blocks writes to `messages` until each finishes. The first push after
+upgrading publishes every session in its scope once to fill existing rows. A
+restricted hosted runtime role needs `UPDATE(dialogue_text)` on `messages`. For
+hosted raw uploads, run `agentsview pg raw-reparse hosted --run-id <id>` after
+upgrading the server. Repeat the same run ID until the command reports
+`complete=true`. A change to dialogue derivation alone keeps session IDs,
+content revisions, and embeddings. A parser upgrade that changes other fields,
+such as Pi reasoning text, produces a new content revision and session ID.
+
+Artifact transport is a separate follow-up.
 Transcript display, block order, and artifact format v4 remain unchanged.
 
 One-shot, automated, and subagent sessions are excluded by default; opt back in
@@ -841,7 +856,7 @@ with `--include-one-shot`, `--include-automated`, or `--include-children`.
 | `--hybrid`            | `mode=hybrid`          | Semantic + FTS reciprocal rank fusion; messages-only — see [Semantic Search](/docs/semantic-search/)                                                                              |
 | `--scope`             | `scope`                | `top`, `all` (default), or `subordinate` — semantic/hybrid only; supersedes `include_children` in those modes                                                                     |
 | `--context`           | `context`              | int — N messages of context before/after each match (max 10)                                                                                                                      |
-| `--in`                | `in`                   | Comma-separated: `messages,thinking,tool_input,tool_result` (default all); `thinking` requires SQLite, DuckDB, or ClickHouse substring/regex                                                                                                                  |
+| `--in`                | `in`                   | Comma-separated: `messages,thinking,tool_input,tool_result` (default all); `thinking` requires SQLite, PostgreSQL, DuckDB, or ClickHouse substring/regex                                                                                                                  |
 | `--exclude-system`    | `exclude_system`       | Drop system messages from the scan                                                                                                                                                |
 | `--reveal`            | `reveal`               | Show full secret values (localhost-only; warning to stderr)                                                                                                                       |
 | `--project`           | `project`              | string                                                                                                                                                                            |

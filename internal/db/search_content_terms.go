@@ -70,7 +70,7 @@ var termsSQLByDialect = map[string]termsSQLFragments{
 	},
 	"postgres": {
 		systemPrefix:  PostgresSystemPrefixSQL,
-		messageText:   "m.content",
+		messageText:   "COALESCE(m.dialogue_text, m.content)",
 		prefilterText: "content",
 		bodyAgg:       `STRING_AGG(content, E'\n' ORDER BY ordinal)`,
 		timestamp:     "m.timestamp",

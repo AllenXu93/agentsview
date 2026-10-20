@@ -144,6 +144,9 @@ evidence; they do not establish whether a tool helped the task.
   and ingest fixtures. Text blocks retain literal thinking and tool markers;
   separate thinking blocks remain available as reasoning. Cowork, iCodeMate CLI,
   and Qoder share this parser. Amp and OpenClaude use the same block extraction.
+  Hosted changes to dialogue derivation alone preserve session identity and
+  content revisions. Parser changes to other fields, such as Pi reasoning text,
+  still produce a new revision.
 - **Launch evidence (2026-10-07):** Claude Code 2.1.293's bundled CLI launch
   initializer records `entrypoint=sdk-cli` for print-mode launches and `cli`
   for interactive terminal launches; SDK libraries use `sdk-py` or `sdk-ts`.
@@ -2160,7 +2163,7 @@ schemas keep their existing ordering behavior.
   Structured text blocks retain literal markers separately from reasoning and
   tool calls. Unpaired observations retain their stored-content
   `message` search behavior and add no tool call. The `thinking` source on
-  SQLite, DuckDB, and ClickHouse searches reasoning with substring or regex mode;
+  SQLite, PostgreSQL, DuckDB, and ClickHouse searches reasoning with substring or regex mode;
   source-less sessions and v4 imports retain their stored-content fallback.
 - **Format:** A CLI conversation directory containing `base_state.json` and one
   JSON file per event under `events/`; Agentsview also fingerprints optional
