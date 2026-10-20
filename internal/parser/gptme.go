@@ -60,7 +60,7 @@ func (p *gptmeProvider) parseSession(
 		// Carry model forward from assistant messages.
 		if role == "assistant" {
 			if m := gjson.Get(line, "metadata.model").Str; m != "" {
-				currentModel = m
+				currentModel = gptmeModelID(m)
 			}
 		}
 
@@ -246,4 +246,15 @@ func gptmeAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// gptmeModelID drops gptme's provider-routing suffix from a model id.
+// gptme pins OpenRouter upstream hosts as "openrouter/z-ai/glm-5.3-flash@z-ai"
+// (or a comma-separated host list after "@"). The suffix selects a host, not
+// a model, and prevents the id from matching any pricing catalog key.
+func gptmeModelID(model string) string {
+	if at := strings.LastIndex(model, "@"); at > strings.LastIndex(model, "/") {
+		return model[:at]
+	}
+	return model
 }

@@ -592,7 +592,10 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (139: a Codex cloud session with no token records and no plan usage
 // records gets an empty plan usage row, so usage reports count it as
 // billed as plan usage. Re-parse unchanged Codex cloud sources in place.)
-const dataVersion = 139
+// (140: strip gptme provider-routing suffixes from stored model IDs so catalog
+// pricing resolves. Re-parse unchanged gptme sources in place; source and
+// session identities are unchanged.)
+const dataVersion = 140
 
 const archiveOnlyVersionBase = 1 << 20
 

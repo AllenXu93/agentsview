@@ -586,15 +586,15 @@ fixtures retain this field; missing identities remain source-local.
   [persistence policy](https://github.com/openai/codex/blob/c71297b9a9b3f7995445eff8d768837814ac06f8/codex-rs/core/src/rollout/policy.rs#L6-L15).
   Its
   [metadata schema](https://github.com/openai/codex/blob/c71297b9a9b3f7995445eff8d768837814ac06f8/codex-rs/protocol/src/protocol.rs#L971-L980)
-  has no `forked_from_id`. AgentsView keeps the first nonempty metadata ID and
-  ignores later metadata with a different or empty ID. Same-thread metadata can
-  still update the working directory and branch; existing fork replay filtering
-  and revert-page identities remain in effect. This establishes a producer path
-  for the shape reported in
+  has no `forked_from_id`. AgentsView keeps the first nonempty metadata ID
+  and ignores later metadata with a different or empty ID. Same-thread
+  metadata can still update the working directory and branch; existing fork
+  replay filtering and revert-page identities remain in effect. This
+  establishes a producer path for the shape reported in
   [issue #2248](https://github.com/kenn-io/agentsview/issues/2248); the
   particular file's history remains unverified.
-  `TestCodexMisfiledPageUpgradeRetainsTranscriptMetadata` verifies that a proven
-  page correction preserves transcript metadata during upgrade.
+  `TestCodexMisfiledPageUpgradeRetainsTranscriptMetadata` verifies that a
+  proven page correction preserves transcript metadata during upgrade.
 
 - **Compressed rollouts (checked 2026-10-16, source at commit
   `6b991972c5b539198dcea9bac4fc14e57559c3af`):** A background worker started
@@ -4107,13 +4107,21 @@ schemas keep their existing ordering behavior.
   records and metadata.
 - **Evidence:** `source`.
 - **Upstream:** Clone `https://github.com/gptme/gptme.git` at
-  `a1d8ca21dd662e04970ff36c8c3e9b342f989605`; see
-  [conversations.py](https://github.com/gptme/gptme/blob/a1d8ca21dd662e04970ff36c8c3e9b342f989605/gptme/logmanager/conversations.py)
+  `8f71713f3d1151b3141927aa014db62b9d756117`; see
+  [conversations.py](https://github.com/gptme/gptme/blob/8f71713f3d1151b3141927aa014db62b9d756117/gptme/logmanager/conversations.py)
   and
-  [message.py](https://github.com/gptme/gptme/blob/a1d8ca21dd662e04970ff36c8c3e9b342f989605/gptme/message.py).
+  [message.py](https://github.com/gptme/gptme/blob/8f71713f3d1151b3141927aa014db62b9d756117/gptme/message.py).
 - **Usage and cost:** Assistant metadata can persist input, output, cache-read,
   and cache-creation tokens with model data. Agentsview catalog-prices the
   normalized usage and consumes no authoritative persisted USD total.
+  Reverified 2026-10-20 at the pinned commit: assistant metadata stores the
+  requested model ID, including any `@host` provider pin
+  ([metadata](https://github.com/gptme/gptme/blob/8f71713f3d1151b3141927aa014db62b9d756117/gptme/llm/llm_openai.py#L357)).
+  The suffix is a comma-separated OpenRouter host allowlist
+  ([routing](https://github.com/gptme/gptme/blob/8f71713f3d1151b3141927aa014db62b9d756117/gptme/llm/llm_openai.py#L1579-L1588))
+  that gptme removes before sending the model to the API. Agentsview strips
+  it before pricing. Parser data version 140 reparses unchanged gptme sources
+  in place without changing source or session identities.
 - **Agentsview:** `internal/parser/gptme.go` and
   `internal/parser/gptme_provider.go`.
 

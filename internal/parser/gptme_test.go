@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -120,4 +121,56 @@ func TestGptmeProjectFromSessionName(t *testing.T) {
 			assert.Equal(t, c.want, got)
 		})
 	}
+}
+
+func TestGptmeModelID(t *testing.T) {
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{"openrouter/anthropic/claude-sonnet-4-6", "openrouter/anthropic/claude-sonnet-4-6"},
+		{"openrouter/z-ai/glm-5.3-flash@z-ai", "openrouter/z-ai/glm-5.3-flash"},
+		{"openrouter/deepseek/deepseek-v4.1-flash@cloudflare,inference-net", "openrouter/deepseek/deepseek-v4.1-flash"},
+		{"anthropic/claude-fable-5", "anthropic/claude-fable-5"},
+		{"local/model", "local/model"},
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			assert.Equal(t, c.want, gptmeModelID(c.model))
+		})
+	}
+}
+
+func TestGptmeProviderStripsProviderRouting(t *testing.T) {
+	logsDir := t.TempDir()
+	sessionDir := filepath.Join(logsDir, "2026-10-19-routed-model")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "conversation.jsonl"),
+		[]byte(`{"role": "user", "content": "hi", "timestamp": "2026-10-19T10:00:00.000000"}
+{"role": "assistant", "content": "hello", "timestamp": "2026-10-19T10:00:01.000000", "metadata": {"model": "openrouter/z-ai/glm-5.3-flash@z-ai", "usage": {"input_tokens": 10, "output_tokens": 2}}}
+`),
+		0o644,
+	))
+
+	provider, ok := NewProvider(AgentGptme, ProviderConfig{
+		Roots:   []string{logsDir},
+		Machine: "testmachine",
+	})
+	require.True(t, ok)
+	source, found, err := provider.FindSource(t.Context(), FindSourceRequest{
+		RawSessionID: "2026-10-19-routed-model",
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	outcome, err := provider.Parse(t.Context(), ParseRequest{
+		Source:  source,
+		Machine: "testmachine",
+	})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+
+	msgs := outcome.Results[0].Result.Messages
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "openrouter/z-ai/glm-5.3-flash", msgs[1].Model)
 }
