@@ -122,7 +122,9 @@ func (db *DB) writeGenAIPricing(
 				OR genai_pricing.source_ref IS NOT excluded.source_ref
 				OR genai_pricing.data_json IS NOT excluded.data_json)`
 	}
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return err
+	}
 	defer db.mu.Unlock()
 	_, err := db.getWriter().ExecContext(ctx, `
 		INSERT INTO genai_pricing

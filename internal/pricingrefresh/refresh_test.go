@@ -2,9 +2,11 @@ package pricingrefresh
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -16,6 +18,7 @@ import (
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/money"
 	"go.kenn.io/agentsview/internal/pricing"
+	"go.kenn.io/agentsview/internal/testutil"
 )
 
 const refreshAttemptMetaKeyForTest = "_litellm_last_attempt"
@@ -302,7 +305,7 @@ func TestStoreCatalogRetiresShadowedOpenRouterRows(t *testing.T) {
 			InputPerMTok: money.MustParseDollars("8"),
 		},
 	}
-	require.NoError(t, storeCatalog(database, pricing.Catalog{
+	require.NoError(t, storeCatalog(t.Context(), database, pricing.Catalog{
 		OpenRouter: openrouter,
 	}))
 	meta, err := database.GetPricingMeta(pricing.OpenRouterModelsMetaKey)
@@ -314,7 +317,7 @@ func TestStoreCatalogRetiresShadowedOpenRouterRows(t *testing.T) {
 	assert.Nil(t, shadowed)
 
 	// LiteLLM now lists the model under its own spelling.
-	require.NoError(t, storeCatalog(database, pricing.Catalog{
+	require.NoError(t, storeCatalog(t.Context(), database, pricing.Catalog{
 		LiteLLM: []pricing.ModelPricing{{
 			ModelPattern: "minimax/MiniMax-M3",
 			InputPerMTok: money.MustParseDollars("2"),
@@ -347,7 +350,7 @@ func TestStoreFallbackReconcilesOpenRouterOwnership(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, spelled, "need a fallback pattern with lowercase")
-	require.NoError(t, storeCatalog(database, pricing.Catalog{
+	require.NoError(t, storeCatalog(t.Context(), database, pricing.Catalog{
 		OpenRouter: []pricing.ModelPricing{
 			{ModelPattern: exact, InputPerMTok: money.MustParseDollars("99")},
 			{ModelPattern: spelled, InputPerMTok: money.MustParseDollars("98")},
@@ -404,6 +407,52 @@ func TestEnsureCurrentCancellationAllowsImmediateRetry(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, retryCalls)
+}
+
+// A push refreshes pricing first. Canceling the push must end the refresh
+// even while a long archive write holds the lock its pricing writes need.
+func TestEnsureCurrentStopsWaitingBehindALongWrite(t *testing.T) {
+	database := testDB(t)
+	now := pricingTestNow()
+	previous := seedPricingAttempt(t, database, now, 2*time.Hour)
+	inWrite := make(chan struct{})
+	release := make(chan struct{})
+	endWrite := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(endWrite)
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- database.Update(t.Context(), func(*sql.Tx) error {
+			close(inWrite)
+			<-release
+			return nil
+		})
+	}()
+	<-inWrite
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	refreshed := make(chan error, 1)
+	go func() {
+		refreshed <- ensureCurrent(ctx, database, func(
+			context.Context,
+		) (pricing.Catalog, error) {
+			return pricing.Catalog{}, nil
+		}, now)
+	}()
+	require.Eventually(t, func() bool {
+		return testutil.GoroutineBlockedOnMutexIn("lockctx.Lock")
+	}, 10*time.Second, 5*time.Millisecond)
+	cancel()
+	select {
+	case err := <-refreshed:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the canceled refresh kept waiting for the archive write")
+	}
+
+	endWrite()
+	require.NoError(t, <-writeDone)
+	assertPricingAttemptMeta(t, database, previous)
 }
 
 func TestRefreshCurrentFetchesDespiteRecentAttempt(t *testing.T) {

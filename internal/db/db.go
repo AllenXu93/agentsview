@@ -5572,9 +5572,11 @@ func (db *DB) WriterClosed() bool {
 
 // Update executes fn within a write lock and transaction.
 // The transaction is committed if fn returns nil, rolled back
-// otherwise.
+// otherwise. It stops waiting for the lock when ctx ends.
 func (db *DB) Update(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return err
+	}
 	defer db.mu.Unlock()
 
 	// Fail fast before handing out a raw *sql.Tx: while the writer is closed
@@ -5623,7 +5625,9 @@ func scanSyncState(row *sql.Row) (string, error) {
 
 // SetSyncState writes a value to the pg_sync_state table.
 func (db *DB) SetSyncState(ctx context.Context, key, value string) error {
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return err
+	}
 	defer db.mu.Unlock()
 	_, err := db.getWriter().Exec(ctx,
 		setSyncStateQuery,
@@ -5632,13 +5636,47 @@ func (db *DB) SetSyncState(ctx context.Context, key, value string) error {
 	return err
 }
 
+// ErrDatabaseReplaced reports that the archive was rebuilt since the caller
+// read its database ID.
+var ErrDatabaseReplaced = errors.New("the local archive was rebuilt")
+
+// SetSyncStatesForDatabase writes values to the pg_sync_state table in one
+// transaction, and only while the archive's database ID is still databaseID.
+// An archive swap cannot land between the writes, and a caller whose archive
+// was rebuilt gets ErrDatabaseReplaced instead of writing into the
+// replacement.
+func (db *DB) SetSyncStatesForDatabase(
+	ctx context.Context, databaseID string, values map[string]string,
+) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		var current string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT value FROM archive_metadata WHERE key = ?`,
+			archiveMetadataDatabaseIDKey,
+		).Scan(&current); err != nil {
+			return fmt.Errorf("reading database id: %w", err)
+		}
+		if strings.TrimSpace(current) != databaseID {
+			return ErrDatabaseReplaced
+		}
+		for key, value := range values {
+			if _, err := tx.ExecContext(ctx, setSyncStateQuery, key, value); err != nil {
+				return fmt.Errorf("writing sync state %s: %w", key, err)
+			}
+		}
+		return nil
+	})
+}
+
 // DeleteSyncStateByPrefix removes every pg_sync_state row whose key starts
 // with prefix. Used to clean up state left behind by superseded sync
 // designs (e.g. the pre-schema-v3 DuckDB push watermarks, now tracked in
 // the mirror's own sync_metadata table instead of local pg_sync_state).
 // prefix is escaped so LIKE metacharacters in it (%, _) match literally.
 func (db *DB) DeleteSyncStateByPrefix(ctx context.Context, prefix string) error {
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return err
+	}
 	defer db.mu.Unlock()
 	escaped := escapeSyncStatePrefix(prefix)
 	_, err := db.getWriter().Exec(ctx,
@@ -5700,7 +5738,9 @@ func escapeSyncStatePrefix(prefix string) string {
 // GetOrCreateSyncState returns a sync-state value, atomically creating it
 // with defaultValue when absent.
 func (db *DB) GetOrCreateSyncState(ctx context.Context, key, defaultValue string) (string, error) {
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return "", err
+	}
 	defer db.mu.Unlock()
 	w := db.getWriter()
 	var value string

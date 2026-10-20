@@ -237,7 +237,9 @@ func (db *DB) ReconcileModelPricingContext(
 		return nil
 	}
 
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return err
+	}
 	defer db.mu.Unlock()
 
 	existing, err := db.listModelPricing(ctx)
@@ -403,7 +405,9 @@ func (db *DB) DeleteModelPricingContext(
 		return nil
 	}
 
-	db.mu.Lock()
+	if err := db.lockWriterCtx(ctx); err != nil {
+		return err
+	}
 	defer db.mu.Unlock()
 
 	placeholders := make([]string, len(patterns))

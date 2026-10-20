@@ -167,6 +167,14 @@ A full push that reaches the end with session errors resumes only while
 something else still requires a full push. Otherwise the next push is
 incremental and retries the failed sessions.
 
+After an archive rebuild, the next push sends all sessions again. Once every
+session publishes successfully, a full push also removes PostgreSQL sessions
+that this archive owns but no longer contains. Project filters limit this
+cleanup to the selected projects. Sessions owned by another archive, or whose
+owner is unknown, remain untouched. An interrupted push resumes before cleanup.
+Codex thread trash state remains available for restoring or permanently deleting
+its pages.
+
 If any sessions fail to push, the watermark is not advanced so they are retried
 on the next run. The exit code is 1 when any errors occur, 0 otherwise.
 

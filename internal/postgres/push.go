@@ -35,6 +35,11 @@ const (
 	sessionProvenanceBackfillStateKey      = "pg_session_provenance_backfill_v2"
 	timestampNormalizationBackfillStateKey = "pg_timestamp_normalization_backfill_v1"
 	unfilteredPublicationScope             = "all-projects"
+	// pushStateSavedKey marks a sync-state scope that has saved its push
+	// watermark. Archive rebuilds keep it and drop the watermark, so a scope
+	// with this key and no watermark has lost its push state. A scope that
+	// never saved one, like a new project filter, lacks the key.
+	pushStateSavedKey = "pg_push_state_saved_v1"
 )
 
 // pushMarkerIDStateKey names the local sync-state entry holding this DB's
@@ -84,19 +89,35 @@ func (s *Sync) Push(
 	return s.PushWithOptions(ctx, storage.PushOptions{Full: full}, onProgress)
 }
 
+// defaultFullRunSaveTimeout bounds the progress save after a failed full push.
+const defaultFullRunSaveTimeout = 30 * time.Second
+
 // PushWithOptions is Push with per-push options; see storage.PushOptions.
 func (s *Sync) PushWithOptions(
 	ctx context.Context, opts storage.PushOptions,
 	onProgress func(storage.PushProgress),
 ) (storage.PushResult, error) {
 	result, err := s.pushWithOptions(ctx, opts, onProgress)
-	if run := s.fullRun; run != nil {
-		s.fullRun = nil
-		if err != nil {
-			// Keep what the run committed since its last checkpoint. The
-			// push may have failed because ctx ended, so save without it.
-			err = errors.Join(err, run.save(context.WithoutCancel(ctx)))
+	run := s.fullRun
+	s.fullRun = nil
+	switch {
+	case err == nil:
+	case run != nil:
+		// Keep what the run committed since its last checkpoint. The push
+		// may have failed because ctx ended, so save without it, but within
+		// a limit: the save waits for the archive writer, which a stopping
+		// daemon may never reopen.
+		timeout := defaultFullRunSaveTimeout
+		if s.fullRunSaveTimeout > 0 {
+			timeout = s.fullRunSaveTimeout
 		}
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		err = errors.Join(err, run.save(saveCtx))
+		cancel()
+	case opts.Full:
+		// The push failed before it recorded the requested full push, so
+		// nothing can resume it.
+		err = storage.PushNotStartedError{Err: err}
 	}
 	return result, err
 }
@@ -230,6 +251,17 @@ func (s *Sync) pushWithOptions(
 	legacyMarkerMachines := pushMarkerLegacyMachines(
 		markerMachine, markerMachineAliases,
 	)
+	pushStateSaved, err := state.GetSyncState(ctx, pushStateSavedKey)
+	if err != nil {
+		return result, fmt.Errorf("reading %s: %w", pushStateSavedKey, err)
+	}
+	// A rebuilt archive keeps this scope's saved-state mark and the archive's
+	// push marker, but not the push watermark, so PostgreSQL can hold rows
+	// the rebuild dropped. Only a full push removes them.
+	if lastPush == "" && boundaryState == "" && pushStateSaved != "" && markerExists {
+		full = true
+		noteFull("the local archive lost its record of earlier pushes, as happens after a rebuild")
+	}
 	var reconciledScopeMoveIDs []string
 	var identityRefreshSessionIDs []string
 	// Keep the backfill marker scoped to target only; all other push
@@ -418,6 +450,13 @@ func (s *Sync) pushWithOptions(
 		}
 	}
 	s.fullRun = run
+	// Take the cutoff before any listing. A sync that commits after an
+	// earlier listing but stamps before the cutoff would otherwise be missed
+	// by this push and skipped by every later one.
+	cutoff, err := s.local.MirrorPushCutoff(ctx)
+	if err != nil {
+		return result, err
+	}
 	if s.isFiltered() {
 		scopeMoveCandidates, scopeErr := listPGProjectScopeMoveCandidates(
 			ctx, s.local, lastPush,
@@ -453,8 +492,6 @@ func (s *Sync) pushWithOptions(
 		func() error { return s.syncCursorUsageEvents(ctx) }); err != nil {
 		return result, err
 	}
-	cutoff := time.Now().UTC().Format(LocalSyncTimestampLayout)
-
 	// Candidate selection shares ListSessionsForMirrorWindow with the
 	// DuckDB mirror push: sync_marker >= lastPush, inclusive below and
 	// deliberately unbounded above. An upper bound at cutoff would let a
@@ -591,30 +628,15 @@ func (s *Sync) pushWithOptions(
 	}
 
 	if len(sessions) == 0 {
-		if s.isFiltered() {
-			// Filtered pushes use filter-scoped sync state, so
-			// they can advance their own watermark without
-			// moving the unfiltered/global cursor.
-			if err := finalizeFilteredPushState(ctx,
-				state, lastPush, cutoff, runCommitted,
-				priorFingerprints, sessionFingerprints,
-				result.Errors,
-			); err != nil {
-				return result, err
-			}
-		} else {
-			if err := finalizeUnfilteredPushState(ctx,
-				state, lastPush, cutoff, runCommitted,
-				priorFingerprints, sessionFingerprints,
-				result.Errors,
-			); err != nil {
-				return result, err
-			}
-		}
-		if err := persistPushTargetFingerprint(ctx,
-			state, s.targetFingerprint,
+		if err := s.savePushState(ctx, state, lastPush, cutoff, runCommitted,
+			priorFingerprints, sessionFingerprints, result.Errors,
 		); err != nil {
 			return result, err
+		}
+		if full && result.Errors == 0 {
+			if err := s.reconcilePGMissingSessions(ctx, markerID, legacyMarkerMachines); err != nil {
+				return result, err
+			}
 		}
 		if err := s.writePushMarker(
 			ctx, markerID, markerMachine, markerMachineAliases,
@@ -737,30 +759,16 @@ func (s *Sync) pushWithOptions(
 		}
 	}
 
-	if s.isFiltered() {
-		// Filtered pushes use filter-scoped sync state, so
-		// they can advance their own watermark without moving
-		// the unfiltered/global cursor.
-		if err := finalizeFilteredPushState(ctx,
-			state, lastPush, cutoff, append(pushed, runCommitted...),
-			priorFingerprints, sessionFingerprints,
-			result.Errors,
-		); err != nil {
-			return result, err
-		}
-	} else {
-		if err := finalizeUnfilteredPushState(ctx,
-			state, lastPush, cutoff, append(pushed, runCommitted...),
-			priorFingerprints, sessionFingerprints,
-			result.Errors,
-		); err != nil {
-			return result, err
-		}
-	}
-	if err := persistPushTargetFingerprint(ctx,
-		state, s.targetFingerprint,
+	if err := s.savePushState(ctx, state, lastPush, cutoff,
+		append(pushed, runCommitted...), priorFingerprints, sessionFingerprints,
+		result.Errors,
 	); err != nil {
 		return result, err
+	}
+	if full && result.Errors == 0 {
+		if err := s.reconcilePGMissingSessions(ctx, markerID, legacyMarkerMachines); err != nil {
+			return result, err
+		}
 	}
 	// Write the push marker only after the push and local finalization
 	// succeed. A reset-recovery push that fails before this point leaves
@@ -1252,10 +1260,10 @@ func normalizePushMarkerMachineAliases(
 // name, so a machine rename keeps the same marker, and unique per local DB, so
 // a different host pushing to the same PG cannot mask this host's reset.
 func (s *Sync) pushMarkerID(ctx context.Context) (string, error) {
-	state := s.local
-	if state == nil {
+	if s.local == nil {
 		return "", errors.New("local db is required")
 	}
+	state := handoffSyncState{s.local}
 	id, err := state.GetSyncState(ctx, pushMarkerIDStateKey)
 	if err != nil {
 		return "", fmt.Errorf("reading push marker id: %w", err)
@@ -1824,6 +1832,50 @@ func persistPushSourceArchiveID(ctx context.Context, local syncStateStore, archi
 	return nil
 }
 
+// savePushState saves the push watermark, boundary state, and target
+// fingerprint in one archive transaction, and only while the archive is the
+// one the push read. A /resync or compaction can replace the archive during
+// a push; the push then mixed rows from two archives, and its cutoff would
+// hide rows the rebuild wrote. The replacement starts without push state, so
+// the next push runs full.
+func (s *Sync) savePushState(ctx context.Context,
+	state syncStateStore,
+	lastPush, cutoff string,
+	sessions []db.Session,
+	priorFingerprints map[string]string,
+	sessionFingerprints map[string]string,
+	sessionErrors int,
+) error {
+	batch := newSyncStateBatch()
+	// Filtered pushes use filter-scoped sync state, so they can advance
+	// their own watermark without moving the unfiltered/global cursor.
+	finalize := finalizeUnfilteredPushState
+	if s.isFiltered() {
+		finalize = finalizeFilteredPushState
+	}
+	if err := finalize(ctx, batch, lastPush, cutoff, sessions,
+		priorFingerprints, sessionFingerprints, sessionErrors,
+	); err != nil {
+		return err
+	}
+	if err := persistPushTargetFingerprint(ctx, batch, s.targetFingerprint); err != nil {
+		return err
+	}
+	if err := batch.SetSyncState(ctx, pushStateSavedKey, "1"); err != nil {
+		return err
+	}
+	writer, ok := state.(databaseSyncStateWriter)
+	if !ok {
+		return fmt.Errorf("sync state store %T cannot save push state in one transaction", state)
+	}
+	err := writer.SetSyncStatesForDatabase(ctx, s.databaseGeneration, batch.values)
+	if errors.Is(err, db.ErrDatabaseReplaced) {
+		return errors.New("the local archive was rebuilt while this push ran. " +
+			"The next push will resend every session")
+	}
+	return err
+}
+
 func pushTargetState(
 	lastPush, boundaryState,
 	storedTargetFingerprint, currentTargetFingerprint string,
@@ -2041,6 +2093,153 @@ func purgePGExcludedPushSessions(
 		return err
 	}
 	return deletePGExcludedSessionRows(ctx, pg, purgeIDs)
+}
+
+// Reconcile after publishing sessions so Codex page curation transfers finish
+// before deletion cascades. The unfinished full run keeps failed cleanup retryable.
+func (s *Sync) reconcilePGMissingSessions(
+	ctx context.Context, ownerMarker string, legacyMarkerMachines []string,
+) error {
+	// Empty Codex thread anchors still own remote restore/purge scope.
+	where := "owner_marker = $1 AND NOT (trash_includes_codex_pages AND deleted_at IS NOT NULL)"
+	args := []any{ownerMarker}
+	if len(s.projects) > 0 {
+		args = append(args, s.projects)
+		where += fmt.Sprintf(" AND project = ANY($%d)", len(args))
+	}
+	if len(s.excludeProjects) > 0 {
+		args = append(args, s.excludeProjects)
+		where += fmt.Sprintf(" AND project <> ALL($%d)", len(args))
+	}
+	rows, err := s.pg.QueryContext(ctx,
+		"SELECT id, agent, COALESCE(file_path, '') FROM sessions WHERE "+where, args...)
+	if err != nil {
+		return fmt.Errorf("listing owned pg sessions for full push reconciliation: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	// A legacy Codex thread row names the file of the page that replaced it.
+	codexPaths := make(map[string]string)
+	for rows.Next() {
+		var id, agent, path string
+		if err := rows.Scan(&id, &agent, &path); err != nil {
+			return fmt.Errorf("scanning owned pg session for full push reconciliation: %w", err)
+		}
+		ids = append(ids, id)
+		switch agent {
+		case "codex", "traex", "augure-code":
+			codexPaths[id] = path
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return db.QueryChunkedSize(ids, pushComparisonBatchSize, func(chunk []string) error {
+		// Read live presence, including trashed and out-of-scope local rows.
+		// A sync may have added a session since the push listed its candidates.
+		present, err := s.local.SessionProjectsByIDs(ctx, chunk)
+		if err != nil {
+			return err
+		}
+		var missing []string
+		var pages []db.Session
+		// Threads whose page this push excludes, checked for curation under
+		// a row lock in the delete transaction below.
+		excluded := make(map[string]db.Session)
+		// Threads with a retained page, whose curation migration should move.
+		var paged []string
+		for _, id := range chunk {
+			if _, exists := present[id]; exists {
+				continue
+			}
+			missing = append(missing, id)
+			path, ok := codexPaths[id]
+			key := parser.CodexSessionUUIDFromPath(path)
+			if !ok || key == "" {
+				continue
+			}
+			page, err := s.local.GetArtifactExportSession(ctx, id[:strings.LastIndex(id, ":")+1]+key)
+			if err != nil {
+				return fmt.Errorf("reading retained Codex page: %w", err)
+			}
+			if page == nil {
+				continue
+			}
+			paged = append(paged, id)
+			if projectFailsFilter(page.Project, s.projects, s.excludeProjects) {
+				excluded[id] = *page
+				continue
+			}
+			pages = append(pages, *page)
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		tx, err := s.pg.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		// An excluded page fails the push only when the thread has curation
+		// to move. Otherwise the thread row goes. The row lock makes a pin,
+		// star, or rename that commits during the push wait for this check.
+		curated, err := lockCuratedCodexThreads(ctx, tx, mapKeys(excluded))
+		if err != nil {
+			return err
+		}
+		for _, id := range curated {
+			pages = append(pages, excluded[id])
+		}
+		// A filtered push skips a page outside its projects, so the batch push
+		// never moved the old thread's pins, stars, and title onto it. Move
+		// them now, or fail when the page is excluded, before the delete
+		// cascades to that curation.
+		if err := s.migrateCodexPages(ctx, tx, pages, ownerMarker, legacyMarkerMachines); err != nil {
+			return err
+		}
+		// Migration retires a thread once its curation is on the page. A
+		// thread it skipped, such as a legacy thread restored remotely, still
+		// holds that curation, so keep the thread rather than delete it.
+		kept, err := lockCuratedCodexThreads(ctx, tx, paged)
+		if err != nil {
+			return err
+		}
+		if len(kept) > 0 {
+			log.Printf("postgres push: kept %d older Codex thread(s) that still hold pins, stars, or titles", len(kept))
+			missing = slices.DeleteFunc(missing, func(id string) bool { return slices.Contains(kept, id) })
+		}
+		// Recheck ownership and scope, and clear vectors only for deleted rows.
+		rows, err := tx.QueryContext(ctx,
+			"DELETE FROM sessions WHERE "+where+fmt.Sprintf(" AND id = ANY($%d) RETURNING id", len(args)+1),
+			append(slices.Clone(args), missing)...)
+		if err != nil {
+			return fmt.Errorf("deleting pg sessions absent from the archive: %w", err)
+		}
+		defer rows.Close()
+		var deleted []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			deleted = append(deleted, id)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range deleted {
+			if err := clearSessionVectorsTx(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
 }
 
 func (s *Sync) reconcilePGProjectScopeMoves(
@@ -3111,6 +3310,37 @@ func (s *Sync) pushMessages(
 	if err != nil {
 		return 0, err
 	}
+	if err := s.replaceUsageEvents(ctx, tx, sessionID); err != nil {
+		return 0, err
+	}
+	count, err := s.copySessionMessages(ctx, tx, sessionID)
+	if err != nil {
+		return count, err
+	}
+
+	if err := restorePinnedMessages(
+		ctx, tx, sessionID, savedPins,
+	); err != nil {
+		return count, err
+	}
+
+	return count, nil
+}
+
+// copySessionMessages replaces a session's PostgreSQL messages, tool calls,
+// and tool result events with the local transcript. It reads every page from
+// one SQLite snapshot. Local sync keeps writing during a push, and a rewrite
+// between two page reads could move a pinned message into a range already
+// copied, so restoring the pins would drop that pin. Messages that arrive
+// after the snapshot go out with the next push.
+func (s *Sync) copySessionMessages(
+	ctx context.Context, tx *sql.Tx, sessionID string,
+) (count int, err error) {
+	snapshot, err := s.local.BeginMessageSnapshot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, snapshot.Close()) }()
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM tool_result_events
 		WHERE session_id = $1
@@ -3135,14 +3365,9 @@ func (s *Sync) pushMessages(
 			"deleting pg messages: %w", err,
 		)
 	}
-	if err := s.replaceUsageEvents(ctx, tx, sessionID); err != nil {
-		return 0, err
-	}
-
-	count := 0
 	startOrdinal := 0
 	for {
-		msgs, err := s.local.GetMessages(
+		msgs, err := snapshot.GetMessages(
 			ctx, sessionID, startOrdinal,
 			db.MaxMessageLimit, true,
 		)
@@ -3182,14 +3407,10 @@ func (s *Sync) pushMessages(
 		}
 		count += len(msgs)
 		startOrdinal = nextOrdinal
+		if s.afterMessagePage != nil {
+			s.afterMessagePage()
+		}
 	}
-
-	if err := restorePinnedMessages(
-		ctx, tx, sessionID, savedPins,
-	); err != nil {
-		return count, err
-	}
-
 	return count, nil
 }
 
@@ -4410,4 +4631,44 @@ func (s *Sync) syncCursorUsageEvents(ctx context.Context) error {
 		return fmt.Errorf("committing pg cursor usage sync: %w", err)
 	}
 	return nil
+}
+
+// lockCuratedCodexThreads locks the PostgreSQL thread rows with ids and
+// returns those holding curation a user added remotely: pins, a star, a
+// rename, or a trash change.
+func lockCuratedCodexThreads(ctx context.Context, tx *sql.Tx, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`SELECT 1 FROM sessions WHERE id = ANY($1) ORDER BY id FOR UPDATE`, ids,
+	); err != nil {
+		return nil, fmt.Errorf("locking Codex threads: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT s.id FROM sessions s
+		WHERE s.id = ANY($1) AND (
+			EXISTS (SELECT 1 FROM pinned_messages p WHERE p.session_id = s.id)
+			OR EXISTS (SELECT 1 FROM starred_sessions st WHERE st.session_id = s.id)
+			OR s.display_name IS DISTINCT FROM s.source_display_name
+			OR s.deleted_at IS DISTINCT FROM s.source_deleted_at)
+		ORDER BY s.id`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("checking Codex thread curation: %w", err)
+	}
+	defer rows.Close()
+	var curated []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("checking Codex thread curation: %w", err)
+		}
+		curated = append(curated, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("checking Codex thread curation: %w", err)
+	}
+	return curated, nil
 }

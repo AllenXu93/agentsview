@@ -12,6 +12,7 @@ import (
 
 	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/server"
+	"go.kenn.io/agentsview/internal/storage"
 )
 
 // daemonPushOperation invokes one generated streaming daemon operation and
@@ -112,7 +113,7 @@ func postDaemonPush[T, P any](
 		}
 		resp, payload, stream, err := operation(ctx, api, &body)
 		if resp == nil {
-			return zero, err
+			return zero, storage.PushNotStartedError{Err: err}
 		}
 		if resp.StatusCode != http.StatusOK {
 			msg := payload
@@ -124,7 +125,9 @@ func postDaemonPush[T, P any](
 				fallbackAttempted = true
 				continue
 			}
-			return zero, errors.New(daemonErrorMessage(resp.StatusCode, msg))
+			return zero, daemonPushError(
+				errors.New(daemonErrorMessage(resp.StatusCode, msg)), msg, false,
+			)
 		}
 		defer resp.Body.Close()
 		if strings.HasPrefix(
@@ -167,10 +170,13 @@ func daemonRejectsWatchScope(status int, body []byte) bool {
 }
 
 // consumeDaemonPushEvents applies daemon progress and terminal events decoded
-// by the generated client's stream.
+// by the generated client's stream. A stream that ends without a done or
+// error event counts as a push that never started, so a watch keeps its
+// --full request, unless the daemon reported that its sync rebuilt the
+// archive: every mirror pushes in full after that.
 func consumeDaemonPushEvents[T, P any](stream *runtime.Stream[[]byte], onProgress func(P)) (T, error) {
 	var result, zero T
-	var done bool
+	var done, rebuilt bool
 	var pushErr error
 	defer stream.Close()
 	for stream.Next() {
@@ -185,6 +191,11 @@ func consumeDaemonPushEvents[T, P any](stream *runtime.Stream[[]byte], onProgres
 			}
 			done = true
 		case "progress":
+			var phase struct{ Phase string }
+			if json.Unmarshal(frame.Data, &phase) == nil &&
+				phase.Phase == storage.PushPhaseRebuilt {
+				rebuilt = true
+			}
 			if onProgress != nil {
 				var progress P
 				if err := json.Unmarshal(frame.Data, &progress); err != nil {
@@ -195,20 +206,44 @@ func consumeDaemonPushEvents[T, P any](stream *runtime.Stream[[]byte], onProgres
 		default:
 			var apiErr apiclient.APIErrorResponse
 			if err := json.Unmarshal(frame.Data, &apiErr); err == nil && apiErr.ErrorData != "" {
-				pushErr = errors.New(apiErr.ErrorData)
+				pushErr = daemonPushError(errors.New(apiErr.ErrorData), frame.Data, true)
 			} else {
 				pushErr = fmt.Errorf("daemon push error: %s", frame.Data)
 			}
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return zero, err
+		return zero, startedIf(rebuilt, err)
 	}
 	if pushErr != nil {
 		return zero, pushErr
 	}
 	if !done {
-		return zero, errors.New("daemon push response missing done event")
+		return zero, startedIf(rebuilt, errors.New("daemon push response missing done event"))
 	}
 	return result, nil
+}
+
+// daemonPushError marks err as a push that never started when the daemon's
+// error body sets push_started to false. Older daemons omit the field; then
+// startedByDefault decides. A rejected request never started a push, and an
+// error streamed after the daemon accepted the push may come from one that
+// did.
+func daemonPushError(err error, body []byte, startedByDefault bool) error {
+	var status struct {
+		PushStarted *bool `json:"push_started"`
+	}
+	started := startedByDefault
+	if json.Unmarshal(body, &status) == nil && status.PushStarted != nil {
+		started = *status.PushStarted
+	}
+	return startedIf(started, err)
+}
+
+// startedIf marks err as a push that never started unless started is set.
+func startedIf(started bool, err error) error {
+	if started {
+		return err
+	}
+	return storage.PushNotStartedError{Err: err}
 }

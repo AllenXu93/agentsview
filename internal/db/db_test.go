@@ -3920,6 +3920,42 @@ func TestGetMessagesReturnsToolCalls(t *testing.T) {
 	assert.Equal(t, 42, tc.ResultContentLength, "ResultContentLength =")
 }
 
+// A message snapshot keeps reading the transcript it started with, tool calls
+// included, while sync rewrites the session.
+func TestMessageSnapshotIgnoresLaterWrites(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "s1", "proj")
+	insertMessages(t, d,
+		Message{
+			SessionID: "s1", Ordinal: 0, Role: "assistant", Content: "first",
+			Timestamp: tsZero, HasToolUse: true,
+			ToolCalls: []ToolCall{{SessionID: "s1", ToolName: "Read", Category: "Read", ToolUseID: "toolu_1"}},
+		},
+		Message{SessionID: "s1", Ordinal: 1, Role: "user", Content: "second", Timestamp: tsZero},
+	)
+	snapshot, err := d.BeginMessageSnapshot(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, snapshot.Close()) })
+	first, err := snapshot.GetMessages(t.Context(), "s1", 0, 1, true)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	require.Len(t, first[0].ToolCalls, 1)
+
+	require.NoError(t, d.ReplaceSessionMessages(t.Context(), "s1", []Message{
+		{SessionID: "s1", Ordinal: 0, Role: "user", Content: "rewritten", Timestamp: tsZero},
+		{SessionID: "s1", Ordinal: 1, Role: "user", Content: "rewritten too", Timestamp: tsZero},
+		{SessionID: "s1", Ordinal: 2, Role: "user", Content: "added", Timestamp: tsZero},
+	}))
+
+	rest, err := snapshot.GetMessages(t.Context(), "s1", 1, 100, true)
+	require.NoError(t, err)
+	require.Len(t, rest, 1)
+	assert.Equal(t, "second", rest[0].Content)
+	current, err := d.GetMessages(t.Context(), "s1", 0, 100, true)
+	require.NoError(t, err)
+	assert.Len(t, current, 3)
+}
+
 func TestToolCallResultContent(t *testing.T) {
 	database := testDB(t)
 	sess := Session{
@@ -6952,6 +6988,10 @@ func TestCopySyncStateFrom_OnlyCopiesDurableKeys(t *testing.T) {
 		"seed source marker")
 	require.NoError(t, srcDB.SetSyncState(t.Context(), "artifact_origin_id", "laptop-a1b2c3"),
 		"seed source artifact origin")
+	require.NoError(t, srcDB.SetSyncState(t.Context(), "pg_push_state_saved_v1:scope", "1"),
+		"seed source scoped push-state mark")
+	require.NoError(t, srcDB.SetSyncState(t.Context(), "last_push_at:scope", "old-push"),
+		"seed source scoped push watermark")
 	require.NoError(t, srcDB.SetSyncState(t.Context(), "last_sync_started_at", "old-start"),
 		"seed source started")
 	require.NoError(t, srcDB.SetSyncState(t.Context(), "last_sync_finished_at", "old-finish"),
@@ -6980,6 +7020,15 @@ func TestCopySyncStateFrom_OnlyCopiesDurableKeys(t *testing.T) {
 	gotMarker, err := dstDB.GetSyncState(t.Context(), "pg_push_marker_id")
 	require.NoError(t, err, "GetSyncState pg_push_marker_id")
 	assert.Equal(t, "marker-123", gotMarker)
+
+	// The mark survives and the watermark does not, so the next push of
+	// that scope knows it lost its push state.
+	gotSaved, err := dstDB.GetSyncState(t.Context(), "pg_push_state_saved_v1:scope")
+	require.NoError(t, err, "GetSyncState pg_push_state_saved_v1:scope")
+	assert.Equal(t, "1", gotSaved)
+	gotPush, err := dstDB.GetSyncState(t.Context(), "last_push_at:scope")
+	require.NoError(t, err, "GetSyncState last_push_at:scope")
+	assert.Empty(t, gotPush)
 
 	gotOrigin, err := dstDB.GetSyncState(t.Context(), "artifact_origin_id")
 	require.NoError(t, err, "GetSyncState artifact_origin_id")

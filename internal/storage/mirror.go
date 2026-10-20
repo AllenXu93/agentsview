@@ -50,6 +50,10 @@ type MirrorPushResult struct {
 	Errors         int
 	Duration       time.Duration
 	Diagnostics    MirrorPushDiagnostics
+	// ArchiveRebuilt reports that a daemon push's sync rebuilt the archive
+	// before the push ran. The next push of every mirror then runs in full,
+	// so a deferred push need not keep a --full request.
+	ArchiveRebuilt bool
 }
 
 type mirrorPushResultJSON MirrorPushResult
@@ -107,6 +111,11 @@ type MirrorSessionCounts struct {
 
 // MirrorPushProgress is reported after each attempted session.
 type MirrorPushProgress struct {
+	// Phase is PushPhaseWaiting while a daemon push waits for another push
+	// to finish, PushPhaseRebuilt once when its sync rebuilt the archive,
+	// PushPhaseWaitingForSync while it waits for a local sync to finish, and
+	// "" otherwise.
+	Phase         string
 	SessionsDone  int
 	SessionsTotal int
 	MessagesDone  int

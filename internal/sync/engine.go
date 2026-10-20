@@ -30,6 +30,7 @@ import (
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/friction"
 	"go.kenn.io/agentsview/internal/ingest"
+	"go.kenn.io/agentsview/internal/lockctx"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/pathutil"
 	"go.kenn.io/agentsview/internal/secrets"
@@ -4985,6 +4986,22 @@ func (e *Engine) RunExclusive(work func() error) error {
 	return work()
 }
 
+// RunExclusiveCtx is RunExclusive for a caller that must stop waiting for the
+// lock when ctx ends, such as a push holding the daemon's push turn. It
+// returns ctx.Err() without running work if ctx ends before the lock is free.
+func (e *Engine) RunExclusiveCtx(ctx context.Context, work func() error) error {
+	if e.refuseWriteInForceParse("RunExclusiveCtx") {
+		return errors.New(
+			"RunExclusiveCtx refused on report-only parse-diff engine",
+		)
+	}
+	if err := lockctx.Lock(ctx, &e.syncMu); err != nil {
+		return err
+	}
+	defer e.syncMu.Unlock()
+	return work()
+}
+
 // ErrSyncInProgress reports that non-blocking foreground sync coordination
 // found another sync or maintenance pass holding the exclusive engine lock.
 var ErrSyncInProgress = errors.New("sync already in progress")
@@ -5033,6 +5050,39 @@ func (e *Engine) RunExclusiveFlushed(work func() error) error {
 	defer e.syncMu.Unlock()
 	e.signalSched.flushAllInline()
 	return work()
+}
+
+// SettleForPush waits for an in-progress sync to finish and then flushes
+// deferred signal recomputes, so a push that starts next copies settled
+// sessions. It does not hold the sync lock afterward: later syncs may write
+// while the push runs. If ctx ends first, SettleForPush returns ctx.Err() and
+// abandons the wait; the lock is released without flushing once acquired.
+func (e *Engine) SettleForPush(ctx context.Context) error {
+	if e.refuseWriteInForceParse("SettleForPush") {
+		return errors.New(
+			"SettleForPush refused on report-only parse-diff engine",
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var abandoned atomic.Bool
+	settled := make(chan struct{})
+	go func() {
+		defer close(settled)
+		e.syncMu.Lock()
+		defer e.syncMu.Unlock()
+		if !abandoned.Load() {
+			e.signalSched.flushAllInline()
+		}
+	}()
+	select {
+	case <-settled:
+		return nil
+	case <-ctx.Done():
+		abandoned.Store(true)
+		return ctx.Err()
+	}
 }
 
 // ApplyWorktreeReclassification serializes the mapping rule, historical

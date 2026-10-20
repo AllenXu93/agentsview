@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,31 @@ func TestParseDaemonPushSSE(t *testing.T) {
 		_, err := consumeDaemonPushEvents[storage.PushResult, storage.PushProgress](daemonEventStream(strings.NewReader(stream(progressEvent))), nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "missing done event")
+	})
+
+	// A dropped stream keeps a --full request unless the daemon rebuilt the
+	// archive, after which every mirror pushes in full.
+	t.Run("stream that ends tells whether the archive was rebuilt", func(t *testing.T) {
+		waitingEvent := "event: progress\n" + `data: {"Phase":"waiting"}` + "\n\n"
+		rebuiltEvent := "event: progress\n" + `data: {"Phase":"rebuilt"}` + "\n\n"
+		for _, tt := range []struct {
+			name    string
+			events  []string
+			started bool
+		}{
+			{"while waiting", []string{waitingEvent}, false},
+			{"during a copy", []string{waitingEvent, progressEvent}, false},
+			{"after a rebuild", []string{waitingEvent, rebuiltEvent, progressEvent}, true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := consumeDaemonPushEvents[storage.PushResult, storage.PushProgress](
+					daemonEventStream(strings.NewReader(stream(tt.events...))), nil,
+				)
+				require.ErrorContains(t, err, "missing done event")
+				_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+				assert.Equal(t, tt.started, !notStarted)
+			})
+		}
 	})
 
 	t.Run("terminal report can exceed ten mebibytes", func(t *testing.T) {
@@ -188,4 +214,53 @@ func TestDaemonPushWatchTransportOmitsScopeForKnownOlderDaemon(t *testing.T) {
 
 func daemonEventStream(body io.Reader) *runtime.Stream[[]byte] {
 	return runtime.NewEventStream[[]byte](&http.Response{Body: io.NopCloser(body)})
+}
+
+// A push the daemon refused, never received, or reports as not started
+// leaves nothing to resume, so a push watch keeps its --full request for the
+// retry. An error from an older daemon that accepted the push may come from a
+// push that already started.
+func TestPostDaemonPushReportsWhetherThePushStarted(t *testing.T) {
+	serve := func(handler http.HandlerFunc) string {
+		ts := httptest.NewServer(handler)
+		t.Cleanup(ts.Close)
+		return ts.URL
+	}
+	streamError := func(data string) string {
+		return serve(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: error\ndata: " + data + "\n\n"))
+		})
+	}
+	unreachable := httptest.NewServer(http.NotFoundHandler())
+	unreachable.Close()
+
+	for _, tt := range []struct {
+		name    string
+		url     string
+		started bool
+	}{
+		{"daemon refused", serve(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}), false},
+		{"daemon unreachable", unreachable.URL, false},
+		{"older daemon streamed an error", streamError(`{"error":"push: conn reset"}`), true},
+		{"pre-push resync failed", streamError(
+			`{"error":"resync failed","push_started":false}`), false},
+		{"copy failed without a stream", serve(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"push: conn reset","push_started":true}`))
+		}), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := postDaemonPush[storage.PushResult, storage.PushProgress](
+				t.Context(), transport{URL: tt.url}, "", replicaPushOperations["pg"],
+				apiclient.DaemonPushRequest{}, nil,
+			)
+			require.Error(t, err)
+			_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+			assert.Equal(t, !tt.started, notStarted)
+		})
+	}
 }

@@ -43,6 +43,9 @@ type PushProgress struct {
 	// a full push this covers every local session and can run for minutes),
 	// "" during the session/message push, and "vectors" during the vector
 	// phase, whose progress is carried by the Vector* fields.
+	// PushPhaseWaiting means a daemon push is waiting for another push to
+	// finish, PushPhaseRebuilt that its sync rebuilt the archive, and
+	// PushPhaseWaitingForSync that it is waiting for a local sync to finish.
 	Phase            string
 	SessionsDone     int
 	SessionsTotal    int
@@ -154,3 +157,26 @@ func (r *VectorPushResult) DeferSession(sessionID string) {
 	r.SessionsDeferred++
 	r.DeferredSessionIDs = append(r.DeferredSessionIDs, sessionID)
 }
+
+// PushPhaseWaiting is the progress phase a daemon push reports while it
+// waits for another push to finish. The daemon runs one push at a time.
+const PushPhaseWaiting = "waiting"
+
+// PushNotStartedError marks a push error from before the push recorded a
+// full push it could resume. A watch keeps its --full request after one; any
+// other failed push resumes its recorded full push instead.
+type PushNotStartedError struct{ Err error }
+
+func (e PushNotStartedError) Error() string { return e.Err.Error() }
+func (e PushNotStartedError) Unwrap() error { return e.Err }
+
+// PushPhaseRebuilt is the progress phase a daemon push reports as soon as its
+// sync has rebuilt the archive. Every mirror pushes in full after a rebuild,
+// so a client whose stream ends after this report need not ask for --full
+// again. A client whose stream ends without it keeps its --full request.
+const PushPhaseRebuilt = "rebuilt"
+
+// PushPhaseWaitingForSync is the progress phase a daemon push reports when it
+// has waited a few seconds for a local sync to hand the archive writer back.
+// The push resumes once the sync finishes.
+const PushPhaseWaitingForSync = "waiting_for_sync"

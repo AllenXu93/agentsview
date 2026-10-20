@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	gosync "sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.kenn.io/agentsview/internal/archivepush"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/parser"
@@ -107,41 +109,68 @@ func (s *Server) registerPushRoutes() {
 // runPushStream executes run once and writes its outcome to the client: SSE
 // progress/done/error events when the request negotiated an event stream
 // (the CLI's daemon-delegated push renders these live), a single JSON body
-// otherwise. run receives the progress callback to thread into the push;
-// it is a throttled SSE sender in stream mode and nil in JSON mode — the
-// daemon-side debug.log progress logger is composed by the caller.
+// otherwise. run receives two senders, both nil in JSON mode: progress, a
+// throttled sender to thread into the push, and phase, an unthrottled sender
+// for the waiting and rebuilt reports a client must not miss. The
+// daemon-side debug.log progress logger is composed by the caller. An error
+// body carries push_started, so a watch client can keep a --full request
+// that no push started.
 func runPushStream[T any](
 	hctx huma.Context,
-	run func(onProgress func(T)) (any, error),
+	run func(progress, phase func(T)) (any, error),
 ) {
 	if strings.Contains(hctx.Header("Accept"), "text/event-stream") {
 		if sse, ok := newHumaSSEStream(hctx); ok {
 			send := newPushProgressStreamSender(func(p T) {
 				sse.SendJSON("progress", p)
 			})
-			result, err := run(send)
+			result, err := run(send, func(p T) {
+				sse.SendJSON("progress", p)
+			})
 			if err != nil {
-				sse.SendJSON("error", map[string]string{"error": err.Error()})
+				sse.SendJSON("error", pushErrorBody(err.Error(), err))
 				return
 			}
 			sse.SendJSON("done", result)
 			return
 		}
 	}
-	result, err := run(nil)
+	result, err := run(nil, nil)
 	if err != nil {
 		if errors.Is(err, db.ErrWriterClosed) {
 			server, ok := hctx.Context().Value(ctxKeyHumaServer).(*Server)
 			response := writerClosedResponse(hctx.AppendHeader, ok && server.archiveStale())
-			writeHumaJSON(hctx, response.Status,
-				map[string]string{"error": response.Message})
+			writeHumaJSON(hctx, response.Status, pushErrorBody(response.Message, err))
 			return
 		}
 		writeHumaJSON(hctx, http.StatusInternalServerError,
-			map[string]string{"error": err.Error()})
+			pushErrorBody(err.Error(), err))
 		return
 	}
 	writeHumaJSON(hctx, http.StatusOK, result)
+}
+
+// pushErrorResponse is the error body of a push route.
+type pushErrorResponse struct {
+	Error string `json:"error"`
+	// PushStarted is false when the client should ask for --full again: the
+	// push failed before it recorded a full push the mirror could resume, and
+	// the request did not rebuild the archive, which makes every mirror push
+	// in full on its own.
+	PushStarted bool `json:"push_started"`
+}
+
+func pushErrorBody(message string, err error) pushErrorResponse {
+	_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+	_, rebuilt := errors.AsType[archiveRebuiltError](err)
+	return pushErrorResponse{Error: message, PushStarted: !notStarted || rebuilt}
+}
+
+// logPushPhase logs a daemon push that has to wait for another push.
+func logPushPhase(name, phase string) {
+	if phase == storage.PushPhaseWaiting {
+		log.Printf("%s push: waiting for another push to finish", name)
+	}
 }
 
 // composePushProgress fans one progress report out to each non-nil callback.
@@ -462,18 +491,59 @@ func watchPathWithinRoots(path string, roots []string) bool {
 	return false
 }
 
+// pushTurn lets one daemon push run at a time. Without it, two pushes to the
+// same destination could overlap: the slower one could write an older copy of
+// a session after the newer one recorded its cutoff, and later incremental
+// pushes would skip that session. The zero value is ready to use.
+type pushTurn struct {
+	once gosync.Once
+	turn chan struct{}
+}
+
+// take waits for this push's turn and returns the func that ends it. It calls
+// onWait, when set, if the push must wait for another push. It returns ctx's
+// error if ctx ends first.
+func (p *pushTurn) take(ctx context.Context, onWait func()) (func(), error) {
+	p.once.Do(func() { p.turn = make(chan struct{}, 1) })
+	end := func() { <-p.turn }
+	select {
+	case p.turn <- struct{}{}:
+		return end, nil
+	default:
+	}
+	if onWait != nil {
+		onWait()
+	}
+	select {
+	case p.turn <- struct{}{}:
+		return end, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // syncThenRunForPush brings the local archive current and then runs the push
-// work serialized against sync passes. Full and stale-archive pushes are
-// archive-scale: with the worker-backed resync runner wired they route the
-// rebuild through the worker (matching /api/v1/resync and the pre-session-sync
-// resync) instead of running an in-process resync in the long-lived daemon,
-// and the push work then runs under the engine's exclusive sync lock — after
-// the deferred-signal flush — so it still observes the post-rebuild archive
-// and stays serialized against watcher and periodic syncs. A validated batch
-// on a current archive uses SyncWatchBatchThenRun, applying only its bounded
-// changed scope before the push under that same lock. Requests without a batch
-// retain SyncThenRun. Without a runner (tests, remote-mode-less setups), full
-// and stale cases keep the in-process SyncThenRun path.
+// work. The push runs after the sync, not under its lock: watcher and periodic
+// syncs keep writing the archive while a long push copies it, and each push
+// takes its cutoff under the archive write lock so later pushes pick those
+// writes up. Pushes take turns (see pushTurn), and a push takes its turn
+// before its own sync, so its archive rebuild never replaces the archive
+// while another push reads it. onPhase, when set, is called with
+// storage.PushPhaseWaiting if the push must wait for its turn, and with
+// storage.PushPhaseRebuilt as soon as its sync has rebuilt the archive.
+// Every mirror pushes in full after a rebuild, so a client whose stream drops
+// after that report need not ask for --full again. Before the work it
+// waits for any running sync and flushes deferred signal recomputes, so the
+// push copies settled sessions.
+// An error from before work runs is a storage.PushNotStartedError.
+//
+// Full and stale-archive pushes are archive-scale: with the worker-backed
+// resync runner wired they route the rebuild through the worker (matching
+// /api/v1/resync and the pre-session-sync resync) instead of running an
+// in-process resync in the long-lived daemon. A validated batch on a current
+// archive applies only its bounded changed scope. Requests without a batch
+// run a normal sync. Without a runner (tests, remote-mode-less setups), full
+// and stale cases keep the in-process resync.
 func (s *Server) syncThenRunForPush(
 	ctx context.Context,
 	engine *syncpkg.Engine,
@@ -481,60 +551,136 @@ func (s *Server) syncThenRunForPush(
 	full bool,
 	watchBatch *syncpkg.WatchBatch,
 	watchRecovery *syncpkg.WatchRecoveryScope,
+	onPhase func(phase string),
 	work func(forceFull bool) error,
 ) error {
+	if onPhase == nil {
+		onPhase = func(string) {}
+	}
+	endTurn, err := s.pushTurn.take(ctx, func() { onPhase(storage.PushPhaseWaiting) })
+	if err != nil {
+		return storage.PushNotStartedError{Err: err}
+	}
+	defer endTurn()
+	startDatabaseID, err := local.GetDatabaseID(ctx)
+	if err != nil {
+		return storage.PushNotStartedError{Err: err}
+	}
+	forceFull, incomplete, err := s.syncForPush(
+		ctx, engine, local, full, watchBatch, watchRecovery,
+	)
+	rebuilt, idErr := archiveRebuiltSince(ctx, local, startDatabaseID)
+	if idErr != nil {
+		return storage.PushNotStartedError{Err: errors.Join(err, idErr)}
+	}
+	if rebuilt {
+		onPhase(storage.PushPhaseRebuilt)
+	}
+	if err != nil {
+		return markArchiveRebuilt(ctx, local, startDatabaseID, storage.PushNotStartedError{Err: err})
+	}
+	if err := engine.SettleForPush(ctx); err != nil {
+		return markArchiveRebuilt(ctx, local, startDatabaseID, storage.PushNotStartedError{Err: err})
+	}
+	pushErr := markArchiveRebuilt(ctx, local, startDatabaseID, work(forceFull))
+	if incomplete == nil {
+		return pushErr
+	}
+	if pushErr != nil {
+		return errors.Join(incomplete, pushErr)
+	}
+	log.Printf("local ingestion warning during archive push: %v", incomplete)
+	return nil
+}
+
+// archiveRebuiltError marks a push error from a request that rebuilt the
+// archive. Every mirror pushes in full after a rebuild, so the client need
+// not ask for --full again; asking would rebuild the archive on every retry.
+type archiveRebuiltError struct{ err error }
+
+func (e archiveRebuiltError) Error() string { return e.err.Error() }
+func (e archiveRebuiltError) Unwrap() error { return e.err }
+
+// markArchiveRebuilt marks err when the archive's database ID changed since
+// startDatabaseID, which a rebuild does.
+func markArchiveRebuilt(
+	ctx context.Context, local *db.DB, startDatabaseID string, err error,
+) error {
+	if err == nil {
+		return nil
+	}
+	rebuilt, idErr := archiveRebuiltSince(ctx, local, startDatabaseID)
+	if idErr != nil {
+		return errors.Join(err, idErr)
+	}
+	if rebuilt {
+		return archiveRebuiltError{err}
+	}
+	return err
+}
+
+// archiveRebuiltSince reports whether the archive's database ID changed since
+// startDatabaseID, which a rebuild does. It reads the ID after ctx ends too,
+// so a canceled push still learns whether it rebuilt the archive.
+func archiveRebuiltSince(
+	ctx context.Context, local *db.DB, startDatabaseID string,
+) (bool, error) {
+	id, err := local.GetDatabaseID(context.WithoutCancel(ctx))
+	if err != nil {
+		return false, fmt.Errorf("reading archive database id: %w", err)
+	}
+	return id != startDatabaseID, nil
+}
+
+// syncForPush runs the sync a push needs and reports whether the push must
+// resend every session. incomplete is set when some sources failed but the
+// archive is still current, so the push may copy it.
+func (s *Server) syncForPush(
+	ctx context.Context,
+	engine *syncpkg.Engine,
+	local *db.DB,
+	full bool,
+	watchBatch *syncpkg.WatchBatch,
+	watchRecovery *syncpkg.WatchRecoveryScope,
+) (forceFull bool, incomplete, err error) {
 	if watchBatch != nil && !full && !local.NeedsResync() {
 		stats, err := engine.SyncWatchBatchThenRun(
-			ctx, *watchBatch, watchRecovery,
-			func() error { return work(false) },
+			ctx, *watchBatch, watchRecovery, func() error { return nil },
 		)
 		if err == nil {
 			err = requireProcessingComplete(stats)
 		}
-		return err
+		return false, nil, err
 	}
 	if s.localResyncRunner == nil || (!full && !local.NeedsResync()) {
 		currentArchive := !full && !local.NeedsResync()
-		stats, err := engine.SyncThenRun(ctx, full, nil, work)
+		stats, err := engine.SyncThenRun(ctx, full, nil,
+			func(f bool) error {
+				forceFull = f
+				return nil
+			})
 		if err != nil || stats.ProcessingComplete() {
-			return err
+			return forceFull, nil, err
 		}
+		// Local sync owns retries for failed sources. An unscoped push must
+		// still report its own outcome, so the client does not repeat a
+		// completed copy or lose row-level errors from its result.
 		incomplete := requireProcessingComplete(stats)
-		if !currentArchive {
-			return incomplete
+		if !currentArchive || local.NeedsResync() {
+			return false, nil, incomplete
 		}
-		// Local sync owns retries for failed sources. An unscoped mirror push
-		// must report its own outcome so the client does not repeat a completed
-		// copy or lose row-level errors from its result. SyncThenRun skips work
-		// on incomplete processing, so copy the archive under its lock here.
-		pushErr := engine.RunExclusiveFlushed(func() error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if local.NeedsResync() {
-				return incomplete
-			}
-			return work(false)
-		})
-		if pushErr != nil {
-			return errors.Join(incomplete, pushErr)
-		}
-		log.Printf("local ingestion warning during archive push: %v", incomplete)
-		return nil
+		return false, incomplete, nil
 	}
 	if _, err := s.runResyncWithFallback(ctx, engine, nil); err != nil {
-		return err
+		return false, nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return engine.RunExclusiveFlushed(func() error { return work(true) })
+	return true, nil, ctx.Err()
 }
 
 // replicaPushHandler builds the daemon-delegated push handler for one
 // replica backend. The handler validates the request before the stream body
 // flushes a 200, brings the archive current, then runs the backend's pusher
-// against the daemon's archive under the sync lock.
+// against the daemon's archive while local sync keeps running.
 func (s *Server) replicaPushHandler(
 	replica storage.Replica,
 ) func(context.Context, *daemonPushInput) (*huma.StreamResponse, error) {
@@ -588,52 +734,60 @@ func (s *Server) humaReplicaPush(
 	body := in.Body
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		runPushStream(hctx, func(
-			streamProgress func(storage.PushProgress),
+			streamProgress, streamPhase func(storage.PushProgress),
 		) (any, error) {
 			onProgress := composePushProgress(
 				newReplicaPushProgressLogger(name), streamProgress,
 			)
+			reportPhase := func(phase string) {
+				logPushPhase(name, phase)
+				if streamPhase != nil {
+					streamPhase(storage.PushProgress{Phase: phase})
+				}
+			}
+			pushCtx := db.WithWriterWaitNotice(ctx, func() {
+				reportPhase(storage.PushPhaseWaitingForSync)
+			})
+			session := &archivepush.ReplicaSession{
+				Connect: func(c context.Context) (storage.Pusher, error) {
+					return replica.NewPusher(c, target, local, storage.PusherOptions{
+						Projects:               body.Projects,
+						ExcludeProjects:        body.ExcludeProjects,
+						SyncStateTarget:        body.SyncStateTarget,
+						MigrateLegacySyncState: body.MigrateLegacySyncState,
+						VectorSource:           vectorSource,
+					})
+				},
+				EnsurePricing: func(c context.Context) error {
+					return s.ensurePricing(c, local)
+				},
+			}
+			if storage.StoresFriction(replica) {
+				session.FrictionReview = engine
+			}
+			var stage archivepush.Stage
+			session.OnStage = func(s archivepush.Stage) func() {
+				stage = s
+				return nil
+			}
+			defer session.Close()
 			var result storage.PushResult
 			err := s.syncThenRunForPush(
-				ctx, engine, local, body.Full, body.WatchBatch, body.WatchRecovery,
+				pushCtx, engine, local, body.Full, body.WatchBatch, body.WatchRecovery,
+				reportPhase,
 				func(forceFull bool) error {
-					if storage.StoresFriction(replica) {
-						if err := engine.DrainStaleFrictionLocked(ctx); err != nil {
-							return err
-						}
-					}
-					if refreshErr := s.ensurePricing(ctx, local); refreshErr != nil {
-						if ctxErr := ctx.Err(); ctxErr != nil {
-							return ctxErr
-						}
-						log.Printf("pricing refresh: %v", refreshErr)
-					}
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return ctxErr
-					}
-					pusher, err := replica.NewPusher(
-						ctx, target, local, storage.PusherOptions{
-							Projects:               body.Projects,
-							ExcludeProjects:        body.ExcludeProjects,
-							SyncStateTarget:        body.SyncStateTarget,
-							MigrateLegacySyncState: body.MigrateLegacySyncState,
-							VectorSource:           vectorSource,
-						},
-					)
-					if err != nil {
-						return err
-					}
-					defer pusher.Close()
-					if err := pusher.EnsureSchema(ctx); err != nil {
-						return err
-					}
-					result, err = pusher.PushWithOptions(ctx, storage.PushOptions{
+					var err error
+					result, err = session.Push(pushCtx, storage.PushOptions{
 						Full: forceFull,
 						ScopeVectorsToChangedSessions: body.
 							ScopeVectorsToChangedSessions,
 						LastReconciledVectorGeneration: body.
 							LastReconciledVectorGeneration,
 					}, onProgress)
+					// The replica records a full push only once the copy starts.
+					if err != nil && stage != archivepush.StagePush {
+						return storage.PushNotStartedError{Err: err}
+					}
 					return err
 				},
 			)
@@ -670,23 +824,40 @@ func (s *Server) humaMirrorPush(
 	}
 
 	engine := s.syncEngineForLocal(ctx, local)
-	opts := mirrorPushOptions(in.Body)
+	push := archivepush.MirrorPush{
+		Mirror: s.mirror, Config: duckCfg, Archive: local,
+		Options: mirrorPushOptions(in.Body),
+		EnsurePricing: func(c context.Context) error {
+			return s.ensurePricing(c, local)
+		},
+	}
 	body := in.Body
 	name := s.mirror.Name()
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		runPushStream(hctx, func(
-			streamProgress func(storage.MirrorPushProgress),
+			streamProgress, streamPhase func(storage.MirrorPushProgress),
 		) (any, error) {
 			onProgress := composePushProgress(
 				newMirrorPushProgressLogger(name), streamProgress,
 			)
 			var result storage.MirrorPushResult
-			err := s.syncThenRunForPush(ctx, engine, local, body.Full, nil, nil,
+			var rebuilt bool
+			reportPhase := func(phase string) {
+				rebuilt = rebuilt || phase == storage.PushPhaseRebuilt
+				logPushPhase(name, phase)
+				if streamPhase != nil {
+					streamPhase(storage.MirrorPushProgress{Phase: phase})
+				}
+			}
+			pushCtx := db.WithWriterWaitNotice(ctx, func() {
+				reportPhase(storage.PushPhaseWaitingForSync)
+			})
+			err := s.syncThenRunForPush(pushCtx, engine, local, body.Full, nil, nil,
+				reportPhase,
 				func(forceFull bool) error {
 					var pushErr error
-					result, pushErr = s.mirror.Push(
-						ctx, duckCfg, local, opts, forceFull, onProgress,
-					)
+					result, pushErr = push.Push(pushCtx, forceFull, onProgress)
+					result.ArchiveRebuilt = rebuilt
 					return pushErr
 				})
 			return result, err

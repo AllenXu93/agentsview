@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -387,4 +388,190 @@ func TestCodexPageUpgradeIncrementalPushCopiesFriction(t *testing.T) {
 	got := pgFrictionFindings(t, syncer, page)
 	require.Len(t, got, 1)
 	assert.Equal(t, "come back later", got[0].Label)
+}
+
+// A rebuild can turn a legacy Codex thread into a page in another project. A
+// full push that filters that project out must not delete a thread row that
+// holds the only copy of its pins, star, and title. A thread with no curation
+// has nothing to lose, so the push deletes it and succeeds.
+func TestFilteredFullPushKeepsCuratedCodexThreadWhosePageIsExcluded(t *testing.T) {
+	for _, mode := range []string{"curated", "uncurated", "pinned during push"} {
+		t.Run(mode, func(t *testing.T) {
+			curated := mode == "curated"
+			const thread = "codex:11111111-1111-4111-8111-111111111111"
+			const page = thread + "_22222222-2222-4222-8222-222222222222"
+			const schema = "agentsview_codex_page_filtered_cleanup_test"
+			ctx := t.Context()
+			pgURL := testPGURL(t)
+			cleanNamedPGSchema(t, pgURL, schema)
+			t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+			source := testDB(t)
+			sourcePath := source.Path()
+			pagePath := filepath.Join(t.TempDir(), "rollout-2026-09-25T12-00-00-"+page[len("codex:"):]+".jsonl")
+			sess := db.Session{
+				ID: thread, Agent: "codex", Project: "sample", Machine: "machine",
+				FilePath: &pagePath, MessageCount: 1, CreatedAt: "2026-09-25T12:00:00Z",
+			}
+			require.NoError(t, source.UpsertSession(ctx, sess))
+			message := db.Message{
+				SessionID: thread, Role: "assistant", Content: "retained page answer",
+				Timestamp: "2026-09-25T12:00:00Z",
+			}
+			require.NoError(t, source.InsertMessages(ctx, []db.Message{message}))
+			require.NoError(t, source.SetSessionDataVersion(ctx, thread, 130))
+			projects := storage.PusherOptions{Projects: []string{"sample"}}
+			syncer, err := New(pgURL, schema, source, "machine", true, projects)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, syncer.Close()) })
+			pushed, err := syncer.Push(ctx, true, nil)
+			require.NoError(t, err)
+			require.Zero(t, pushed.Errors)
+			store := &Store{pg: syncer.pg}
+			if curated {
+				require.NoError(t, store.RenameSession(ctx, thread, new("remote page title")))
+				starred, err := store.StarSession(ctx, thread)
+				require.NoError(t, err)
+				require.True(t, starred)
+				_, err = store.PinMessage(ctx, thread, 0, new("remote note"))
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, source.Close())
+			raw, err := sql.Open("sqlite3", sourcePath)
+			require.NoError(t, err)
+			_, err = raw.ExecContext(ctx, "PRAGMA user_version=130")
+			require.NoError(t, err)
+			require.NoError(t, raw.Close())
+			rebuilt := testDB(t)
+			require.NoError(t, rebuilt.CopyArchiveIdentityFrom(sourcePath))
+			require.NoError(t, rebuilt.CopySyncStateFrom(sourcePath))
+			sess.ID = page
+			sess.Project = "other"
+			sess.ParentSessionID = new(thread)
+			sess.RelationshipType = "continuation"
+			require.NoError(t, rebuilt.UpsertSession(ctx, sess))
+			message.SessionID = page
+			require.NoError(t, rebuilt.InsertMessages(ctx, []db.Message{message}))
+			require.NoError(t, rebuilt.SetSessionDataVersion(ctx, page, db.CurrentDataVersion()))
+
+			upgraded, err := New(pgURL, schema, rebuilt, "machine", true, projects)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+			if mode == "pinned during push" {
+				// A pin that commits while the push runs must reach the
+				// curation check, or the push deletes it with the thread.
+				pin, err := syncer.pg.BeginTx(ctx, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = pin.Rollback() })
+				require.NoError(t, lockPinnedMessagesSession(ctx, pin, thread))
+				_, err = pinMessageTx(ctx, pin, thread, 0, new("remote note"))
+				require.NoError(t, err)
+				pushed := make(chan error, 1)
+				go func() {
+					_, err := upgraded.Push(ctx, true, nil)
+					pushed <- err
+				}()
+				require.Eventually(t, func() bool {
+					var waiting bool
+					require.NoError(t, syncer.pg.QueryRowContext(ctx, `
+						SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+						WHERE datname = current_database() AND pid <> pg_backend_pid()
+							AND wait_event_type = 'Lock')`).Scan(&waiting))
+					return waiting
+				}, 30*time.Second, 10*time.Millisecond, "the push never waited for the pin's row lock")
+				require.NoError(t, pin.Commit())
+				err = <-pushed
+				require.ErrorContains(t, err,
+					`push stopped: Codex thread `+thread+` has pins or other edits that must move to its page in project "other"`)
+				pins, err := store.ListPinnedMessages(ctx, thread, "")
+				require.NoError(t, err)
+				assert.Len(t, pins, 1, "the push deleted a pin added while it ran")
+				return
+			}
+			_, err = upgraded.Push(ctx, true, nil)
+			row, getErr := store.GetSessionFull(ctx, thread)
+			require.NoError(t, getErr)
+			if !curated {
+				require.NoError(t, err)
+				assert.Nil(t, row, "the push kept a thread row with nothing to preserve")
+				return
+			}
+			require.ErrorContains(t, err,
+				`push stopped: Codex thread `+thread+` has pins or other edits that must move to its page in project "other"`)
+			require.NotNil(t, row, "the push deleted the thread row")
+			require.NotNil(t, row.DisplayName)
+			assert.Equal(t, "remote page title", *row.DisplayName)
+			pins, err := store.ListPinnedMessages(ctx, thread, "")
+			require.NoError(t, err)
+			assert.Len(t, pins, 1)
+		})
+	}
+}
+
+// Restoring a legacy Codex thread remotely stamps it with a current data
+// version, so page migration no longer recognizes it. A full push after an
+// archive rebuild must keep the thread and its curation rather than delete it.
+func TestFullPushKeepsRemotelyRestoredCodexThread(t *testing.T) {
+	const thread = "codex:11111111-1111-4111-8111-111111111111"
+	const page = thread + "_22222222-2222-4222-8222-222222222222"
+	const schema = "agentsview_codex_page_restored_cleanup_test"
+	ctx := t.Context()
+	pgURL := testPGURL(t)
+	cleanNamedPGSchema(t, pgURL, schema)
+	t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+	source := testDB(t)
+	sourcePath := source.Path()
+	pagePath := filepath.Join(t.TempDir(), "rollout-2026-09-25T12-00-00-"+page[len("codex:"):]+".jsonl")
+	sess := db.Session{
+		ID: thread, Agent: "codex", Project: "sample", Machine: "machine",
+		FilePath: &pagePath, MessageCount: 1, CreatedAt: "2026-09-25T12:00:00Z",
+	}
+	require.NoError(t, source.UpsertSession(ctx, sess))
+	message := db.Message{
+		SessionID: thread, Role: "assistant", Content: "retained page answer",
+		Timestamp: "2026-09-25T12:00:00Z",
+	}
+	require.NoError(t, source.InsertMessages(ctx, []db.Message{message}))
+	require.NoError(t, source.SetSessionDataVersion(ctx, thread, 130))
+	syncer, err := New(pgURL, schema, source, "machine", true, storage.PusherOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, syncer.Close()) })
+	pushed, err := syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	require.Zero(t, pushed.Errors)
+	store := &Store{pg: syncer.pg}
+	_, err = store.PinMessage(ctx, thread, 0, new("remote note"))
+	require.NoError(t, err)
+	require.NoError(t, store.SoftDeleteSession(ctx, thread))
+	_, err = store.RestoreSession(ctx, thread)
+	require.NoError(t, err)
+
+	require.NoError(t, source.Close())
+	raw, err := sql.Open("sqlite3", sourcePath)
+	require.NoError(t, err)
+	_, err = raw.ExecContext(ctx, "PRAGMA user_version=130")
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	rebuilt := testDB(t)
+	require.NoError(t, rebuilt.CopyArchiveIdentityFrom(sourcePath))
+	require.NoError(t, rebuilt.CopySyncStateFrom(sourcePath))
+	sess.ID = page
+	sess.ParentSessionID = new(thread)
+	sess.RelationshipType = "continuation"
+	require.NoError(t, rebuilt.UpsertSession(ctx, sess))
+	message.SessionID = page
+	require.NoError(t, rebuilt.InsertMessages(ctx, []db.Message{message}))
+	require.NoError(t, rebuilt.SetSessionDataVersion(ctx, page, db.CurrentDataVersion()))
+
+	upgraded, err := New(pgURL, schema, rebuilt, "machine", true, storage.PusherOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	_, err = upgraded.Push(ctx, true, nil)
+	require.NoError(t, err)
+
+	pins, err := store.ListPinnedMessages(ctx, thread, "")
+	require.NoError(t, err)
+	pagePins, err := store.ListPinnedMessages(ctx, page, "")
+	require.NoError(t, err)
+	assert.Len(t, append(pins, pagePins...), 1, "the push deleted the restored thread's pin")
 }

@@ -710,3 +710,23 @@ func TestSweepStaleTempFilesHandlesGlobMetacharactersInDirectory(t *testing.T) {
 	assert.NoFileExists(t, staleTmp,
 		"a stale temp file in a glob-metacharacter directory must still be swept")
 }
+
+// A --full push that cannot start its rebuild, because another push holds
+// the rebuild lock, reports that it never started, so a watch keeps the
+// --full request for its retry.
+func TestFullPushBlockedByAnotherRebuildIsNotStarted(t *testing.T) {
+	ctx := t.Context()
+	local := newLocalDB(t)
+	seedRebuildFixture(t, local)
+	path := filepath.Join(t.TempDir(), "mirror.duckdb")
+	run, err := newRebuildRun(ctx, local, "test-machine", storage.MirrorPushOptions{}, "other push")
+	require.NoError(t, err)
+	lock, _, _, err := claimRebuild(ctx, path, run, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, unlockRebuild(lock)) })
+
+	_, err = Push(ctx, path, local, "test-machine", storage.MirrorPushOptions{}, true, nil)
+	require.Error(t, err)
+	_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+	assert.True(t, notStarted, "the blocked rebuild recorded nothing to resume: %v", err)
+}

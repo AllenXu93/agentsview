@@ -147,6 +147,15 @@ func Push(
 	ctx context.Context, path string, local *db.DB, machine string,
 	opts storage.MirrorPushOptions, full bool, onProgress func(storage.MirrorPushProgress),
 ) (result storage.MirrorPushResult, err error) {
+	// A --full push that fails before its rebuild starts left nothing a later
+	// push resumes. buildMirror reports its own failures before it records
+	// the rebuild run.
+	building := false
+	defer func() {
+		if err != nil && full && !building {
+			err = storage.PushNotStartedError{Err: err}
+		}
+	}()
 	if err := sweepStaleTempFiles(path); err != nil {
 		log.Printf("duckdbsync: sweeping stale rebuild temp files: %v", err)
 	}
@@ -269,6 +278,7 @@ func Push(
 		return storage.MirrorPushResult{}, err
 	}
 	log.Printf("duckdbsync: rebuilding mirror: %s", reason)
+	building = true
 	result, err = buildMirror(ctx, path, local, machine, opts, run, onProgress)
 	result.Diagnostics.RebuildReason = reason
 	if err == nil {
@@ -449,7 +459,7 @@ func (s *Sync) runIncrementalPush(
 
 	if result.Errors == 0 {
 		if err := s.finalizeIncrementalPush(
-			ctx, opts, result.Diagnostics.Cutoff, through,
+			ctx, opts, probe.SourceDatabaseID, result.Diagnostics.Cutoff, through,
 			identityRevision, mappingRevision,
 		); err != nil {
 			return result, err
@@ -479,7 +489,10 @@ func (s *Sync) pushChangedSessions(
 	ctx context.Context, probe MirrorProbe, onProgress func(storage.MirrorPushProgress),
 	result *storage.MirrorPushResult,
 ) ([]db.Session, []db.Session, error) {
-	cutoff := time.Now().UTC().Format(localSyncTimestampLayout)
+	cutoff, err := s.local.MirrorPushCutoff(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	result.Diagnostics.Cutoff = cutoff
 	candidates, err := s.local.ListSessionsForMirrorWindow(
 		ctx, probe.LastPushCutoff, nil, nil,
@@ -710,19 +723,16 @@ func (s *Sync) readMirrorResidentBatch(
 // push. Callers must only invoke this after confirming result.Errors == 0:
 // advancing the cutoff/revisions past a partially failed push would let the
 // failed sessions silently fall out of the next incremental window.
+//
+// sourceDatabaseID is the archive generation the push started from: the
+// probe's recorded id, which matched the local archive when the push began
+// (see rebuildReason). The daemon can replace the archive while a push runs;
+// recording the starting id makes the next push rebuild the mirror then.
 func (s *Sync) finalizeIncrementalPush(
-	ctx context.Context, opts storage.MirrorPushOptions, cutoff string,
+	ctx context.Context, opts storage.MirrorPushOptions,
+	sourceDatabaseID, cutoff string,
 	deletionRevision, identityRevision, mappingRevision int64,
 ) error {
-	// The source database id is re-read rather than copied from the probe:
-	// an incremental push only runs when the probe's recorded id already
-	// matches the local archive (see rebuildReason), so the two are
-	// interchangeable, and reading local state keeps this symmetric with
-	// writeRebuildMetadata.
-	sourceDatabaseID, err := s.local.GetDatabaseID(ctx)
-	if err != nil {
-		return fmt.Errorf("reading local archive database id: %w", err)
-	}
 	return writeMirrorMetadata(ctx, s.duck, mirrorMetadata{
 		SchemaVersion:    SchemaVersion,
 		DataVersion:      db.CurrentDataVersion(),
