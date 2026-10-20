@@ -595,7 +595,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (140: strip gptme provider-routing suffixes from stored model IDs so catalog
 // pricing resolves. Re-parse unchanged gptme sources in place; source and
 // session identities are unchanged.)
-const dataVersion = 140
+// (141: import provider-reported gptme costs as exact usage events. Re-parse
+// unchanged gptme sources in place; source and session identities are unchanged.)
+const dataVersion = 141
 
 const archiveOnlyVersionBase = 1 << 20
 

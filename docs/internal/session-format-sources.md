@@ -4113,7 +4113,16 @@ schemas keep their existing ordering behavior.
   [message.py](https://github.com/gptme/gptme/blob/8f71713f3d1151b3141927aa014db62b9d756117/gptme/message.py).
 - **Usage and cost:** Assistant metadata can persist input, output, cache-read,
   and cache-creation tokens with model data. Agentsview catalog-prices the
-  normalized usage and consumes no authoritative persisted USD total.
+  normalized usage unless `metadata.cost_source` is `"provider"` and
+  `metadata.cost` is a valid non-negative USD amount. In that case it imports
+  an exact-cost usage event, retaining message token display fields but not
+  a duplicate billable message token row. Reverified 2026-10-20 against
+  gptme commit `54c3a29fc3d5089f211528e206b50d7ee3f775c8`:
+  [`_record_usage`](https://github.com/gptme/gptme/blob/54c3a29fc3d5089f211528e206b50d7ee3f775c8/gptme/llm/llm_openai.py#L317-L398)
+  writes this marker only for reported direct OpenRouter costs, including
+  zero; estimates, BYOK fees and proxied routes do not receive the marker.
+  Parser data version 141 reparses unchanged gptme sources in place to import
+  these events without changing source or session identities.
   Reverified 2026-10-20 at the pinned commit: assistant metadata stores the
   requested model ID, including any `@host` provider pin
   ([metadata](https://github.com/gptme/gptme/blob/8f71713f3d1151b3141927aa014db62b9d756117/gptme/llm/llm_openai.py#L357)).

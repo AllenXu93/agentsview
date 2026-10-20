@@ -174,3 +174,75 @@ func TestGptmeProviderStripsProviderRouting(t *testing.T) {
 	require.Len(t, msgs, 2)
 	assert.Equal(t, "openrouter/z-ai/glm-5.3-flash", msgs[1].Model)
 }
+
+func TestGptmeExactCostEvent(t *testing.T) {
+	logsDir := t.TempDir()
+	sessionDir := filepath.Join(logsDir, "2026-10-20-provider-cost")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	// One message with provider-reported cost, one with estimate only.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "conversation.jsonl"),
+		[]byte(`{"role":"user","content":"hi","timestamp":"2026-10-20T10:00:00.000000"}
+{"role":"assistant","content":"hello","timestamp":"2026-10-20T10:00:01.000000","metadata":{"model":"openrouter/deepseek/deepseek-v4.1-flash@cloudflare","cost":0.000123,"cost_source":"provider","usage":{"input_tokens":100,"output_tokens":20,"cache_read_tokens":50,"cache_creation_tokens":0}}}
+{"role":"user","content":"again","timestamp":"2026-10-20T10:00:02.000000"}
+{"role":"assistant","content":"sure","timestamp":"2026-10-20T10:00:03.000000","metadata":{"model":"openrouter/deepseek/deepseek-v4.1-flash@cloudflare","usage":{"input_tokens":120,"output_tokens":8}}}
+`),
+		0o644,
+	))
+
+	provider, ok := NewProvider(AgentGptme, ProviderConfig{
+		Roots:   []string{logsDir},
+		Machine: "testmachine",
+	})
+	require.True(t, ok)
+	source, found, err := provider.FindSource(t.Context(), FindSourceRequest{
+		RawSessionID: "2026-10-20-provider-cost",
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	outcome, err := provider.Parse(t.Context(), ParseRequest{
+		Source:  source,
+		Machine: "testmachine",
+	})
+	require.NoError(t, err)
+	require.Len(t, outcome.Results, 1)
+	result := outcome.Results[0].Result
+
+	// Provider-cost message: no token usage on the message row.
+	msgs := result.Messages
+	require.Len(t, msgs, 4)
+	providerMsg := msgs[1]
+	assert.Equal(t, "openrouter/deepseek/deepseek-v4.1-flash", providerMsg.Model)
+	assert.Nil(t, providerMsg.TokenUsage, "provider-cost message must carry no TokenUsage to avoid DB double-count")
+	assert.True(t, providerMsg.HasOutputTokens)
+	assert.Equal(t, 20, providerMsg.OutputTokens)
+	assert.True(t, providerMsg.HasContextTokens)
+	assert.Equal(t, 150, providerMsg.ContextTokens)
+
+	// Estimate-only message still carries per-message token data.
+	estimateMsg := msgs[3]
+	assert.True(t, estimateMsg.HasOutputTokens)
+	assert.Equal(t, 8, estimateMsg.OutputTokens)
+
+	// Exactly one usage event for the provider-cost message.
+	require.Len(t, result.UsageEvents, 1)
+	ev := result.UsageEvents[0]
+	assert.Equal(t, "exact", ev.CostStatus)
+	assert.Equal(t, "gptme-provider-cost", ev.CostSource)
+	require.NotNil(t, ev.Cost)
+	assert.Equal(t, int64(123), ev.Cost.Microdollars)
+	assert.Equal(t, 100, ev.InputTokens)
+	assert.Equal(t, 20, ev.OutputTokens)
+	assert.Equal(t, 50, ev.CacheReadInputTokens)
+	assert.Equal(t, 0, ev.CacheCreationInputTokens)
+	assert.Equal(t, "openrouter/deepseek/deepseek-v4.1-flash", ev.Model)
+
+	// Session totals include both the event-derived provider tokens and the
+	// per-message estimate tokens.
+	sess := result.Session
+	assert.Equal(t, 20+8, sess.TotalOutputTokens, "provider event + estimate message")
+	assert.True(t, sess.HasTotalOutputTokens)
+	assert.Equal(t, 150, sess.PeakContextTokens)
+	assert.True(t, sess.HasPeakContextTokens)
+}

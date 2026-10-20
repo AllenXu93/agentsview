@@ -205,7 +205,7 @@ func (p *gptmeProvider) Parse(
 		return ParseOutcome{}, errors.New("gptme source path unavailable")
 	}
 	machine := firstNonEmptyJSONLString(req.Machine, p.Config.Machine)
-	sess, msgs, err := p.parseSession(path, machine)
+	sess, msgs, events, err := p.parseSession(path, machine)
 	if err != nil {
 		return ParseOutcome{}, err
 	}
@@ -221,8 +221,9 @@ func (p *gptmeProvider) Parse(
 	return ParseOutcome{
 		Results: []ParseResultOutcome{{
 			Result: ParseResult{
-				Session:  *sess,
-				Messages: msgs,
+				Session:     *sess,
+				Messages:    msgs,
+				UsageEvents: events,
 			},
 			DataVersion: DataVersionCurrent,
 		}},
@@ -288,6 +289,7 @@ func gptmeProviderCapabilities() Capabilities {
 			FirstMessage:         CapabilitySupported,
 			Model:                CapabilitySupported,
 			PerMessageTokenUsage: CapabilitySupported,
+			AggregateUsageEvents: CapabilitySupported,
 		},
 	}
 }
