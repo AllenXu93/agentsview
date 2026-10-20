@@ -849,7 +849,7 @@ func TestWatcherBatchesPathsAndEnforcesDispatchFloor(t *testing.T) {
 	require.NoError(t, os.WriteFile(laterPath, []byte("c"), 0o644))
 	second := receiveWatcherCall(t, calls)
 	// These timestamps are inside the callback, after the scheduler's clock
-	// read. Allow the same dispatch jitter as the sustained-write test below.
+	// read. Allow a small amount of dispatch jitter on native backends.
 	const dispatchJitter = 25 * time.Millisecond
 	assert.GreaterOrEqual(t, second.at.Sub(first.at), minInterval-dispatchJitter,
 		"callbacks started less than the configured minimum interval apart")
@@ -857,84 +857,60 @@ func TestWatcherBatchesPathsAndEnforcesDispatchFloor(t *testing.T) {
 }
 
 func TestWatcherSustainedWritesProgress(t *testing.T) {
-	const (
-		batchDelay        = 50 * time.Millisecond
-		minInterval       = 300 * time.Millisecond
-		writeEvery        = 10 * time.Millisecond
-		dispatchTolerance = 250 * time.Millisecond
-	)
-	calls := make(chan watcherCall, 4)
-	_, dir := startTestWatcherWithIntervals(
-		t, func(paths []string) {
-			calls <- watcherCall{paths: paths, at: time.Now()}
-		}, batchDelay, minInterval,
-	)
-	path := filepath.Join(dir, "active.jsonl")
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			batchDelay  = 50 * time.Millisecond
+			minInterval = 300 * time.Millisecond
+			writeEvery  = 10 * time.Millisecond
+		)
+		backend := newFakeWatchBackend()
+		calls := make(chan watcherCall, 4)
+		w, err := newWatcherWithBackend(
+			batchDelay, minInterval,
+			func(_ context.Context, batch WatchBatch) error {
+				calls <- watcherCall{paths: batch.Paths, at: time.Now()}
+				return nil
+			},
+			backend, 8, 1_000,
+		)
+		require.NoError(t, err)
+		w.Start()
+		defer w.Stop()
 
-	require.NoError(t, os.WriteFile(path, []byte("initial"), 0o644))
-	stopWrites := make(chan struct{})
-	writesDone := make(chan struct{})
-	writeErr := make(chan error, 1)
-	go func() {
-		defer close(writesDone)
-		writeTicker := time.NewTicker(writeEvery)
-		defer writeTicker.Stop()
-		for {
-			select {
-			case <-stopWrites:
-				return
-			case <-writeTicker.C:
-				if err := os.WriteFile(path, []byte("update"), 0o644); err != nil {
-					writeErr <- err
+		// Exercise the scheduler with continuous events without imposing a
+		// wall-clock latency requirement on the native filesystem backend.
+		path := filepath.Join(t.TempDir(), "active.jsonl")
+		startedAt := time.Now()
+		backend.sendEvent(t, path)
+		stopWrites := make(chan struct{})
+		writesDone := make(chan struct{})
+		go func() {
+			defer close(writesDone)
+			writeTicker := time.NewTicker(writeEvery)
+			defer writeTicker.Stop()
+			for {
+				select {
+				case <-stopWrites:
 					return
+				case <-writeTicker.C:
+					backend.sendEvent(t, path)
 				}
 			}
-		}
-	}()
-	var stopWriterOnce sync.Once
-	stopWriter := func() {
-		stopWriterOnce.Do(func() {
+		}()
+		defer func() {
 			close(stopWrites)
 			<-writesDone
-		})
-	}
-	t.Cleanup(stopWriter)
+		}()
 
-	receiveCall := func() watcherCall {
-		t.Helper()
-		select {
-		case call := <-calls:
-			return call
-		case err := <-writeErr:
-			require.NoError(t, err)
-			return watcherCall{}
-		case <-time.After(watcherTestTimeout):
-			require.FailNow(t, "continuous writes starved the watcher callback")
-			return watcherCall{}
-		}
-	}
-
-	first := receiveCall()
-	second := receiveCall()
-	stopWriter()
-	select {
-	case err := <-writeErr:
-		require.NoError(t, err)
-	default:
-	}
-
-	assert.Contains(t, first.paths, path)
-	assert.Contains(t, second.paths, path)
-	// The watcher spaces callbacks from its own clock reads taken before each
-	// dispatch, while these stamps are taken inside the callback. Dispatch
-	// jitter and coarse Windows timers can therefore shave a few
-	// milliseconds off the observed spacing without the watcher firing early.
-	const dispatchJitter = 25 * time.Millisecond
-	spacing := second.at.Sub(first.at)
-	assert.GreaterOrEqual(t, spacing, minInterval-dispatchJitter,
-		"sustained-write callbacks started too close together")
-	assert.LessOrEqual(t, spacing, minInterval+dispatchTolerance,
-		"sustained writes did not make bounded progress")
+		first := receiveWatcherCall(t, calls)
+		second := receiveWatcherCall(t, calls)
+		assert.Equal(t, []string{path}, first.paths)
+		assert.Equal(t, []string{path}, second.paths)
+		assert.Equal(t, 50*time.Millisecond, first.at.Sub(startedAt),
+			"continuous writes must not postpone the initial batch")
+		assert.Equal(t, 300*time.Millisecond, second.at.Sub(first.at),
+			"continuous writes must progress at the configured minimum interval")
+	})
 }
 
 func TestWatcherSchedulerContinuesIntakeWithOnePendingAccumulator(t *testing.T) {
