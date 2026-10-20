@@ -36,6 +36,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: lint-${{ matrix.linter }}
+          extra-path: ~/.cache/golangci-lint
 
       - name: Prepare SQLite header
         if: runner.os == 'Linux'
@@ -72,6 +79,9 @@ jobs:
         if: matrix.linter == 'golangci'
         run: go run go.kenn.io/kit/cmd/huma-check@e9840a327158da2559458186b253b0c15a5e2c2b -fix=false ./...
 
+      - name: Save Go caches
+        uses: ./.github/actions/go-cache-save
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -88,6 +98,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Prepare SQLite header
         if: runner.os == 'Linux'
@@ -191,21 +207,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Set cache paths before setup-go restores its cache.
-      - &windows-go-paths
-        name: Prepare Windows Go paths
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          foreach ($name in @('GOCACHE', 'GOMODCACHE', 'TMP', 'TEMP')) {
-            $path = Join-Path $env:RUNNER_TEMP $name
-            New-Item -ItemType Directory -Force -Path $path | Out-Null
-            "$name=$path" >> $env:GITHUB_ENV
-          }
+      # Set cache paths before setup-go and the Go cache restore.
+      - name: Prepare Windows Go paths
+        uses: ./.github/actions/windows-go-paths
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Prepare SQLite header
         if: runner.os == 'Linux'
@@ -317,6 +331,9 @@ jobs:
         if: runner.os == 'Linux' && steps.codecov.outcome == 'failure'
         run: echo "::warning::Codecov upload failed"
 
+      - name: Save Go caches
+        uses: ./.github/actions/go-cache-save
+
   # Isolated Windows suites share setup; each matrix entry gets its own runner.
   test-isolated-packages-windows:
     name: Go Test (windows-latest, ${{ matrix.name }})
@@ -348,11 +365,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - *windows-go-paths
+      - name: Prepare Windows Go paths
+        uses: ./.github/actions/windows-go-paths
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Setup MinGW
         id: setup_mingw
@@ -515,11 +539,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - *windows-go-paths
+      - name: Prepare Windows Go paths
+        uses: ./.github/actions/windows-go-paths
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Setup MinGW
         id: setup_mingw
@@ -575,6 +606,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: race-linux
 
       - name: Prepare SQLite header
         if: runner.os == 'Linux'
@@ -601,6 +638,10 @@ jobs:
         env:
           CGO_ENABLED: "1"
 
+      - name: Save Go caches
+        if: matrix.testSet == 'other'
+        uses: ./.github/actions/go-cache-save
+
   # Owns Windows Rust test coverage for PR and main-push desktop artifacts.
   desktop-windows-unit:
     name: Desktop Unit Tests (Windows)
@@ -614,6 +655,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2
         with:
           workspaces: desktop/src-tauri -> target
+          # Pull requests restore main's build without saving their own copy.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Prepare placeholder sidecar resource
         shell: pwsh
@@ -694,6 +737,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Restore pricing snapshot
         run: go run ./internal/pricing/cmd/litellm-snapshot -restore
@@ -722,6 +771,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache-restore
+        with:
+          group: test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Prepare SQLite header
         if: runner.os == 'Linux'
