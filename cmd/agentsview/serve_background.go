@@ -630,6 +630,19 @@ probeDaemon:
 		}
 	}
 
+	// With no daemon visible, a held write lock means a server started here
+	// could not open the archive. The launch lock keeps a foreground serve and
+	// direct writers from taking the write lock during this probe.
+	lock, err := tryAcquireWriteOwnerLock(writeLockDataDir(*cfg))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"cannot auto-start the agentsview daemon: %w", err,
+		)
+	}
+	if err := lock.Close(); err != nil {
+		return nil, err
+	}
+
 	args := []string{"serve"}
 	args = serveBackgroundArgsWithNoSync(args, cfg.NoSync)
 	args = serveBackgroundArgsWithSkipInitialSync(args, cfg.SkipInitialSync)

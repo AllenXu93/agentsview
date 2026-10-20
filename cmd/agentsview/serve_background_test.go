@@ -804,6 +804,29 @@ func TestEnsureBackgroundServeCancellationLeavesChildRunning(t *testing.T) {
 	assert.True(t, daemon.ProcessAlive(child.Process.Pid))
 }
 
+func TestEnsureBackgroundServeRefusesWhenWriteLockHeldWithoutDaemon(t *testing.T) {
+	dir := testDataDir(t)
+	holdWriteOwnerLockForTest(t, dir)
+	oldStart := startServeBackgroundProcessForEnsure
+	started := false
+	startServeBackgroundProcessForEnsure = func(context.Context, config.Config, []string) (*exec.Cmd, string, error) {
+		started = true
+		return nil, "", errors.New("unexpected spawn")
+	}
+	t.Cleanup(func() { startServeBackgroundProcessForEnsure = oldStart })
+
+	rt, err := ensureBackgroundServe(
+		t.Context(), &config.Config{DataDir: dir}, time.Second, false,
+	)
+
+	require.Error(t, err)
+	assert.Nil(t, rt)
+	assert.False(t, started, "must not spawn a server that cannot open the archive")
+	var held writeOwnerLockHeldError
+	require.ErrorAs(t, err, &held)
+	assert.ErrorContains(t, err, "cannot auto-start")
+}
+
 func TestExternalServeStartupWaitReportsContinuingWork(t *testing.T) {
 	dir := runtimeTestDir(t)
 	holdExternalDaemonStartLock(t, dir)
@@ -845,6 +868,8 @@ func TestEnsureBackgroundServeGeneratesAuthTokenForRemoteSync(t *testing.T) {
 		cfg config.Config, _ []string,
 	) (*exec.Cmd, string, error) {
 		gotCfg = cfg
+		requireWriteOwnerLockReleased(t, dir,
+			"the probe must release the write lock before spawning")
 		_, err := WriteDaemonRuntime(dir, host, port, version, false)
 		if err != nil {
 			return nil, "", err

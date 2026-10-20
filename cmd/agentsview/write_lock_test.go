@@ -124,7 +124,8 @@ func TestAcquireWriteOwnerLockExcludesSecondOwner(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, second)
 	assertErrorContainsAll(t, err, writeOwnerLockPath(dataDir),
-		"agentsview daemon stop")
+		"agentsview daemon stop", "agentsview daemon status",
+		"find the agentsview process holding "+writeOwnerLockPath(dataDir))
 }
 
 func TestWriteOwnerLockReleaseAllowsNextOwner(t *testing.T) {
@@ -135,15 +136,6 @@ func TestWriteOwnerLockReleaseAllowsNextOwner(t *testing.T) {
 
 	second := acquireWriteOwnerLockForTest(t, dataDir)
 	require.NoError(t, second.Close())
-}
-
-func TestWriteOwnerLockErrorMentionsDaemonStop(t *testing.T) {
-	dataDir := t.TempDir()
-
-	holdWriteOwnerLockForTest(t, dataDir)
-
-	_, err := tryAcquireWriteOwnerLock(dataDir)
-	assertErrorContainsAll(t, err, "agentsview daemon stop", "idle timeout")
 }
 
 func TestOpenWriteDBRefusesSecondOwner(t *testing.T) {
