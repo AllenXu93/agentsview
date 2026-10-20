@@ -611,7 +611,7 @@ func (s *Sync) applyVectorDeltas(
 	}
 	report()
 
-	var evict []string
+	var evict, foreign []string
 	for sessionID, st := range pgState {
 		if _, inLocal := local[sessionID]; inLocal {
 			continue
@@ -627,10 +627,34 @@ func (s *Sync) applyVectorDeltas(
 		case !st.sessionExists || owner.owns(st.ownerMarker, st.machine):
 			evict = append(evict, sessionID)
 		default:
-			res.Conflicts++
+			foreign = append(foreign, sessionID)
 		}
 	}
+	conflicts, err := s.countLocalForeignVectorSessions(ctx, foreign)
+	if err != nil {
+		return err
+	}
+	res.Conflicts += conflicts
 	return s.evictVectorSessions(ctx, scope, evict, res)
+}
+
+// countLocalForeignVectorSessions counts the foreign-owned eviction candidates
+// that still have a live local sessions row. pgState spans every machine
+// pushing into the generation, so most foreign-owned rows are simply another
+// machine's sessions that this archive never held: those are neither evicted
+// nor conflicts. Only a session this archive also holds, whose vectors this
+// pusher would otherwise evict, is a genuine ownership conflict.
+func (s *Sync) countLocalForeignVectorSessions(
+	ctx context.Context, sessionIDs []string,
+) (int, error) {
+	if len(sessionIDs) == 0 {
+		return 0, nil
+	}
+	present, err := s.local.SessionProjectsByIDs(ctx, sessionIDs)
+	if err != nil {
+		return 0, fmt.Errorf("reading local foreign vector sessions: %w", err)
+	}
+	return len(present), nil
 }
 
 // vectorSessionsOutOfScope computes the set of candidate sessions a filtered

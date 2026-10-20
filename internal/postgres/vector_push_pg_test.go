@@ -1701,6 +1701,70 @@ func TestVectorPushLegacyMachineOwnership(t *testing.T) {
 		`SELECT COUNT(*) FROM vector_documents WHERE session_id = $1`, "B"))
 }
 
+// TestVectorPushForeignMachineSessionsNotConflicts pins that vector state
+// owned by another machine, for a session this archive does not hold, is
+// neither evicted nor counted as a conflict. With several machines pushing
+// into one generation, PG state spans all of them, so counting these rows
+// reported every other machine's sessions as ownership conflicts.
+func TestVectorPushForeignMachineSessionsNotConflicts(t *testing.T) {
+	pgURL := testPGURL(t)
+	sync, localDB, pg := newVectorPushTestSync(
+		t, pgURL, "agentsview_vector_push_foreign_test")
+	ctx := context.Background()
+
+	seedVectorSession(t, localDB, "mine")
+	seedVectorSession(t, localDB, "theirs")
+	seedVectorSession(t, localDB, "shared")
+
+	fake := &fakeVectorSource{
+		gen:    storage.VectorGenerationInfo{Fingerprint: "fp-fm", Model: "m", Dimension: 4},
+		hasGen: true,
+		hashes: map[string]string{"mine": "hm", "theirs": "ht", "shared": "hs"},
+		docs: map[string][]storage.VectorPushDoc{
+			"mine":   {vdoc("mine", "fM0", 0, "cm", "hcm", []float32{1, 0, 0, 0})},
+			"theirs": {vdoc("theirs", "fT0", 0, "ct", "hct", []float32{0, 1, 0, 0})},
+			"shared": {vdoc("shared", "fS0", 0, "cs", "hcs", []float32{0, 0, 1, 0})},
+		},
+	}
+	sync.vectorSource = fake
+	_, err := sync.Push(ctx, false, nil)
+	require.NoError(t, err, "first Push")
+
+	// Hand "theirs" and "shared" to another machine on the PG side.
+	_, err = pg.Exec(`UPDATE sessions SET owner_marker = 'other-machine'
+	   WHERE id IN ('theirs', 'shared')`)
+	require.NoError(t, err, "reassign owners")
+
+	// "theirs" was never this archive's: it is gone from the local sessions
+	// table entirely. "shared" stays in the local archive but has no
+	// embedded docs, so this pusher would evict it if it owned the row.
+	require.NoError(t, localDB.DeleteSession(ctx, "theirs"))
+	delete(fake.hashes, "theirs")
+	delete(fake.docs, "theirs")
+	delete(fake.hashes, "shared")
+	delete(fake.docs, "shared")
+
+	res, err := sync.pushVectors(ctx, false, nil, 0, nil, nil)
+	require.NoError(t, err, "push")
+	assert.Equal(t, 1, res.Conflicts,
+		"only the locally held foreign session is a conflict")
+	assert.Equal(t, 0, res.SessionsEvicted)
+	assert.Equal(t, 1, res.SessionsUnchanged, "own session unchanged")
+
+	genID, _, ok, err := LookupVectorGeneration(ctx, pg, "fp-fm")
+	require.NoError(t, err)
+	require.True(t, ok)
+	for _, id := range []string{"theirs", "shared"} {
+		assert.Equal(t, 1, countRows(t, pg,
+			`SELECT COUNT(*) FROM vector_push_state
+			 WHERE generation_id = $1 AND session_id = $2`, genID, id),
+			id+" push state left in place")
+		assert.Equal(t, 1, countRows(t, pg,
+			`SELECT COUNT(*) FROM vector_documents WHERE session_id = $1`, id),
+			id+" docs left in place")
+	}
+}
+
 // TestVectorPushEvictionUsesStableExportSnapshot pins the new snapshot
 // contract: once BeginExport succeeds, the phase keeps using that export even
 // if a later BeginExport would report the source as unready. The export still
