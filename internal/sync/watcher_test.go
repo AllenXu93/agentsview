@@ -893,7 +893,11 @@ func TestWatcherSustainedWritesProgress(t *testing.T) {
 				case <-stopWrites:
 					return
 				case <-writeTicker.C:
-					backend.sendEvent(t, path)
+					select {
+					case backend.events <- backendEvent{Path: path, Op: backendOpWrite}:
+					case <-stopWrites:
+						return
+					}
 				}
 			}
 		}()
