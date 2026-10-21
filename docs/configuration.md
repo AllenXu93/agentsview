@@ -152,12 +152,17 @@ Restore the original `telemetry-install-id` from a backup to keep that identity.
 Deleting it deliberately creates a distinct installation; that new installation
 does not automatically take ownership of the old one's sessions.
 
-The display label defaults to the current hostname. Set `local_machine_name` in
-`config.toml` for a fixed label, then run `agentsview daemon restart`. Any
-non-empty label is allowed, including `local`. Changing the label leaves session
-keys unchanged; PostgreSQL and DuckDB receive the label on the next push.
-Creating the identity does not rewrite `config.toml` or its comments. A missing
-cursor secret is still generated and saved.
+The display name stored on each session defaults to the current hostname. Set
+`machine_name` in `config.toml` for a fixed name. `local_machine_name` is the
+older key for the same setting. `AGENTSVIEW_MACHINE` is used when neither key
+is set. Then run `agentsview daemon restart`. Any non-empty name is allowed,
+including `local`. Startup writes that name onto sessions this installation
+already owns, including older rows whose machine key is `local` or this
+installation ID. Sessions recorded by another installation keep the name they
+arrived with. Changing the name leaves session keys unchanged; the next
+`pg push` copies the new name to PostgreSQL. Creating the identity does not
+rewrite `config.toml` or its comments. A missing cursor secret is still
+generated and saved.
 
 Session filters accept an exact ID or alias, a comma-separated list of IDs and
 aliases, or one display label matched as the whole value, case-sensitively.
@@ -237,7 +242,8 @@ zoom_level = 120
 
 | Field                               | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local_machine_name`                | Optional display-name override; takes effect after a daemon restart                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `machine_name`                      | Name stored on this installation's sessions. Overrides `local_machine_name` and `AGENTSVIEW_MACHINE`. Takes effect after a daemon restart, which also updates sessions this installation already owns                                                                                                                                                                                                                                                                            |
+| `local_machine_name`                | Older name for `machine_name`. Used when `machine_name` is unset; takes effect after a daemon restart                                                                                                                                                                                                                                                                                                                                                                            |
 | `cursor_secret`                     | Auto-generated HMAC key for pagination cursor signing                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `cursor_admin_api_key`              | Cursor Admin API key used by `agentsview usage cursor`                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `cursor_admin_email`                | Optional default Cursor Admin usage filter by member email                                                                                                                                                                                                                                                                                                                                                                                                                       |

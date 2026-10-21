@@ -19,6 +19,20 @@ import (
 	"go.kenn.io/agentsview/internal/service"
 )
 
+func TestPrintSessionDetailShowsMachineNameAndID(t *testing.T) {
+	d := &service.SessionDetail{}
+	d.ID = "s1"
+	d.Machine = "install-a"
+	d.MachineName = "laptop"
+	var buf bytes.Buffer
+	require.NoError(t, printSessionDetailHuman(&buf, d))
+	out := buf.String()
+	assert.Contains(t, out, "Machine:")
+	assert.Contains(t, out, "laptop")
+	assert.Contains(t, out, "Machine ID:")
+	assert.Contains(t, out, "install-a")
+}
+
 func TestPrintSessionDetailShowsSecretLeak(t *testing.T) {
 	d := &service.SessionDetail{}
 	d.ID = "s1"

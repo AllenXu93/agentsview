@@ -210,6 +210,7 @@ func listFixture(home string) *service.SessionList {
 		Sessions: []db.Session{
 			{
 				ID: "s_live", Project: "monitoring", Agent: "claude",
+				Machine: "install-a", MachineName: "laptop",
 				GitBranch:    "main",
 				FirstMessage: new("build monitoring dashboards\nfor the homelab"),
 				MessageCount: 87,
@@ -247,7 +248,7 @@ func TestPrintSessionListHuman(t *testing.T) {
 
 	// Header carries the enriched columns, with ID restored as the first
 	// data column so every row has a copyable handle.
-	for _, col := range []string{"ID", "AGE", "AGENT", "PROJECT", "BRANCH", "MSGS", "NAME", "CWD"} {
+	for _, col := range []string{"ID", "AGE", "AGENT", "PROJECT", "MACHINE", "BRANCH", "MSGS", "NAME", "CWD"} {
 		assert.Contains(t, s, col)
 	}
 
@@ -271,6 +272,7 @@ func TestPrintSessionListHuman(t *testing.T) {
 
 	// Message counts are present.
 	assert.Contains(t, s, "87")
+	assert.Contains(t, s, "laptop")
 
 	// Footer hint only appears when there is a next page.
 	assert.NotContains(t, s, "--cursor")

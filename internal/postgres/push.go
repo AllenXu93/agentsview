@@ -2410,6 +2410,7 @@ func sessionPushFingerprint(
 		sess.Project,
 		strconv.FormatBool(sess.ProjectAssigned),
 		pushedMachine,
+		sess.MachineName,
 		sourceArchiveID,
 		ownerMarker,
 		dependencyFingerprint,
@@ -2657,7 +2658,7 @@ func writePGSession(ctx context.Context, tx *sql.Tx, sess db.Session, markerID s
 				OR machine IN (SELECT jsonb_array_elements_text($69::jsonb)))))
 		)
 		INSERT INTO sessions (
-			id, machine, owner_marker, project, agent,
+			id, machine, machine_name, owner_marker, project, agent,
 			first_message, display_name, source_display_name,
 			session_name, created_at, started_at, ended_at,
 			deleted_at, source_deleted_at, deletion_cause,
@@ -2694,7 +2695,7 @@ func writePGSession(ctx context.Context, tx *sql.Tx, sess db.Session, markerID s
 			updated_at
 			)
 			SELECT
-				$1, $2, $3, $4, $5, $6, $7, $8,
+				$1, $2, $78, $3, $4, $5, $6, $7, $8,
 				$9, $10, $11, $12,
 				COALESCE($13, (SELECT deleted_at FROM inherited_trash)), $14, $15,
 				$16, $17, $18, $19,
@@ -2716,6 +2717,7 @@ func writePGSession(ctx context.Context, tx *sql.Tx, sess db.Session, markerID s
 			)
 			ON CONFLICT (id) DO UPDATE SET
 			machine = EXCLUDED.machine,
+			machine_name = EXCLUDED.machine_name,
 			owner_marker = EXCLUDED.owner_marker,
 			project = EXCLUDED.project,
 			agent = EXCLUDED.agent,
@@ -2832,6 +2834,7 @@ func writePGSession(ctx context.Context, tx *sql.Tx, sess db.Session, markerID s
 			)
 			AND (
 			sessions.machine IS DISTINCT FROM EXCLUDED.machine
+			OR sessions.machine_name IS DISTINCT FROM EXCLUDED.machine_name
 			OR sessions.owner_marker IS DISTINCT FROM EXCLUDED.owner_marker
 			OR sessions.project IS DISTINCT FROM EXCLUDED.project
 			OR sessions.agent IS DISTINCT FROM EXCLUDED.agent
@@ -2967,6 +2970,7 @@ func writePGSession(ctx context.Context, tx *sql.Tx, sess db.Session, markerID s
 		db.EncodePRLinks(sess.PRLinks),
 		db.LabelsArg(sess.Labels),
 		sess.FrictionCount, sess.FrictionRulesVersion, sess.FrictionHash,
+		sanitizePG(sess.MachineName),
 	)
 	if err != nil {
 		return err

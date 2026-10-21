@@ -210,3 +210,18 @@ func TestRawContentRevisionJSONRepresentation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, key, derivedKey)
 }
+
+func TestRawContentRevisionIgnoresMachineName(t *testing.T) {
+	base := ingest.PreparedSession{
+		Session:  db.Session{Agent: "claude"},
+		Messages: []db.Message{{Role: "user", Content: "hello"}},
+	}
+	named := base
+	named.Session.Machine = "install-a"
+	named.Session.MachineName = "laptop"
+	first, err := rawContentRevision(base)
+	require.NoError(t, err)
+	second, err := rawContentRevision(named)
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "a display name is not transcript content")
+}

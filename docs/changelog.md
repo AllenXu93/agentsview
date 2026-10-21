@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-17
+last_edited: 2026-10-21
 title: Changelog
 description: Release history for AgentsView
 ---
@@ -25,6 +25,17 @@ The latest release is
   [container deployment](/docs/configuration/#container-deployment).
 
 **New features**
+
+- Session lists, session details, JSON, the HTTP API, and MCP session results
+  show the machine name that recorded each session. Set `machine_name` in
+  `config.toml`, or `AGENTSVIEW_MACHINE` when that key and `local_machine_name`
+  are both unset; otherwise AgentsView uses the hostname. Startup labels
+  sessions this installation already owns. `pg push` copies the name into
+  PostgreSQL. An existing central database gains `sessions.machine_name` on the
+  next schema update; rows stay blank until the owning machine pushes. A push
+  from another installation does not replace a session that shares an ID.
+  `usage daily --machine` filters by installation ID, alias, or unique display
+  name, as `session list --machine` already does.
 
 - Anonymous telemetry now counts empty searches, visible errors in supported
   workflows, and failed sync attempts. Query and error details stay local. The

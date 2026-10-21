@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-04
+last_edited: 2026-10-21
 title: CLI Reference
 description: All AgentsView commands, flags, and environment variables
 ---
@@ -1034,6 +1034,7 @@ agentsview usage daily [flags]
 | `--until`     |               | End of window, a duration like `28d` or a `YYYY-MM-DD` date, inclusive   |
 | `--all`       | `false`       | Scan all history; overrides the default 30-day window                    |
 | `--agent`     |               | Filter by agent name                                                     |
+| `--machine`   |               | Installation ID, alias, ID/alias list, or one unique display name        |
 | `--breakdown` | `false`       | Show per-model rows and populate detailed JSON breakdown arrays          |
 | `--offline`   | `false`       | Read the archive directly without sync or pricing fetches                |
 | `--no-sync`   | `false`       | Skip source refresh; a new daemon starts without automatic sync          |
@@ -1811,10 +1812,13 @@ Use [`agentsview health`](#agentsview-health) for a human-first signal view and
 daemon-first transport behavior and markdown export details.
 
 `agentsview session list` renders a resume-oriented human table by default,
-including a recently-active marker, session ID, age, agent, project, branch,
-message count, title, and working directory. Pass `--resume` or its `--active`
-alias to show sessions active in the last 15 minutes; combine either flag with
-`--active-since <RFC3339>` to choose a wider or narrower window.
+including a recently-active marker, session ID, age, agent, project, machine,
+branch, message count, title, and working directory. The machine column is the
+display name stored on the session. `session get` prints that name and, when
+it differs, the installation ID. Both values are in `--format json`. Pass
+`--resume` or its `--active` alias to show sessions active in the last 15
+minutes; combine either flag with `--active-since <RFC3339>` to choose a wider
+or narrower window.
 
 ______________________________________________________________________
 
@@ -2218,6 +2222,7 @@ agentsview help
 | `ZED_DIR`                             | (platform-specific)                                  | Zed data directory (contains `threads/threads.db`)                                                  |
 | `ZENCODER_DIR`                        | `~/.zencoder/sessions`                               | Zencoder sessions directory                                                                         |
 | `AGENTSVIEW_DATA_DIR`                 | `~/.agentsview`                                      | Data directory (database, config)                                                                   |
+| `AGENTSVIEW_MACHINE`                  | hostname                                             | Display name stored on this installation's sessions when `config.toml` sets neither `machine_name` nor `local_machine_name` |
 | `AGENTSVIEW_AUTH_TOKEN`               |                                                      | Bearer token for `require_auth`; overrides `auth_token` in `config.toml`                            |
 | `AGENTSVIEW_MODE`                     |                                                      | `serve` or `pg-serve`; turns on the [container deployment](/docs/configuration/#container-deployment) variables |
 | `AGENTSVIEW_HOST`                     |                                                      | Listener address under `AGENTSVIEW_MODE`; non-loopback needs authentication                         |

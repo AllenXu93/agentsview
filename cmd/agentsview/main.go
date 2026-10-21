@@ -1615,6 +1615,12 @@ func openDBWithProgress(ctx context.Context, cfg config.Config, progress db.Open
 			return nil, fmt.Errorf("recording installation display name: %w", err)
 		}
 	}
+	if cfg.LocalMachineName != "" {
+		if err := database.RecordLocalMachineName(ctx, cfg.InstallationID, cfg.LocalMachineName); err != nil {
+			database.Close()
+			return nil, fmt.Errorf("recording session machine names: %w", err)
+		}
+	}
 	applyCustomPricing(database, cfg)
 	return database, nil
 }

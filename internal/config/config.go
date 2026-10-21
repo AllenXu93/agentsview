@@ -959,8 +959,13 @@ type Config struct {
 	// InstallationCreatedAt is when InstallationID was created, or zero for
 	// IDs created before the time was recorded.
 	InstallationCreatedAt time.Time `json:"-" toml:"-"`
-	// LocalMachineName is the display label, defaulting to the system hostname.
+	// LocalMachineName is the display name recorded on this installation's
+	// sessions. Resolution order is machine_name, then local_machine_name,
+	// then AGENTSVIEW_MACHINE, then the operating-system hostname.
 	LocalMachineName string `json:"-" toml:"local_machine_name"`
+	// fileMachineName is set when config.toml sets machine_name or
+	// local_machine_name. It outranks AGENTSVIEW_MACHINE.
+	fileMachineName string `json:"-" toml:"-"`
 
 	// AgentDirs maps each AgentType to its configured
 	// directories. Single-dir agents store a one-element
@@ -1454,6 +1459,7 @@ func loadPGServeBase() (Config, error) {
 	if err := cfg.loadFile(); err != nil {
 		return cfg, fmt.Errorf("loading config file: %w", err)
 	}
+	cfg.applyMachineNameResolution()
 	cfg.DBPath = filepath.Join(cfg.DataDir, "sessions.db")
 
 	// pg serve intentionally ignores persisted normal serve/public/proxy
@@ -1505,6 +1511,7 @@ func loadConfigLayers(scope ValidationScope) (Config, error) {
 	if err := cfg.loadFile(); err != nil {
 		return cfg, fmt.Errorf("loading config file: %w", err)
 	}
+	cfg.applyMachineNameResolution()
 	if scope.uses(ScopeDeployment) {
 		return cfg, cfg.applyDeploymentEnv()
 	}
@@ -1561,6 +1568,7 @@ func loadReadOnlyFor(scope ValidationScope, dataDir string) (Config, error) {
 	if err := cfg.loadFileReadOnly(); err != nil {
 		return cfg, fmt.Errorf("loading config file: %w", err)
 	}
+	cfg.applyMachineNameResolution()
 	if scope.uses(ScopeDeployment) {
 		if err := cfg.applyDeploymentEnv(); err != nil {
 			return cfg, err
@@ -1742,6 +1750,7 @@ func (c *Config) applyConfigTOML(data string) error {
 		return err
 	}
 	var file struct {
+		MachineName                    *string                `toml:"machine_name"`
 		LocalMachineName               *string                `toml:"local_machine_name"`
 		GithubToken                    string                 `toml:"github_token"`
 		CursorSecret                   string                 `toml:"cursor_secret"`
@@ -1821,11 +1830,20 @@ func (c *Config) applyConfigTOML(data string) error {
 	if file.CursorSecret != "" {
 		c.CursorSecret = file.CursorSecret
 	}
-	if file.LocalMachineName != nil {
+	switch {
+	case file.MachineName != nil:
+		name := strings.TrimSpace(*file.MachineName)
+		if name == "" {
+			return errors.New("machine_name must be non-empty")
+		}
+		c.fileMachineName = name
+		c.LocalMachineName = name
+	case file.LocalMachineName != nil:
 		name := strings.TrimSpace(*file.LocalMachineName)
 		if name == "" {
 			return errors.New("local_machine_name must be non-empty")
 		}
+		c.fileMachineName = name
 		c.LocalMachineName = name
 	}
 	if file.CursorAdminAPIKey != "" && c.CursorAdminAPIKey == "" {

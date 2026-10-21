@@ -564,6 +564,7 @@ func TestFetchHTTPDailyUsage(t *testing.T) {
 		assert.Equal(t, "2026-06-02", r.URL.Query().Get("to"))
 		assert.Equal(t, "America/Chicago", r.URL.Query().Get("timezone"))
 		assert.Equal(t, "codex", r.URL.Query().Get("agent"))
+		assert.Equal(t, "laptop", r.URL.Query().Get("machine"))
 		assert.Equal(t, "true", r.URL.Query().Get("no_default_range"))
 		assert.Equal(t, "false", r.URL.Query().Get("breakdowns"))
 		assert.Equal(t, "false", r.URL.Query().Get("session_counts"))
@@ -584,6 +585,7 @@ func TestFetchHTTPDailyUsage(t *testing.T) {
 				To:       "2026-06-02",
 				Timezone: "America/Chicago",
 				Agent:    "codex",
+				Machine:  "laptop",
 			},
 			NoDefaultRange: true,
 		},
@@ -1085,6 +1087,30 @@ func TestRunUsageDailyNoSyncUsesDiscoveredDaemon(t *testing.T) {
 
 	assert.Equal(t, "/api/v1/usage/summary/stream", gotPath)
 	assert.Contains(t, out, `"microdollars": 420000`)
+	assertNoLocalSessionsDB(t, dataDir)
+}
+
+func TestRunUsageDailySendsMachineFilter(t *testing.T) {
+	dataDir := newAgentDataDir(t)
+
+	var gotMachine string
+	ts := sessionUsageRuntimeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMachine = r.URL.Query().Get("machine")
+		writeUsageStreamResponse(t, w, r, sampleDailyUsageJSON)
+	})
+	registerSyncRouteTestRuntime(t, dataDir, ts.URL)
+
+	_ = captureStdout(t, func() {
+		runUsageDaily(UsageDailyConfig{
+			JSON:     true,
+			Since:    "2026-06-01",
+			Until:    "2026-06-02",
+			Timezone: "UTC",
+			Machine:  "laptop",
+		})
+	})
+
+	assert.Equal(t, "laptop", gotMachine)
 	assertNoLocalSessionsDB(t, dataDir)
 }
 

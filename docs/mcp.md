@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-10-09
+last_edited: 2026-10-21
 title: MCP Server
 description: Connect assistant clients to your AgentsView session history with MCP
 ---
@@ -88,9 +88,11 @@ client will see these tools:
 | `get_quality_signals`  | Show health grades, outcomes, failures, and example sessions             |
 | `search_docs`          | Search the AgentsView guides bundled with this version                   |
 
-`list_sessions` accepts `labels` (every listed label must match) and `pr`
+`list_sessions` accepts `labels` (every listed label must match), `machine`
+(an installation ID, alias, or one unique display name), and `pr`
 (`owner/repo`, `owner/repo#123`, or `github.com::owner/repo#123`). Its rows
-include each session's labels, pull request links, and parent session. See
+include each session's machine name, labels, pull request links, and parent
+session. `search_sessions` rows include the machine name too. See
 [labels](/docs/session-api/#agentsview-session-label) and
 [pull request links](/docs/session-api/#pull-request-links).
 

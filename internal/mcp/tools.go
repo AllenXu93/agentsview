@@ -102,6 +102,8 @@ type sessionHit struct {
 	WebURL       string `json:"web_url,omitempty" jsonschema:"Browser URL for this session; use this URL when linking to it."`
 	SessionID    string `json:"session_id"`
 	Project      string `json:"project,omitempty"`
+	Machine      string `json:"machine,omitempty"`
+	MachineName  string `json:"machine_name,omitempty"`
 	Agent        string `json:"agent"`
 	Name         string `json:"name"`
 	EndedAt      string `json:"ended_at"`
@@ -152,12 +154,14 @@ func (t *toolset) searchSessions(
 			ended = row.StartedAt
 		}
 		return nil, searchSessionsOut{Results: []sessionHit{{
-			SessionID: row.SessionID,
-			WebURL:    row.WebURL,
-			Project:   row.Project,
-			Agent:     row.Agent,
-			Name:      row.Name,
-			EndedAt:   ended,
+			SessionID:   row.SessionID,
+			WebURL:      row.WebURL,
+			Project:     row.Project,
+			Machine:     row.Machine,
+			MachineName: row.MachineName,
+			Agent:       row.Agent,
+			Name:        row.Name,
+			EndedAt:     ended,
 		}}}, nil
 	}
 	res, err := t.svc.Search(ctx, service.SearchRequest{
@@ -196,6 +200,7 @@ func (t *toolset) searchSessions(
 			SessionID:    r.SessionID,
 			WebURL:       r.WebURL,
 			Project:      r.Project,
+			Machine:      r.Machine,
 			Agent:        r.Agent,
 			Name:         name,
 			EndedAt:      r.SessionEndedAt,
@@ -275,6 +280,7 @@ type sessionRow struct {
 	SessionID        string      `json:"session_id"`
 	Project          string      `json:"project,omitempty"`
 	Machine          string      `json:"machine,omitempty"`
+	MachineName      string      `json:"machine_name,omitempty"`
 	Agent            string      `json:"agent"`
 	Name             string      `json:"name"`
 	StartedAt        string      `json:"started_at"`
@@ -340,6 +346,7 @@ func toSessionRow(s db.Session) sessionRow {
 		WebURL:           s.WebURL,
 		Project:          s.Project,
 		Machine:          s.Machine,
+		MachineName:      s.MachineName,
 		Agent:            s.Agent,
 		Name:             name,
 		StartedAt:        strval(s.StartedAt),
