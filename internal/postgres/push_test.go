@@ -1264,6 +1264,13 @@ func TestSessionPushFingerprintDiffers(t *testing.T) {
 				return s
 			},
 		},
+		{
+			name: "machine name change",
+			modify: func(s db.Session) db.Session {
+				s.MachineName = "desk"
+				return s
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1277,6 +1284,17 @@ func TestSessionPushFingerprintDiffers(t *testing.T) {
 
 	assert.Equal(t, fp1, sessionPushFingerprint(base, base.Machine, "", "", "", ""),
 		"identical sessions should produce identical fingerprints")
+}
+
+func TestSameSessionOwnerRejectsAnotherMachine(t *testing.T) {
+	assert.False(t, sameSessionOwner("", "install-a", "install-b", "install-b", nil),
+		"a different installation must not take over an owned session id")
+	assert.True(t, sameSessionOwner("install-a", "install-a", "install-a", "desk", nil),
+		"the recorded owner marker keeps the row")
+	assert.True(t, sameSessionOwner("", "local", "install-b", "install-b", nil),
+		"the legacy local sentinel can be claimed by the pusher")
+	assert.True(t, sameSessionOwner("", "install-a", "install-a", "install-a", nil),
+		"the same installation id can update its own row")
 }
 
 // A reviewed session's fingerprint must follow every friction summary field,

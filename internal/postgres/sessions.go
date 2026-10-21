@@ -75,7 +75,8 @@ const pgSessionBaseCols = `id, project, project_assigned, machine, agent,
 	group_key, transcript_fidelity, parser_malformed_lines, is_truncated,
 	secret_leak_count, secrets_rules_version,
 	deleted_at, deletion_cause, termination_status, transcript_revision,
-	trash_includes_codex_pages, pr_links, array_to_json(labels)::text AS labels`
+	trash_includes_codex_pages, pr_links, array_to_json(labels)::text AS labels,
+	machine_name`
 
 // pgSessionCols is the column list for full PG session queries.
 // PostgreSQL retains the source file path used by read-side session
@@ -162,6 +163,7 @@ func scanPGSessionWithSource(
 		&s.SecretLeakCount, &s.SecretsRulesVersion,
 		&deletedAt, &s.DeletionCause, &s.TerminationStatus, &s.TranscriptRevision,
 		&s.TrashIncludesCodexPages, &prLinks, db.LabelsScanner(&s.Labels),
+		&s.MachineName,
 	}
 	if includeSource {
 		targets = append(targets, &s.FilePath)

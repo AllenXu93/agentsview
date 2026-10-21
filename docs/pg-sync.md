@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-09-11
+last_edited: 2026-10-21
 title: PostgreSQL Sync
 description: Share sessions across machines with PostgreSQL push sync, an auto-push service, and a read-only server
 ---
@@ -52,16 +52,19 @@ schema.
 Add a `[pg]` section to `~/.agentsview/config.toml`:
 
 ```toml
-local_machine_name = "Laptop"
+machine_name = "Laptop"
 
 [pg]
 url = "postgres://user:pass@host:5432/dbname?sslmode=require"
 ```
 
-Sessions retain their source installation ID. `local_machine_name` supplies the
-display label after a daemon restart and the next push. The optional
+Sessions retain their source installation ID. `machine_name` (or the older
+`local_machine_name`, or `AGENTSVIEW_MACHINE` when neither is set) is the
+display name stored on each session after a daemon restart. The next push
+copies that name into PostgreSQL `sessions.machine_name`. The optional
 `[pg].machine_name` defaults to the installation ID and only supplies a key for
-legacy `local` rows; it does not rename recorded session keys.
+legacy `local` rows; it does not rename recorded session keys or the display
+name.
 
 For multiple PostgreSQL destinations, use named `[pg.NAME]` blocks and
 `default_pg` instead of the legacy single `[pg]` block. Named target names are
@@ -585,10 +588,19 @@ ______________________________________________________________________
 
 ## Machine Labels
 
-Each session keeps its source installation ID. The web UI uses display labels
-for readability; set `local_machine_name` in the source's `config.toml`, restart
-the daemon, and push again to change the label. Use the multi-host filter in the
-sidebar to show sessions from specific machines.
+Each session keeps its source installation ID and a display name in
+`sessions.machine_name`. The first push into an existing PostgreSQL schema adds
+that column. Rows stay empty until the machine that owns them pushes again.
+Set `machine_name` in the source's `config.toml`, restart the daemon, and push
+again to change the name. `local_machine_name` still works when `machine_name`
+is unset. Use the multi-host filter in the sidebar, `session list --machine`,
+or `usage daily --machine` to show sessions from specific machines. A filter
+accepts an installation ID, an alias, or one unique display name.
+
+A shared session ID is not a reason to merge rows. `pg push` updates a row
+only when this installation already owns it (the same owner marker or machine
+key, including a legacy `local` row). A push from another installation leaves
+the existing row, including its display name, unchanged.
 
 The [installation upgrade](/docs/configuration/#upgrading-historical-machine-keys)
 moves historical local sessions to their installation ID in SQLite. The next
@@ -680,8 +692,8 @@ ______________________________________________________________________
 A typical team setup:
 
 1. **Each developer** configures `[pg]` in their local `config.toml`. The
-   installation ID identifies their sessions; `local_machine_name` sets the
-   display label
+   installation ID identifies their sessions; `machine_name` sets the display
+   name stored on each session and copied by `pg push`
 1. **Each developer** installs `agentsview pg service` or runs
    `agentsview pg push --watch` to sync their sessions
 1. **One server** runs `agentsview pg serve` pointed at the shared PostgreSQL

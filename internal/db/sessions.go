@@ -80,7 +80,7 @@ const sessionBaseCols = `id, project, machine, agent,
 		SELECT 1 FROM session_project_assignments spa
 		WHERE spa.session_id = sessions.id
 	) AS project_assigned,
-	pr_links, ` + sessionLabelsSelectSQL
+	pr_links, ` + sessionLabelsSelectSQL + `, machine_name`
 
 // sessionLabelsSelectSQL reads a session's labels as a sorted JSON array.
 // The correlated lookup seeks the session_labels primary key.
@@ -123,7 +123,7 @@ const sessionPruneCols = `id, project, machine, agent,
 	parser_malformed_lines, is_truncated,
 	deleted_at, termination_status, transcript_revision,
 	file_path, file_size, created_at,
-	pr_links, ` + sessionLabelsSelectSQL
+	pr_links, ` + sessionLabelsSelectSQL + `, machine_name`
 
 // sessionFullCols includes all columns for a complete session record.
 const sessionFullCols = sessionFullColsBeforeParent + "parent_session_id" + sessionFullColsAfterParent
@@ -170,7 +170,7 @@ const sessionFullColsAfterRelationship = `,
 		SELECT 1 FROM session_project_assignments spa
 		WHERE spa.session_id = sessions.id
 	) AS project_assigned,
-	pr_links, ` + sessionLabelsSelectSQL
+	pr_links, ` + sessionLabelsSelectSQL + `, machine_name`
 
 const (
 	// DefaultSessionLimit is the default number of sessions returned.
@@ -228,6 +228,7 @@ func scanSessionRowWithSource(rs rowScanner, includeSource bool) (Session, error
 		&s.TranscriptRevision, &s.CreatedAt, &s.ProjectAssigned,
 		prLinksColumn{&s.PRLinks},
 		labelsColumn{&s.Labels},
+		&s.MachineName,
 	}
 	if includeSource {
 		targets = append(targets, &s.FilePath, &s.FileSize, &s.LocalModifiedAt)
@@ -338,6 +339,7 @@ type Session struct {
 	ID                    string   `json:"id"`
 	Project               string   `json:"project"`
 	Machine               string   `json:"machine"`
+	MachineName           string   `json:"machine_name,omitempty"`
 	Agent                 string   `json:"agent"`
 	AgentLabel            string   `json:"agent_label,omitempty"`
 	Entrypoint            string   `json:"entrypoint,omitempty"`
@@ -1307,6 +1309,7 @@ func scanSessionFullRow(row interface{ Scan(...any) error }, id string) (*Sessio
 		&s.FileHash, &s.LocalModifiedAt,
 		&s.TranscriptRevision, &s.CreatedAt, &s.ProjectAssigned,
 		prLinksColumn{&s.PRLinks}, labelsColumn{&s.Labels},
+		&s.MachineName,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1510,7 +1513,7 @@ func (db *DB) DeleteParserExcludedSessions(ctx context.Context, ids []string) (i
 
 const insertSessionSQL = `
 		INSERT INTO sessions (
-			id, project, machine, agent, first_message, session_name,
+			id, project, machine, machine_name, agent, first_message, session_name,
 			agent_label, entrypoint, session_kind,
 			started_at, ended_at, message_count,
 			user_message_count, parent_session_id,
@@ -1529,7 +1532,7 @@ const insertSessionSQL = `
 			next_ordinal, last_entry_uuid, claude_linear_parse,
 			file_inode, file_device, file_hash,
 			pr_links, parser_relationship_type
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // insertSessionIfAbsentSQL inserts a session only when its id does not already
 // exist, leaving an existing row untouched.
@@ -1540,6 +1543,10 @@ const upsertSessionBaseSQL = insertSessionSQL + `
 		ON CONFLICT(id) DO UPDATE SET
 			project = excluded.project,
 			machine = excluded.machine,
+			machine_name = CASE
+				WHEN excluded.machine_name != '' THEN excluded.machine_name
+				ELSE sessions.machine_name
+			END,
 			agent = excluded.agent,
 			agent_label = excluded.agent_label,
 			entrypoint = excluded.entrypoint,
@@ -1621,7 +1628,7 @@ func parserParentSessionID(s Session) *string {
 func upsertSessionArgs(s Session) []any {
 	s.RelationshipType = SessionRelationship(s)
 	return []any{
-		s.ID, s.Project, s.Machine, s.Agent, s.FirstMessage, s.SessionName,
+		s.ID, s.Project, s.Machine, s.MachineName, s.Agent, s.FirstMessage, s.SessionName,
 		s.AgentLabel, s.Entrypoint, s.SessionKind,
 		s.StartedAt, s.EndedAt, s.MessageCount,
 		s.UserMessageCount, s.ParentSessionID, parserParentSessionID(s),
@@ -1680,6 +1687,7 @@ func (db *DB) upsertSession(ctx context.Context,
 	s = db.sessionForStorage(s)
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.applyLocalMachineName(&s)
 	writer := db.getWriter()
 	// The upsert leaves stored titles, signals, and findings alone on
 	// purpose in full mode; a usage archive must not keep any that predate
@@ -1843,6 +1851,7 @@ func (db *DB) ClearSessionSourceMissing(ctx context.Context, id string) error {
 func (db *DB) insertSessionIfAbsent(ctx context.Context, s Session) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.applyLocalMachineName(&s)
 
 	var excluded int
 	_ = db.getWriter().QueryRowContext(
@@ -6258,6 +6267,7 @@ func (db *DB) FindPruneCandidates(ctx context.Context,
 			&s.DeletedAt, &s.TerminationStatus, &s.TranscriptRevision,
 			&s.FilePath, &s.FileSize, &s.CreatedAt,
 			prLinksColumn{&s.PRLinks}, labelsColumn{&s.Labels},
+			&s.MachineName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning prune candidate: %w", err)
@@ -6649,6 +6659,7 @@ func (db *DB) ListSessionsModifiedBetween(
 			&s.FileHash, &s.LocalModifiedAt,
 			&s.TranscriptRevision, &s.CreatedAt, &s.ProjectAssigned,
 			prLinksColumn{&s.PRLinks}, labelsColumn{&s.Labels},
+			&s.MachineName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning session: %w", err)
@@ -6760,6 +6771,7 @@ func (db *DB) ListSessionsForMirrorWindow(
 			&s.FileHash, &s.LocalModifiedAt,
 			&s.TranscriptRevision, &s.CreatedAt, &s.ProjectAssigned,
 			prLinksColumn{&s.PRLinks}, labelsColumn{&s.Labels},
+			&s.MachineName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning session: %w", err)

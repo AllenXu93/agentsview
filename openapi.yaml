@@ -2638,6 +2638,8 @@ components:
           type: string
         machine:
           type: string
+        machine_name:
+          type: string
         message_count:
           format: int64
           type: integer
@@ -6781,6 +6783,8 @@ components:
         local_modified_at:
           type: string
         machine:
+          type: string
+        machine_name:
           type: string
         message_count:
           format: int64

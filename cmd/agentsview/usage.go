@@ -69,6 +69,7 @@ type UsageDailyConfig struct {
 	Until     string
 	All       bool
 	Agent     string
+	Machine   string
 	Breakdown bool
 	Offline   bool
 	NoSync    bool
@@ -170,6 +171,7 @@ func runUsageDailyResult(cfg UsageDailyConfig) error {
 		From:     since,
 		To:       until,
 		Agent:    cfg.Agent,
+		Machine:  cfg.Machine,
 		Timezone: tz,
 	}
 	noDefaultRange := cfg.All || cfg.Since != "" || cfg.Until != ""

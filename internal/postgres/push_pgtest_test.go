@@ -3795,3 +3795,52 @@ func TestFilteredPushReconcilesProjectMoveCommittedDuringPush(t *testing.T) {
 	).Scan(&count))
 	assert.Zero(t, count, "a session moved out of scope during the push must leave the remote")
 }
+
+func TestPushCarriesMachineNameAndKeepsForeignOwner(t *testing.T) {
+	pgURL := testPGURL(t)
+	const schema = "agentsview_machine_name_push_test"
+	cleanNamedPGSchema(t, pgURL, schema)
+	t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+
+	ctx := t.Context()
+	pg, err := Open(pgURL, schema, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { pg.Close() })
+	require.NoError(t, EnsureSchema(ctx, pg, schema))
+
+	origin := db.Session{
+		ID: "shared-id", Project: "proj", Machine: "install-a",
+		MachineName: "laptop", Agent: "claude",
+		CreatedAt: "2026-03-11T12:00:00Z",
+	}
+	tx, err := pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	require.NoError(t, writePGSession(ctx, tx, origin, "install-a", nil, pgSessionWriteOptions{
+		Machine: "install-a",
+	}))
+	require.NoError(t, tx.Commit())
+
+	var machine, name string
+	require.NoError(t, pg.QueryRowContext(ctx,
+		`SELECT machine, machine_name FROM sessions WHERE id = $1`, origin.ID,
+	).Scan(&machine, &name))
+	assert.Equal(t, "install-a", machine)
+	assert.Equal(t, "laptop", name)
+
+	other := origin
+	other.Machine = "install-b"
+	other.MachineName = "desktop"
+	tx, err = pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	err = writePGSession(ctx, tx, other, "install-b", nil, pgSessionWriteOptions{
+		Machine: "install-b",
+	})
+	require.ErrorIs(t, err, errSessionOwnershipConflict)
+	require.NoError(t, tx.Rollback())
+
+	require.NoError(t, pg.QueryRowContext(ctx,
+		`SELECT machine, machine_name FROM sessions WHERE id = $1`, origin.ID,
+	).Scan(&machine, &name))
+	assert.Equal(t, "install-a", machine)
+	assert.Equal(t, "laptop", name)
+}

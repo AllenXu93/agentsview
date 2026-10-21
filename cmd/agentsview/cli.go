@@ -613,6 +613,7 @@ func newUsageDailyCommand() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Until, "until", "", "End of window (duration like 28d, or YYYY-MM-DD)")
 	cmd.Flags().BoolVar(&cfg.All, "all", false, "Include all history (overrides default 30-day window)")
 	cmd.Flags().StringVar(&cfg.Agent, "agent", "", "Filter by agent name")
+	cmd.Flags().StringVar(&cfg.Machine, "machine", "", machineFilterHelp)
 	cmd.Flags().BoolVar(&cfg.Breakdown, "breakdown", false, "Show per-model breakdown rows")
 	cmd.Flags().BoolVar(&cfg.Offline, "offline", false, "Use fallback pricing only")
 	cmd.Flags().BoolVar(&cfg.NoSync, "no-sync", false, "Skip on-demand sync before querying")

@@ -2069,6 +2069,9 @@ func orphanSessionCols(ctx context.Context, tx *sql.Tx) string {
 	cols := []string{
 		"id", "project", "machine", "agent", "first_message",
 	}
+	if oldDBHasColumn(ctx, tx, "sessions", "machine_name") {
+		cols = append(cols, "machine_name")
+	}
 	if oldDBHasColumn(ctx, tx, "sessions", "display_name") {
 		cols = append(cols, "display_name")
 	}

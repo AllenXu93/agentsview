@@ -47,6 +47,7 @@ export interface ServiceSessionDetail {
   labels?: string[];
   local_modified_at?: string;
   machine: string;
+  machine_name?: string;
   message_count: number;
   mid_task_compaction_count: number;
   outcome: string;

@@ -585,9 +585,10 @@ RooCode-derived VS Code extension that wrote per-task JSON under
 
 Local imports use a persisted installation ID, so updates and network changes do
 not split sessions across machine identities. `telemetry-install-id` stores the
-ID independently of telemetry. The display label defaults to the current
-hostname; set `local_machine_name` in `config.toml` for a fixed label after a
-daemon restart. Upgrades adopt historical local sessions when the archive has
+ID independently of telemetry. Each session also stores a display name. That
+name comes from `machine_name` in `config.toml`, then `local_machine_name`,
+then `AGENTSVIEW_MACHINE`, then the current hostname. Restart the daemon after
+changing it. Upgrades adopt historical local sessions when the archive has
 saved ownership. Older archives keep historical keys until you select the local
 ones with `agentsview db adopt-machine`; see the
 [upgrade guide](https://agentsview.io/configuration/#upgrading-historical-machine-keys).
@@ -627,6 +628,12 @@ agentsview pg status archive   # show status for one named PG target
 agentsview pg status --all     # show status for every configured PG target
 agentsview pg serve            # serve web UI from the default PG target (read-only)
 ```
+
+Each pushed session keeps its installation ID. The display name comes from
+`machine_name` in `config.toml`, then `local_machine_name`, then
+`AGENTSVIEW_MACHINE`, then the hostname. `pg push` adds `sessions.machine_name`
+on an existing database and leaves a session owned by another installation
+unchanged, even when the session ID matches.
 
 Opt-in [hosted raw processing](docs/hosted-raw-sync.md) lets `pg serve` parse
 uploaded sources directly into PostgreSQL. It requires explicit tenant/schema

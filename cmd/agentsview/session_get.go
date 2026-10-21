@@ -448,7 +448,10 @@ func printSessionDetailHuman(w io.Writer, s *service.SessionDetail) error {
 	fmt.Fprintf(w, "%s %s\n", label("Name"), sanitizeTerminal(name))
 	fmt.Fprintf(w, "%s %s\n", label("Project"), sanitizeTerminal(s.Project))
 	fmt.Fprintf(w, "%s %s\n", label("Agent"), sanitizeTerminal(s.Agent))
-	fmt.Fprintf(w, "%s %s\n", label("Machine"), sanitizeTerminal(s.Machine))
+	fmt.Fprintf(w, "%s %s\n", label("Machine"), sanitizeTerminal(sessionMachineLabel(s.Session)))
+	if s.MachineName != "" && s.Machine != "" && s.Machine != s.MachineName {
+		fmt.Fprintf(w, "%s %s\n", label("Machine ID"), sanitizeTerminal(s.Machine))
+	}
 	if s.ParentSessionID != nil && *s.ParentSessionID != "" {
 		fmt.Fprintf(w, "%s %s (%s)\n", label("Parent"),
 			sanitizeTerminal(*s.ParentSessionID),

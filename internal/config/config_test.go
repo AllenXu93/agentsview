@@ -91,6 +91,7 @@ func setupTestEnv(t *testing.T) string {
 	dir := canonicalTempDir(t)
 
 	t.Setenv("AGENTSVIEW_DATA_DIR", dir)
+	t.Setenv("AGENTSVIEW_MACHINE", "")
 	return dir
 }
 
@@ -2185,6 +2186,7 @@ func TestResolvePG_Defaults(t *testing.T) {
 
 func TestLoadResolvesLocalMachineNameFromHostname(t *testing.T) {
 	setupTestEnv(t)
+	t.Setenv("AGENTSVIEW_MACHINE", "")
 	cfg, err := loadConfigFromPFlags(t)
 	require.NoError(t, err)
 	hostname, err := os.Hostname()
@@ -2239,10 +2241,40 @@ func TestLoadConfiguredLocalMachineName(t *testing.T) {
 		"local_machine_name": "host-a.example",
 		"cursor_secret":      "existing-secret",
 	})
+	t.Setenv("AGENTSVIEW_MACHINE", "from-env")
 	cfg, err := LoadMinimal()
 	require.NoError(t, err)
 	assert.Equal(t, "host-a.example", cfg.LocalMachineName)
 	assert.Equal(t, "existing-secret", cfg.CursorSecret)
+}
+
+func TestLoadMachineNamePriority(t *testing.T) {
+	t.Run("env beats hostname", func(t *testing.T) {
+		setupTestEnv(t)
+		t.Setenv("AGENTSVIEW_MACHINE", " from-env ")
+		cfg, err := LoadMinimal()
+		require.NoError(t, err)
+		assert.Equal(t, "from-env", cfg.LocalMachineName)
+	})
+
+	t.Run("machine_name beats local_machine_name and env", func(t *testing.T) {
+		dir := setupTestEnv(t)
+		t.Setenv("AGENTSVIEW_MACHINE", "from-env")
+		writeConfig(t, dir, map[string]any{
+			"machine_name":       "from-config",
+			"local_machine_name": "from-legacy",
+		})
+		cfg, err := LoadMinimal()
+		require.NoError(t, err)
+		assert.Equal(t, "from-config", cfg.LocalMachineName)
+	})
+
+	t.Run("blank machine_name is rejected", func(t *testing.T) {
+		dir := setupTestEnv(t)
+		writeConfig(t, dir, map[string]any{"machine_name": " "})
+		_, err := LoadMinimal()
+		require.ErrorContains(t, err, "machine_name")
+	})
 }
 
 func TestLoadRejectsInvalidLocalMachineName(t *testing.T) {

@@ -852,6 +852,11 @@ type DB struct {
 	// extraction keep the strict boundary.
 	extractAllowCandidateFindings atomic.Bool
 
+	// localInstallationID and localMachineName stamp sessions recorded by
+	// this archive. Guarded by mu.
+	localInstallationID string
+	localMachineName    string
+
 	cursorMu     sync.RWMutex
 	cursorSecret []byte
 
@@ -2826,6 +2831,10 @@ func schemaColumnMigrations() []schemaColumnMigration {
 		{
 			"session_project_identity_snapshots", "recorded_git_remote",
 			"ALTER TABLE session_project_identity_snapshots ADD COLUMN recorded_git_remote TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"sessions", "machine_name",
+			"ALTER TABLE sessions ADD COLUMN machine_name TEXT NOT NULL DEFAULT ''",
 		},
 	}
 }

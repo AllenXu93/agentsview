@@ -322,10 +322,19 @@ func pluralSession(n int) string {
 // push the trailing CWD column off the right edge of the terminal.
 const sessionNameWidth = 44
 
+// sessionMachineLabel is the display name stored on the session, or the
+// installation ID when no name has been recorded yet.
+func sessionMachineLabel(s db.Session) string {
+	if name := strings.TrimSpace(s.MachineName); name != "" {
+		return name
+	}
+	return s.Machine
+}
+
 // printSessionListHuman writes a resume-oriented table of the session
 // list: an in-flight marker for recently-active sessions, the full session
 // ID (the copyable handle for `session get`/`messages`/`usage`), the
-// humanized AGE since last activity, AGENT, PROJECT, BRANCH, MSGS, NAME,
+// humanized AGE since last activity, AGENT, PROJECT, MACHINE, BRANCH, MSGS, NAME,
 // and a ~-collapsed CWD. now and home are passed in so output is
 // deterministic under test. A trailing hint is printed when another page is
 // available. Prints "(no sessions)" for empty lists. Every session-derived
@@ -339,19 +348,20 @@ func printSessionListHuman(
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "\tID\tAGE\tAGENT\tPROJECT\tBRANCH\tMSGS\tNAME\tCWD")
+	fmt.Fprintln(tw, "\tID\tAGE\tAGENT\tPROJECT\tMACHINE\tBRANCH\tMSGS\tNAME\tCWD")
 	for _, s := range list.Sessions {
 		marker := ""
 		if isSessionRecentlyActive(s, now) {
 			marker = activeMarker
 		}
 		name := truncName(sessionDisplayName(s), sessionNameWidth)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 			marker,
 			sanitizeTerminal(s.ID),
 			humanizeSessionAge(s, now),
 			sanitizeTerminal(orEmDash(s.Agent)),
 			sanitizeTerminal(orEmDash(s.Project)),
+			sanitizeTerminal(orEmDash(sessionMachineLabel(s))),
 			sanitizeTerminal(orEmDash(s.GitBranch)),
 			s.MessageCount,
 			sanitizeTerminal(name),

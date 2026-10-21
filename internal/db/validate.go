@@ -331,6 +331,7 @@ func SanitizeSession(s *Session) ValidationStats {
 	sanitizeStringField(&s.Project, &stats)
 	sanitizeStringField(&s.GroupKey, &stats)
 	sanitizeStringField(&s.Machine, &stats)
+	sanitizeStringField(&s.MachineName, &stats)
 	sanitizeStringField(&s.Agent, &stats)
 	sanitizeStringField(&s.AgentLabel, &stats)
 	sanitizeStringField(&s.Entrypoint, &stats)

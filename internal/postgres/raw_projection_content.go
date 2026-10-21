@@ -66,6 +66,7 @@ func rawContentRevision(p ingest.PreparedSession) (string, error) {
 	s := &p.Session
 	s.ID = ""
 	s.Machine = ""
+	s.MachineName = ""
 	s.DisplayName = nil
 	s.CreatedAt = ""
 	s.LocalModifiedAt = nil
@@ -148,7 +149,9 @@ func rawContentRevision(p ingest.PreparedSession) (string, error) {
 
 var (
 	rawSessionType         = reflect.TypeFor[db.Session]()
-	rawPostV1SessionFields = map[string]bool{"PRLinks": true, "Labels": true}
+	rawPostV1SessionFields = map[string]bool{
+		"PRLinks": true, "Labels": true, "MachineName": true,
+	}
 )
 
 func rawCanonicalValue(v reflect.Value, field string) (any, error) {
